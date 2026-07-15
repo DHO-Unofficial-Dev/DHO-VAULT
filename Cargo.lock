@@ -55,6 +55,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dho-extract"
+version = "0.1.0"
+dependencies = [
+ "dho-core",
+ "dho-image",
+ "flate2",
+]
+
+[[package]]
 name = "dho-image"
 version = "0.1.0"
 dependencies = [

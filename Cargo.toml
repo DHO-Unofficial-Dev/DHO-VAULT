@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/dho-core", "crates/dho-image"]
+members = ["crates/dho-core", "crates/dho-extract", "crates/dho-image"]
 resolver = "3"
 
 [workspace.package]
