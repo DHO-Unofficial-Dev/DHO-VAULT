@@ -2,6 +2,11 @@
 
 //! Read-only parsers for DHO client resource archives.
 
+pub mod block;
 pub mod index;
 
+pub use block::{
+    BlockDecodeError, BlockLocation, BlockScanError, DataSegment, MwcBlock, ScannedDataFile,
+    UnresolvedGap, scan_data_file,
+};
 pub use index::{ArchiveHeader, IndexParseError, IndexRecord, IndexedArchive};
