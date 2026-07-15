@@ -2,9 +2,13 @@
 
 //! Read-only parsers for DHO client resource archives.
 
+pub mod archive;
 pub mod block;
 pub mod index;
 
+pub use archive::{
+    ArchiveBlock, ArchiveBlockKind, ArchiveDiagnostic, ArchiveLayout, build_archive_layout,
+};
 pub use block::{
     BlockDecodeError, BlockLocation, BlockScanError, DataSegment, MwcBlock, ScannedDataFile,
     UnresolvedGap, scan_data_file,
