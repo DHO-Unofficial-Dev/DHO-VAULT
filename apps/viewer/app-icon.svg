@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#12212E" />
+      <stop offset="100%" stop-color="#0B1620" />
+    </linearGradient>
+  </defs>
+
+  <circle cx="512" cy="512" r="500" fill="url(#bg-grad)" />
+
+  <g stroke="#D8A84B" stroke-linecap="square" stroke-linejoin="miter" fill="none">
+    <circle cx="512" cy="512" r="440" stroke-width="10" opacity="0.5" />
+    <circle cx="512" cy="512" r="270" stroke-width="10" opacity="0.3" />
+  </g>
+
+  <path d="M512 140 L580 512 L512 884 L444 512 Z" fill="#D8A84B" />
+  <path d="M140 512 L512 444 L884 512 L512 580 Z" fill="#D8A84B" opacity="0.5" />
+  <circle cx="512" cy="512" r="34" fill="#D8A84B" />
+
+  <g aria-label="Vault badge">
+    <circle cx="794" cy="794" r="154" fill="#12212E" stroke="#D8A84B" stroke-width="18" />
+    <rect x="706" y="756" width="176" height="122" rx="12" fill="#0B1620" stroke="#D8A84B" stroke-width="16" />
+    <path d="M744 756 V724 C744 658 844 658 844 724 V756" fill="none" stroke="#D8A84B" stroke-width="20" />
+    <circle cx="794" cy="811" r="18" fill="#D8A84B" />
+    <path d="M794 826 V850" stroke="#D8A84B" stroke-width="16" />
+  </g>
+</svg>

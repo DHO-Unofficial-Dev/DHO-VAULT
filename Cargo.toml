@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/dho-core", "crates/dho-extract", "crates/dho-image"]
+members = [
+    "apps/viewer/src-tauri",
+    "crates/dho-core",
+    "crates/dho-extract",
+    "crates/dho-image",
+]
 resolver = "3"
 
 [workspace.package]
