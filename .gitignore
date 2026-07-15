@@ -1,0 +1,36 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Tauri / frontend
+/node_modules/
+/dist/
+/.vite/
+
+# Local runtime and extracted game resources
+/data/
+/cache/
+/exports/
+/thumbnails/
+/logs/
+*.log
+
+# Local configuration and secrets
+/.env
+/.env.*
+!/.env.example
+/config.local.toml
+
+# Test and analysis artifacts
+/docs/
+/coverage/
+/tmp/
+/*.dump
+
+# Editors and operating systems
+/.idea/
+/.vscode/
+*.swp
+.DS_Store
+Thumbs.db
