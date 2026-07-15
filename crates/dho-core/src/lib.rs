@@ -7,7 +7,8 @@ pub mod block;
 pub mod index;
 
 pub use archive::{
-    ArchiveBlock, ArchiveBlockKind, ArchiveDiagnostic, ArchiveLayout, build_archive_layout,
+    ArchiveBlock, ArchiveBlockDecodeError, ArchiveBlockKind, ArchiveDiagnostic, ArchiveLayout,
+    RawBlock, build_archive_layout,
 };
 pub use block::{
     BlockDecodeError, BlockLocation, BlockScanError, DataSegment, MwcBlock, ScannedDataFile,

@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::{DataSegment, IndexedArchive, MwcBlock, ScannedDataFile, UnresolvedGap};
+use crate::{
+    BlockDecodeError, BlockLocation, DataSegment, IndexedArchive, MwcBlock, ScannedDataFile,
+    UnresolvedGap,
+};
+use std::borrow::Cow;
 use std::collections::HashSet;
+use std::error::Error;
+use std::fmt;
 
 /// A block whose position in the archive stream has been established.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,19 +17,157 @@ pub struct ArchiveBlock {
     pub kind: ArchiveBlockKind,
 }
 
+/// A headerless block whose resource meaning was established by cross-validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawBlock {
+    location: BlockLocation,
+    len: usize,
+}
+
+impl RawBlock {
+    fn from_gap(gap: UnresolvedGap) -> Self {
+        Self {
+            location: gap.location,
+            len: gap.len,
+        }
+    }
+
+    pub fn location(self) -> BlockLocation {
+        self.location
+    }
+
+    pub fn len(self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
 /// The storage form of one logical image block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveBlockKind {
     Zlib(MwcBlock),
-    Raw(UnresolvedGap),
+    Raw(RawBlock),
 }
 
 impl ArchiveBlockKind {
+    /// Byte position of this block in its numbered data file.
+    pub fn location(self) -> BlockLocation {
+        match self {
+            Self::Zlib(block) => block.location,
+            Self::Raw(block) => block.location,
+        }
+    }
+
     /// Number of bytes made available after decoding the block.
     pub fn uncompressed_size(self) -> u64 {
         match self {
             Self::Zlib(block) => u64::from(block.uncompressed_size),
-            Self::Raw(gap) => gap.len as u64,
+            Self::Raw(block) => block.len as u64,
+        }
+    }
+
+    /// Returns decoded bytes with one output limit for compressed and raw storage.
+    pub fn decode(
+        self,
+        file_bytes: &[u8],
+        max_output_size: usize,
+    ) -> Result<Cow<'_, [u8]>, ArchiveBlockDecodeError> {
+        match self {
+            Self::Zlib(block) => block
+                .decode(file_bytes, max_output_size)
+                .map(Cow::Owned)
+                .map_err(ArchiveBlockDecodeError::Zlib),
+            Self::Raw(block) => {
+                if block.len > max_output_size {
+                    return Err(ArchiveBlockDecodeError::OutputLimitExceeded {
+                        location: block.location,
+                        block_size: block.len,
+                        max_output_size,
+                    });
+                }
+                let end = block.location.offset.checked_add(block.len).ok_or(
+                    ArchiveBlockDecodeError::RawDataEndOverflow {
+                        location: block.location,
+                        block_size: block.len,
+                    },
+                )?;
+                let bytes = file_bytes.get(block.location.offset..end).ok_or(
+                    ArchiveBlockDecodeError::RawDataOutOfBounds {
+                        location: block.location,
+                        block_size: block.len,
+                        file_size: file_bytes.len(),
+                    },
+                )?;
+                Ok(Cow::Borrowed(bytes))
+            }
+        }
+    }
+}
+
+/// Failures found while obtaining bytes from a resolved archive block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArchiveBlockDecodeError {
+    Zlib(BlockDecodeError),
+    OutputLimitExceeded {
+        location: BlockLocation,
+        block_size: usize,
+        max_output_size: usize,
+    },
+    RawDataEndOverflow {
+        location: BlockLocation,
+        block_size: usize,
+    },
+    RawDataOutOfBounds {
+        location: BlockLocation,
+        block_size: usize,
+        file_size: usize,
+    },
+}
+
+impl fmt::Display for ArchiveBlockDecodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Zlib(error) => error.fmt(formatter),
+            Self::OutputLimitExceeded {
+                location,
+                block_size,
+                max_output_size,
+            } => write!(
+                formatter,
+                "raw block at file {} offset {} contains {block_size} bytes, exceeding limit {max_output_size}",
+                location.file_number, location.offset
+            ),
+            Self::RawDataEndOverflow {
+                location,
+                block_size,
+            } => write!(
+                formatter,
+                "raw block end overflows this platform at file {} offset {}: block size {block_size}",
+                location.file_number, location.offset
+            ),
+            Self::RawDataOutOfBounds {
+                location,
+                block_size,
+                file_size,
+            } => write!(
+                formatter,
+                "raw block is outside file {}: offset {}, block size {block_size}, file size {file_size}",
+                location.file_number, location.offset
+            ),
+        }
+    }
+}
+
+impl Error for ArchiveBlockDecodeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Zlib(error) => Some(error),
+            Self::OutputLimitExceeded { .. }
+            | Self::RawDataEndOverflow { .. }
+            | Self::RawDataOutOfBounds { .. } => None,
         }
     }
 }
@@ -179,7 +323,10 @@ pub fn build_archive_layout(
     let (blocks, unresolved_gaps) = if let Some(kinds) = resolved_kinds {
         let raw_gap = kinds.iter().find_map(|kind| match kind {
             ArchiveBlockKind::Zlib(_) => None,
-            ArchiveBlockKind::Raw(gap) => Some(*gap),
+            ArchiveBlockKind::Raw(block) => Some(UnresolvedGap {
+                location: block.location,
+                len: block.len,
+            }),
         });
         let blocks = kinds
             .into_iter()
@@ -238,7 +385,7 @@ fn resolve_single_raw_gap(
         .iter()
         .map(|segment| match segment {
             DataSegment::ZlibBlock(block) => ArchiveBlockKind::Zlib(*block),
-            DataSegment::UnresolvedGap(gap) => ArchiveBlockKind::Raw(*gap),
+            DataSegment::UnresolvedGap(gap) => ArchiveBlockKind::Raw(RawBlock::from_gap(*gap)),
         })
         .collect::<Vec<_>>();
     let gap_position = kinds
@@ -372,6 +519,9 @@ fn image_byte_size(width: u32, height: u32) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::{ArchiveHeader, BlockLocation, IndexRecord};
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
 
     fn index(
         group_count: u32,
@@ -560,6 +710,102 @@ mod tests {
                     block_index: 1,
                     block_count: 1,
                 })
+        );
+    }
+
+    #[test]
+    fn decodes_zlib_storage_to_owned_bytes() {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"data").expect("write zlib input");
+        let compressed = encoder.finish().expect("finish zlib stream");
+        let kind = ArchiveBlockKind::Zlib(MwcBlock {
+            location: BlockLocation {
+                file_number: 1,
+                offset: 0,
+            },
+            uncompressed_size: 4,
+            compressed_size: compressed.len() as u32,
+            payload_offset: 0,
+        });
+
+        let decoded = kind.decode(&compressed, 4).expect("decode zlib block");
+
+        assert!(matches!(decoded, Cow::Owned(bytes) if bytes == b"data"));
+    }
+
+    #[test]
+    fn reads_raw_storage_without_copying() {
+        let kind = ArchiveBlockKind::Raw(RawBlock {
+            location: BlockLocation {
+                file_number: 2,
+                offset: 1,
+            },
+            len: 2,
+        });
+
+        let decoded = kind
+            .decode(&[0x00, 0x11, 0x22, 0x33], 2)
+            .expect("read raw block");
+
+        assert!(matches!(decoded, Cow::Borrowed(bytes) if bytes == [0x11, 0x22]));
+    }
+
+    #[test]
+    fn enforces_the_output_limit_for_raw_storage() {
+        let kind = ArchiveBlockKind::Raw(RawBlock {
+            location: BlockLocation {
+                file_number: 2,
+                offset: 0,
+            },
+            len: 4,
+        });
+
+        assert_eq!(
+            kind.decode(&[0; 4], 3),
+            Err(ArchiveBlockDecodeError::OutputLimitExceeded {
+                location: kind.location(),
+                block_size: 4,
+                max_output_size: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_raw_storage_outside_the_file() {
+        let kind = ArchiveBlockKind::Raw(RawBlock {
+            location: BlockLocation {
+                file_number: 2,
+                offset: 2,
+            },
+            len: 3,
+        });
+
+        assert_eq!(
+            kind.decode(&[0; 4], 3),
+            Err(ArchiveBlockDecodeError::RawDataOutOfBounds {
+                location: kind.location(),
+                block_size: 3,
+                file_size: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_raw_end_offset_overflow() {
+        let kind = ArchiveBlockKind::Raw(RawBlock {
+            location: BlockLocation {
+                file_number: 2,
+                offset: usize::MAX,
+            },
+            len: 1,
+        });
+
+        assert_eq!(
+            kind.decode(&[], 1),
+            Err(ArchiveBlockDecodeError::RawDataEndOverflow {
+                location: kind.location(),
+                block_size: 1,
+            })
         );
     }
 
