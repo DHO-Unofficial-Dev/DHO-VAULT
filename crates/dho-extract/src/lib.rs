@@ -9,8 +9,8 @@ use dho_core::{
 use dho_image::{PixelDecodeError, PngEncodeError, RgbaImage};
 use std::error::Error;
 use std::fmt;
-use std::fs;
-use std::io;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 /// A validated two-letter filename prefix such as `sc` or `sd`.
@@ -52,7 +52,7 @@ pub struct ExtractedResource {
 #[derive(Debug)]
 struct ArchiveDataFile {
     file_number: u32,
-    bytes: Box<[u8]>,
+    path: PathBuf,
 }
 
 /// A single archive family loaded once, with images decoded only when requested.
@@ -84,10 +84,7 @@ impl LoadedArchive {
                     source,
                 })?;
             scanned_files.push(scanned);
-            data_files.push(ArchiveDataFile {
-                file_number,
-                bytes: bytes.into_boxed_slice(),
-            });
+            data_files.push(ArchiveDataFile { file_number, path });
         }
 
         let layout = build_archive_layout(&index, &scanned_files);
@@ -163,9 +160,15 @@ impl LoadedArchive {
             .ok_or(ExtractError::DataFileUnavailable {
                 file_number: location.file_number,
             })?;
+        let stored_bytes = read_file_range(
+            "read archive block",
+            &data_file.path,
+            block.kind.stored_offset(),
+            block.kind.stored_size(),
+        )?;
         let decoded = block
             .kind
-            .decode(&data_file.bytes, max_output_size)
+            .decode_stored(&stored_bytes, max_output_size)
             .map_err(ExtractError::BlockDecode)?;
         let image = RgbaImage::from_bgra(record.width, record.height, &decoded)
             .map_err(ExtractError::PixelDecode)?;
@@ -186,6 +189,38 @@ fn read_file(operation: &'static str, path: &Path) -> Result<Vec<u8>, ExtractErr
         path: path.to_owned(),
         source,
     })
+}
+
+fn read_file_range(
+    operation: &'static str,
+    path: &Path,
+    offset: usize,
+    len: usize,
+) -> Result<Vec<u8>, ExtractError> {
+    let mut file = File::open(path).map_err(|source| ExtractError::Io {
+        operation,
+        path: path.to_owned(),
+        source,
+    })?;
+    let offset = u64::try_from(offset).map_err(|_| ExtractError::Io {
+        operation,
+        path: path.to_owned(),
+        source: io::Error::new(io::ErrorKind::InvalidInput, "block offset exceeds u64"),
+    })?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|source| ExtractError::Io {
+            operation,
+            path: path.to_owned(),
+            source,
+        })?;
+    let mut bytes = vec![0; len];
+    file.read_exact(&mut bytes)
+        .map_err(|source| ExtractError::Io {
+            operation,
+            path: path.to_owned(),
+            source,
+        })?;
+    Ok(bytes)
 }
 
 /// Invalid archive filename prefix.
@@ -416,6 +451,24 @@ mod tests {
         let extracted = archive.extract_png(key(), 4).expect("extract raw PNG");
 
         assert_eq!(&extracted.png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn reads_the_data_file_only_when_a_resource_is_extracted() {
+        let directory = TestDirectory::new();
+        write_archive(&directory.0, &[[7, 0, 1, 1, 9]], &[1, 2, 3, 4]);
+        let archive = LoadedArchive::open(&directory.0, "sc").expect("open test archive");
+        fs::remove_file(directory.0.join("sc000001.bin")).expect("remove test data file");
+
+        let error = archive.extract_png(key(), 4).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ExtractError::Io {
+                operation: "read archive block",
+                ..
+            }
+        ));
     }
 
     #[test]

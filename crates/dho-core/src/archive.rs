@@ -69,6 +69,52 @@ impl ArchiveBlockKind {
         }
     }
 
+    /// Byte offset where the stored payload for this block begins.
+    pub fn stored_offset(self) -> usize {
+        match self {
+            Self::Zlib(block) => block.payload_offset,
+            Self::Raw(block) => block.location.offset,
+        }
+    }
+
+    /// Number of stored bytes that must be read before decoding this block.
+    pub fn stored_size(self) -> usize {
+        match self {
+            Self::Zlib(block) => block.compressed_size as usize,
+            Self::Raw(block) => block.len,
+        }
+    }
+
+    /// Decodes only the exact stored range previously read for this block.
+    pub fn decode_stored(
+        self,
+        stored_bytes: &[u8],
+        max_output_size: usize,
+    ) -> Result<Vec<u8>, ArchiveBlockDecodeError> {
+        match self {
+            Self::Zlib(block) => block
+                .decode_payload(stored_bytes, max_output_size)
+                .map_err(ArchiveBlockDecodeError::Zlib),
+            Self::Raw(block) => {
+                if block.len > max_output_size {
+                    return Err(ArchiveBlockDecodeError::OutputLimitExceeded {
+                        location: block.location,
+                        block_size: block.len,
+                        max_output_size,
+                    });
+                }
+                if stored_bytes.len() != block.len {
+                    return Err(ArchiveBlockDecodeError::StoredSizeMismatch {
+                        location: block.location,
+                        expected_size: block.len,
+                        actual_size: stored_bytes.len(),
+                    });
+                }
+                Ok(stored_bytes.to_vec())
+            }
+        }
+    }
+
     /// Returns decoded bytes with one output limit for compressed and raw storage.
     pub fn decode(
         self,
@@ -125,6 +171,11 @@ pub enum ArchiveBlockDecodeError {
         block_size: usize,
         file_size: usize,
     },
+    StoredSizeMismatch {
+        location: BlockLocation,
+        expected_size: usize,
+        actual_size: usize,
+    },
 }
 
 impl fmt::Display for ArchiveBlockDecodeError {
@@ -157,6 +208,15 @@ impl fmt::Display for ArchiveBlockDecodeError {
                 "raw block is outside file {}: offset {}, block size {block_size}, file size {file_size}",
                 location.file_number, location.offset
             ),
+            Self::StoredSizeMismatch {
+                location,
+                expected_size,
+                actual_size,
+            } => write!(
+                formatter,
+                "stored block size mismatch at file {} offset {}: expected {expected_size}, got {actual_size}",
+                location.file_number, location.offset
+            ),
         }
     }
 }
@@ -167,7 +227,8 @@ impl Error for ArchiveBlockDecodeError {
             Self::Zlib(error) => Some(error),
             Self::OutputLimitExceeded { .. }
             | Self::RawDataEndOverflow { .. }
-            | Self::RawDataOutOfBounds { .. } => None,
+            | Self::RawDataOutOfBounds { .. }
+            | Self::StoredSizeMismatch { .. } => None,
         }
     }
 }
@@ -734,6 +795,30 @@ mod tests {
     }
 
     #[test]
+    fn decodes_only_the_stored_zlib_payload() {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"range").expect("write zlib input");
+        let compressed = encoder.finish().expect("finish zlib stream");
+        let kind = ArchiveBlockKind::Zlib(MwcBlock {
+            location: BlockLocation {
+                file_number: 3,
+                offset: 40,
+            },
+            uncompressed_size: 5,
+            compressed_size: compressed.len() as u32,
+            payload_offset: 52,
+        });
+
+        let decoded = kind
+            .decode_stored(&compressed, 5)
+            .expect("decode stored payload");
+
+        assert_eq!(kind.stored_offset(), 52);
+        assert_eq!(kind.stored_size(), compressed.len());
+        assert_eq!(decoded, b"range");
+    }
+
+    #[test]
     fn reads_raw_storage_without_copying() {
         let kind = ArchiveBlockKind::Raw(RawBlock {
             location: BlockLocation {
@@ -748,6 +833,45 @@ mod tests {
             .expect("read raw block");
 
         assert!(matches!(decoded, Cow::Borrowed(bytes) if bytes == [0x11, 0x22]));
+    }
+
+    #[test]
+    fn decodes_only_the_stored_raw_range() {
+        let kind = ArchiveBlockKind::Raw(RawBlock {
+            location: BlockLocation {
+                file_number: 2,
+                offset: 7,
+            },
+            len: 3,
+        });
+
+        let decoded = kind
+            .decode_stored(&[0x11, 0x22, 0x33], 3)
+            .expect("decode stored raw range");
+
+        assert_eq!(kind.stored_offset(), 7);
+        assert_eq!(kind.stored_size(), 3);
+        assert_eq!(decoded, [0x11, 0x22, 0x33]);
+    }
+
+    #[test]
+    fn rejects_a_stored_raw_range_with_the_wrong_size() {
+        let kind = ArchiveBlockKind::Raw(RawBlock {
+            location: BlockLocation {
+                file_number: 2,
+                offset: 7,
+            },
+            len: 3,
+        });
+
+        assert_eq!(
+            kind.decode_stored(&[0x11], 3),
+            Err(ArchiveBlockDecodeError::StoredSizeMismatch {
+                location: kind.location(),
+                expected_size: 3,
+                actual_size: 1,
+            })
+        );
     }
 
     #[test]
