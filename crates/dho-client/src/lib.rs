@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Read-only discovery and inspection of a DHO game client installation.
+
 use dho_core::{IndexParseError, IndexedArchive};
 use serde::Serialize;
 use std::error::Error;
@@ -8,7 +10,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-const SUPPORTED_PREFIXES: [&str; 4] = ["sb", "sc", "sd", "is"];
+pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 4] = ["sb", "sc", "sd", "is"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,7 +53,7 @@ pub fn inspect_game_directory(
     }
 
     let mut archives = Vec::new();
-    for prefix in SUPPORTED_PREFIXES {
+    for prefix in SUPPORTED_ARCHIVE_PREFIXES {
         let path = resource_directory.join(format!("{prefix}000000.bin"));
         if !path.is_file() {
             continue;

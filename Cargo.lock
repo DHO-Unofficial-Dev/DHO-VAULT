@@ -545,10 +545,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dho-client"
+version = "0.1.0"
+dependencies = [
+ "dho-core",
+ "serde",
+]
+
+[[package]]
 name = "dho-core"
 version = "0.1.0"
 dependencies = [
  "flate2",
+]
+
+[[package]]
+name = "dho-curator"
+version = "0.1.0"
+dependencies = [
+ "dho-client",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
 ]
 
 [[package]]
@@ -571,8 +589,7 @@ dependencies = [
 name = "dho-viewer"
 version = "0.1.0"
 dependencies = [
- "dho-core",
- "serde",
+ "dho-client",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

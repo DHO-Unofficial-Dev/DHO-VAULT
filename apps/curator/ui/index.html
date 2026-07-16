@@ -1,0 +1,70 @@
+<!-- SPDX-License-Identifier: MPL-2.0 -->
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>DHO Vault Curator</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <p class="eyebrow">CURATOR WORKSPACE</p>
+        <h1>DHO Vault</h1>
+        <p class="summary">
+          원본 리소스의 구간과 조립 후보를 사람이 직접 확인하는 검수 도구
+        </p>
+      </header>
+
+      <section class="notice-card" aria-labelledby="notice-title">
+        <span class="notice-mark" aria-hidden="true">!</span>
+        <div>
+          <h2 id="notice-title">검수 전용 화면</h2>
+          <p>
+            이 화면의 정보는 확정된 카테고리가 아닙니다. 여러 표본을 함께 확인한 뒤에만 분류 규칙으로 기록합니다.
+          </p>
+        </div>
+      </section>
+
+      <section class="picker-card" aria-labelledby="picker-title">
+        <div>
+          <h2 id="picker-title">게임 폴더 연결</h2>
+          <p>GVOnline.exe가 있는 대항해시대 온라인 설치 폴더를 선택하세요.</p>
+        </div>
+        <button id="select-game-directory" type="button">게임 폴더 선택</button>
+      </section>
+
+      <section class="status-card" aria-labelledby="status-title" aria-live="polite">
+        <div class="status-mark" aria-hidden="true"></div>
+        <div class="status-content">
+          <h2 id="status-title">게임 폴더를 선택해 주세요</h2>
+          <p id="status-message">
+            게임 파일을 변경하지 않고 지원하는 MWC 인덱스의 기본 정보만 확인합니다.
+          </p>
+          <dl id="directory-details" class="directory-details" hidden>
+            <div>
+              <dt>게임 폴더</dt>
+              <dd id="game-directory"></dd>
+            </div>
+            <div>
+              <dt>리소스 폴더</dt>
+              <dd id="resource-directory"></dd>
+            </div>
+          </dl>
+          <ul id="archive-list" class="archive-list" aria-label="검수할 MWC 계열"></ul>
+        </div>
+      </section>
+
+      <section class="next-card" aria-labelledby="next-title">
+        <p class="section-label">NEXT REVIEW STEP</p>
+        <h2 id="next-title">여러 구간의 표본을 함께 비교합니다</h2>
+        <p>
+          다음 단계에서는 한 장이 아니라 제한된 수의 이미지를 접촉 시트로 표시합니다. 표본 수와 간격은 실제 화면을 보며 조정합니다.
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

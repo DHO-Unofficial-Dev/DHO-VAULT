@@ -1,6 +1,8 @@
 [workspace]
 members = [
+    "apps/curator/src-tauri",
     "apps/viewer/src-tauri",
+    "crates/dho-client",
     "crates/dho-core",
     "crates/dho-extract",
     "crates/dho-image",
