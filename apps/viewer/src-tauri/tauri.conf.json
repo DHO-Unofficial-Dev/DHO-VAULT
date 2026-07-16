@@ -7,6 +7,7 @@
     "frontendDist": "../ui"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "label": "main",
@@ -20,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'"
     }
   },
   "bundle": {

@@ -9,7 +9,10 @@ build = "build.rs"
 tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
+dho-core = { path = "../../../crates/dho-core" }
+serde = { version = "=1.0.228", features = ["derive"] }
 tauri = { version = "=2.11.5", features = [] }
+tauri-plugin-dialog = { version = "=2.7.1", default-features = false }
 
 [lints]
 workspace = true
