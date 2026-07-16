@@ -1,0 +1,447 @@
+// SPDX-License-Identifier: MPL-2.0
+
+//! Human-reviewed category metadata kept separate from raw archive facts.
+
+mod sb;
+
+use serde::Serialize;
+
+/// One raw record identity used by the category resolver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogRecordKey<'a> {
+    pub archive: &'a str,
+    pub group_code: u32,
+    pub icon_id: u32,
+}
+
+/// A display hierarchy such as `장비 > 방어구 > 머리`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct CategoryPath(&'static [&'static str]);
+
+impl CategoryPath {
+    pub const fn new(segments: &'static [&'static str]) -> Self {
+        Self(segments)
+    }
+
+    pub const fn segments(self) -> &'static [&'static str] {
+        self.0
+    }
+
+    pub fn display_name(self) -> String {
+        self.0.join(" > ")
+    }
+}
+
+/// Where a category hierarchy came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CategorySource {
+    InGame,
+    Custom,
+    Temporary,
+}
+
+/// Review state used for both boundaries and meanings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerificationStatus {
+    Unknown,
+    Candidate,
+    HumanVerified,
+    Rejected,
+}
+
+/// The resolved category for one record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordClassification {
+    pub category: Option<CategoryPath>,
+    pub category_source: Option<CategorySource>,
+    pub boundary_status: VerificationStatus,
+    pub meaning_status: VerificationStatus,
+}
+
+impl RecordClassification {
+    pub const fn unknown() -> Self {
+        Self {
+            category: None,
+            category_source: None,
+            boundary_status: VerificationStatus::Unknown,
+            meaning_status: VerificationStatus::Unknown,
+        }
+    }
+}
+
+/// A category suggested for an ID that does not currently have a record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReservationSuggestion {
+    pub category: CategoryPath,
+    pub category_source: CategorySource,
+    pub status: VerificationStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuleScope {
+    ExactId(u32),
+    IdRange {
+        start: u32,
+        end: u32,
+    },
+    #[allow(dead_code)] // Reserved for archives with a human-verified group fallback.
+    Group(u32),
+}
+
+impl RuleScope {
+    fn score(self, key: CatalogRecordKey<'_>) -> Option<(u8, u32)> {
+        match self {
+            Self::ExactId(icon_id) if icon_id == key.icon_id => Some((3, u32::MAX)),
+            Self::IdRange { start, end } if start <= key.icon_id && key.icon_id <= end => {
+                Some((2, u32::MAX - end.saturating_sub(start)))
+            }
+            Self::Group(group_code) if group_code == key.group_code => Some((1, 0)),
+            Self::ExactId(_) | Self::IdRange { .. } | Self::Group(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RecordRule {
+    scope: RuleScope,
+    category: Option<CategoryPath>,
+    category_source: Option<CategorySource>,
+    boundary_status: VerificationStatus,
+    meaning_status: VerificationStatus,
+}
+
+impl RecordRule {
+    pub(crate) const fn verified(
+        scope: RuleScope,
+        category: CategoryPath,
+        category_source: CategorySource,
+    ) -> Self {
+        Self {
+            scope,
+            category: Some(category),
+            category_source: Some(category_source),
+            boundary_status: VerificationStatus::HumanVerified,
+            meaning_status: VerificationStatus::HumanVerified,
+        }
+    }
+
+    pub(crate) const fn temporary(scope: RuleScope, category: CategoryPath) -> Self {
+        Self {
+            scope,
+            category: Some(category),
+            category_source: Some(CategorySource::Temporary),
+            boundary_status: VerificationStatus::HumanVerified,
+            meaning_status: VerificationStatus::Unknown,
+        }
+    }
+
+    pub(crate) const fn explicit_unknown(scope: RuleScope) -> Self {
+        Self {
+            scope,
+            category: None,
+            category_source: None,
+            boundary_status: VerificationStatus::HumanVerified,
+            meaning_status: VerificationStatus::Unknown,
+        }
+    }
+
+    const fn classification(self) -> RecordClassification {
+        RecordClassification {
+            category: self.category,
+            category_source: self.category_source,
+            boundary_status: self.boundary_status,
+            meaning_status: self.meaning_status,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReservationRule {
+    start: u32,
+    end: u32,
+    category: CategoryPath,
+    category_source: CategorySource,
+}
+
+impl ReservationRule {
+    pub(crate) const fn new(
+        start: u32,
+        end: u32,
+        category: CategoryPath,
+        category_source: CategorySource,
+    ) -> Self {
+        Self {
+            start,
+            end,
+            category,
+            category_source,
+        }
+    }
+
+    fn matches(self, icon_id: u32) -> bool {
+        self.start <= icon_id && icon_id <= self.end
+    }
+
+    const fn span(self) -> u32 {
+        self.end.saturating_sub(self.start)
+    }
+
+    const fn suggestion(self) -> ReservationSuggestion {
+        ReservationSuggestion {
+            category: self.category,
+            category_source: self.category_source,
+            status: VerificationStatus::Candidate,
+        }
+    }
+}
+
+struct Catalog<'a> {
+    record_rules: &'a [RecordRule],
+    reservation_rules: &'a [ReservationRule],
+}
+
+impl<'a> Catalog<'a> {
+    const fn new(record_rules: &'a [RecordRule], reservation_rules: &'a [ReservationRule]) -> Self {
+        Self {
+            record_rules,
+            reservation_rules,
+        }
+    }
+
+    fn classify(&self, key: CatalogRecordKey<'_>) -> RecordClassification {
+        let mut best = None::<((u8, u32), RecordRule)>;
+        for rule in self.record_rules {
+            let Some(score) = rule.scope.score(key) else {
+                continue;
+            };
+            if best.is_none_or(|(best_score, _)| score > best_score) {
+                best = Some((score, *rule));
+            }
+        }
+
+        best.map_or_else(RecordClassification::unknown, |(_, rule)| {
+            rule.classification()
+        })
+    }
+
+    fn reservation(&self, icon_id: u32) -> Option<ReservationSuggestion> {
+        self.reservation_rules
+            .iter()
+            .copied()
+            .filter(|rule| rule.matches(icon_id))
+            .min_by_key(|rule| rule.span())
+            .map(ReservationRule::suggestion)
+    }
+}
+
+/// Resolves a category for an existing raw record.
+pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
+    if key.archive.eq_ignore_ascii_case("sb") {
+        Catalog::new(sb::RECORD_RULES, sb::RESERVATION_RULES).classify(key)
+    } else {
+        RecordClassification::unknown()
+    }
+}
+
+/// Suggests a candidate category for a currently unused ID slot.
+pub fn reservation_candidate(archive: &str, icon_id: u32) -> Option<ReservationSuggestion> {
+    archive
+        .eq_ignore_ascii_case("sb")
+        .then(|| Catalog::new(sb::RECORD_RULES, sb::RESERVATION_RULES).reservation(icon_id))
+        .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(group_code: u32, icon_id: u32) -> CatalogRecordKey<'static> {
+        CatalogRecordKey {
+            archive: "sb",
+            group_code,
+            icon_id,
+        }
+    }
+
+    fn assert_category(icon_id: u32, expected: &[&str]) {
+        let classification = classify_record(key(0, icon_id));
+        assert_eq!(
+            classification.category.map(CategoryPath::segments),
+            Some(expected)
+        );
+        assert_eq!(
+            classification.boundary_status,
+            VerificationStatus::HumanVerified
+        );
+        assert_eq!(
+            classification.meaning_status,
+            VerificationStatus::HumanVerified
+        );
+    }
+
+    #[test]
+    fn classifies_representative_verified_sb_ranges() {
+        for (icon_id, expected) in [
+            (200, &["장비", "방어구", "몸"][..]),
+            (100_100, &["장비", "방어구", "머리"]),
+            (200_100, &["장비", "방어구", "다리"]),
+            (300_100, &["장비", "방어구", "팔"]),
+            (400_100, &["장비", "무기"]),
+            (500_100, &["장비", "도구"]),
+            (600_100, &["선박", "선박 장비", "보조돛"]),
+            (700_100, &["선박", "선박 장비", "대포"]),
+            (800_100, &["선박", "선박 장비", "추가장갑"]),
+            (900_001, &["선박", "선박 장비", "특수장비"]),
+            (1_000_100, &["선박", "선박 장비", "선수상"]),
+            (1_100_001, &["선박", "선박 장비", "문장"]),
+            (1_500_001, &["아이템", "소비품"]),
+            (1_700_000, &["아이템", "추천장"]),
+            (1_800_000, &["아이템", "레시피"]),
+            (1_900_001, &["아이템", "보물지도"]),
+            (2_200_000, &["선박", "선박 재료"]),
+            (2_300_000, &["아이템", "장식품"]),
+            (2_400_000, &["아이템", "소비품", "애완동물"]),
+            (2_500_001, &["선박", "선박 데코"]),
+            (2_600_001, &["선박", "선원 장비"]),
+            (2_602_160, &["선박", "선원 장비"]),
+        ] {
+            assert_category(icon_id, expected);
+        }
+    }
+
+    #[test]
+    fn preserves_reviewed_unknown_records() {
+        for icon_id in [1_200_001, 1_200_101, 2_602_161] {
+            let classification = classify_record(key(0, icon_id));
+            assert_eq!(classification.category, None);
+            assert_eq!(
+                classification.boundary_status,
+                VerificationStatus::HumanVerified
+            );
+            assert_eq!(classification.meaning_status, VerificationStatus::Unknown);
+        }
+
+        assert_eq!(
+            classify_record(key(0, 1_200_002)),
+            RecordClassification::unknown()
+        );
+    }
+
+    #[test]
+    fn keeps_temporary_review_bucket_semantically_unknown() {
+        let classification = classify_record(key(13, 1_390_010));
+
+        assert_eq!(
+            classification.category.map(CategoryPath::segments),
+            Some(&["미분류", "SB 특수 아이콘"][..])
+        );
+        assert_eq!(
+            classification.category_source,
+            Some(CategorySource::Temporary)
+        );
+        assert_eq!(
+            classification.boundary_status,
+            VerificationStatus::HumanVerified
+        );
+        assert_eq!(classification.meaning_status, VerificationStatus::Unknown);
+    }
+
+    #[test]
+    fn custom_exact_rules_do_not_claim_unseen_neighbor_ids() {
+        let supply = classify_record(key(14, 1_400_100));
+        assert_eq!(supply.category_source, Some(CategorySource::Custom));
+        assert_eq!(
+            supply.category.map(CategoryPath::segments),
+            Some(&["선박", "선박 물자"][..])
+        );
+        assert_eq!(
+            classify_record(key(14, 1_400_101)),
+            RecordClassification::unknown()
+        );
+    }
+
+    #[test]
+    fn exchange_tickets_share_the_custom_item_acquisition_category() {
+        for icon_id in [2_000_000, 2_100_000] {
+            let classification = classify_record(key(21, icon_id));
+            assert_eq!(
+                classification.category.map(CategoryPath::segments),
+                Some(&["아이템", "아이템 획득"][..])
+            );
+            assert_eq!(classification.category_source, Some(CategorySource::Custom));
+        }
+    }
+
+    #[test]
+    fn unsupported_archives_remain_unknown() {
+        assert_eq!(
+            classify_record(CatalogRecordKey {
+                archive: "sc",
+                group_code: 0,
+                icon_id: 200,
+            }),
+            RecordClassification::unknown()
+        );
+        assert_eq!(reservation_candidate("sc", 200), None);
+    }
+
+    #[test]
+    fn only_verified_reservation_bands_return_candidates() {
+        let head = reservation_candidate("SB", 150_000).expect("head reservation");
+        assert_eq!(head.category.segments(), &["장비", "방어구", "머리"]);
+        assert_eq!(head.status, VerificationStatus::Candidate);
+
+        assert_eq!(reservation_candidate("sb", 1_250_000), None);
+        assert_eq!(reservation_candidate("sb", 1_400_101), None);
+        assert_eq!(reservation_candidate("sb", 1_650_000), None);
+        assert_eq!(reservation_candidate("sb", 2_050_000), None);
+        let crew_equipment =
+            reservation_candidate("sb", 2_699_999).expect("crew equipment reservation");
+        assert_eq!(crew_equipment.category.segments(), &["선박", "선원 장비"]);
+        assert_eq!(crew_equipment.status, VerificationStatus::Candidate);
+
+        let reviewed_unknown = classify_record(key(0, 2_602_161));
+        assert_eq!(reviewed_unknown.category, None);
+        assert_eq!(
+            reviewed_unknown.boundary_status,
+            VerificationStatus::HumanVerified
+        );
+    }
+
+    #[test]
+    fn exact_then_range_then_group_priority_is_stable() {
+        const RANGE: CategoryPath = CategoryPath::new(&["범위"]);
+        const GROUP: CategoryPath = CategoryPath::new(&["그룹"]);
+        const RULES: &[RecordRule] = &[
+            RecordRule::verified(RuleScope::Group(7), GROUP, CategorySource::InGame),
+            RecordRule::verified(
+                RuleScope::IdRange { start: 0, end: 100 },
+                RANGE,
+                CategorySource::InGame,
+            ),
+            RecordRule::explicit_unknown(RuleScope::ExactId(42)),
+        ];
+        let catalog = Catalog::new(RULES, &[]);
+
+        assert_eq!(catalog.classify(key(7, 42)).category, None);
+        assert_eq!(
+            catalog
+                .classify(key(7, 50))
+                .category
+                .map(CategoryPath::segments),
+            Some(&["범위"][..])
+        );
+        assert_eq!(
+            catalog
+                .classify(key(7, 200))
+                .category
+                .map(CategoryPath::segments),
+            Some(&["그룹"][..])
+        );
+    }
+}
