@@ -131,6 +131,11 @@ pub enum BlockDecodeError {
         compressed_size: u32,
         file_size: usize,
     },
+    PayloadSizeMismatch {
+        location: BlockLocation,
+        expected_size: u32,
+        actual_size: usize,
+    },
     InvalidZlib {
         location: BlockLocation,
         message: String,
@@ -162,6 +167,15 @@ impl fmt::Display for BlockDecodeError {
             } => write!(
                 formatter,
                 "MWC payload is outside file {}: block offset {}, payload offset {payload_offset}, compressed size {compressed_size}, file size {file_size}",
+                location.file_number, location.offset
+            ),
+            Self::PayloadSizeMismatch {
+                location,
+                expected_size,
+                actual_size,
+            } => write!(
+                formatter,
+                "MWC payload size mismatch at file {} offset {}: expected {expected_size}, got {actual_size}",
                 location.file_number, location.offset
             ),
             Self::InvalidZlib { location, message } => write!(
@@ -231,6 +245,53 @@ impl MwcBlock {
             },
         )?;
 
+        self.decode_payload_with_size(payload, declared_size)
+    }
+
+    /// Decompresses an exact compressed payload read independently from its data file.
+    pub fn decode_payload(
+        &self,
+        payload: &[u8],
+        max_output_size: usize,
+    ) -> Result<Vec<u8>, BlockDecodeError> {
+        let declared_size = usize::try_from(self.uncompressed_size).map_err(|_| {
+            BlockDecodeError::OutputLimitExceeded {
+                location: self.location,
+                declared_size: self.uncompressed_size,
+                max_output_size,
+            }
+        })?;
+        if declared_size > max_output_size {
+            return Err(BlockDecodeError::OutputLimitExceeded {
+                location: self.location,
+                declared_size: self.uncompressed_size,
+                max_output_size,
+            });
+        }
+
+        let compressed_size = usize::try_from(self.compressed_size).map_err(|_| {
+            BlockDecodeError::PayloadSizeMismatch {
+                location: self.location,
+                expected_size: self.compressed_size,
+                actual_size: payload.len(),
+            }
+        })?;
+        if payload.len() != compressed_size {
+            return Err(BlockDecodeError::PayloadSizeMismatch {
+                location: self.location,
+                expected_size: self.compressed_size,
+                actual_size: payload.len(),
+            });
+        }
+
+        self.decode_payload_with_size(payload, declared_size)
+    }
+
+    fn decode_payload_with_size(
+        &self,
+        payload: &[u8],
+        declared_size: usize,
+    ) -> Result<Vec<u8>, BlockDecodeError> {
         let decoder = ZlibDecoder::new(payload);
         let output_cap = u64::from(self.uncompressed_size) + 1;
         let mut limited_decoder = decoder.take(output_cap);
@@ -400,6 +461,36 @@ mod tests {
                 .expect("first block")
                 .decode(&bytes, 16),
             Ok(b"first".to_vec())
+        );
+    }
+
+    #[test]
+    fn decodes_a_payload_read_separately_from_its_data_file() {
+        let bytes = encoded_block(b"separate", 8);
+        let scanned = scan_data_file(4, &bytes).expect("scan data file");
+        let block = scanned.zlib_blocks().next().expect("one block");
+        let payload_end = block.payload_offset + block.compressed_size as usize;
+
+        let decoded = block
+            .decode_payload(&bytes[block.payload_offset..payload_end], 8)
+            .expect("decode standalone payload");
+
+        assert_eq!(decoded, b"separate");
+    }
+
+    #[test]
+    fn rejects_a_standalone_payload_with_the_wrong_size() {
+        let bytes = encoded_block(b"size", 4);
+        let scanned = scan_data_file(5, &bytes).expect("scan data file");
+        let block = scanned.zlib_blocks().next().expect("one block");
+
+        assert_eq!(
+            block.decode_payload(&[], 4),
+            Err(BlockDecodeError::PayloadSizeMismatch {
+                location: block.location,
+                expected_size: block.compressed_size,
+                actual_size: 0,
+            })
         );
     }
 
