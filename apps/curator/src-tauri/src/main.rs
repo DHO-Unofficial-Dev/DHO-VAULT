@@ -12,7 +12,7 @@ async fn pick_game_directory(
     let selection = app
         .dialog()
         .file()
-        .set_title("대항해시대 온라인 설치 폴더 선택")
+        .set_title("검수할 대항해시대 온라인 설치 폴더 선택")
         .blocking_pick_folder();
     let Some(selection) = selection else {
         return Ok(None);
@@ -31,5 +31,5 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![pick_game_directory])
         .run(tauri::generate_context!())
-        .expect("failed to run DHO-VAULT viewer");
+        .expect("failed to run DHO Vault Curator");
 }
