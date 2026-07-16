@@ -13,7 +13,8 @@ const EVENT: CategoryPath = CategoryPath::new(&["이벤트"]);
 const PERSON_AIDE_ICON: CategoryPath = CategoryPath::new(&["인물", "부관 아이콘"]);
 const UI_TAROT: CategoryPath = CategoryPath::new(&["UI 아이콘", "타로"]);
 const APARTAMENTO: CategoryPath = CategoryPath::new(&["아팔타멘토"]);
-const DISCOVERY_SET_1: CategoryPath = CategoryPath::new(&["발견물", "1"]);
+const DISCOVERY_SET_1_SMALL: CategoryPath =
+    CategoryPath::new(&["발견물", "1", "리스트 이미지 (48×48)"]);
 const APARTAMENTO_BUTLER: CategoryPath = CategoryPath::new(&["아팔타멘토", "집사"]);
 const PRIVATE_FARM: CategoryPath = CategoryPath::new(&["개인농장"]);
 const UI_PRODUCTION: CategoryPath = CategoryPath::new(&["UI 아이콘", "생산"]);
@@ -22,7 +23,8 @@ const COMPANY_COLONY: CategoryPath = CategoryPath::new(&["개척도시"]);
 const EDUCATION_SYSTEMS: CategoryPath = CategoryPath::new(&["대학·학술협회·부관학교"]);
 const PERSON_UNCLASSIFIED_PORTRAIT: CategoryPath = CategoryPath::new(&["인물", "미분류 초상화"]);
 const MISCELLANEOUS: CategoryPath = CategoryPath::new(&["기타"]);
-const DISCOVERY_SET_2: CategoryPath = CategoryPath::new(&["발견물", "2"]);
+const DISCOVERY_SET_2_SMALL: CategoryPath =
+    CategoryPath::new(&["발견물", "2", "리스트 이미지 (48×48)"]);
 const PERSON_NPC_PORTRAIT: CategoryPath = CategoryPath::new(&["인물", "NPC 초상화"]);
 const POTENTIAL: CategoryPath = CategoryPath::new(&["잠재능력"]);
 
@@ -47,7 +49,7 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
     verified_block_range(1_337, 1_472, PERSON_AIDE_ICON, CategorySource::Custom),
     verified_block_range(1_473, 1_494, UI_TAROT, CategorySource::Custom),
     verified_block_range(1_495, 1_506, APARTAMENTO, CategorySource::InGame),
-    verified_block_range(1_507, 4_433, DISCOVERY_SET_1, CategorySource::Custom),
+    verified_block_range(1_507, 4_433, DISCOVERY_SET_1_SMALL, CategorySource::Custom),
     verified_block_range(4_434, 4_457, APARTAMENTO_BUTLER, CategorySource::InGame),
     // 4458..=4475 remains a candidate for Apartamento pets.
     verified_block_range(4_476, 4_489, PRIVATE_FARM, CategorySource::InGame),
@@ -62,8 +64,8 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
         PERSON_UNCLASSIFIED_PORTRAIT,
         CategorySource::Custom,
     ),
-    verified_block_range(5_115, 5_231, MISCELLANEOUS, CategorySource::Custom),
-    verified_block_range(5_232, 5_264, DISCOVERY_SET_2, CategorySource::Custom),
+    verified_block_range(5_115, 5_232, MISCELLANEOUS, CategorySource::Custom),
+    verified_block_range(5_233, 5_264, DISCOVERY_SET_2_SMALL, CategorySource::Custom),
     verified_block_range(5_265, 5_310, PERSON_NPC_PORTRAIT, CategorySource::Custom),
     // 5311..=5326 remains a candidate for aide rescue portraits.
     verified_block_range(
