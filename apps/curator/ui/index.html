@@ -14,9 +14,7 @@
       <header class="hero">
         <p class="eyebrow">CURATOR WORKSPACE</p>
         <h1>DHO Vault</h1>
-        <p class="summary">
-          원본 리소스의 구간과 조립 후보를 사람이 직접 확인하는 검수 도구
-        </p>
+        <p class="summary">원본 리소스의 ID 대역과 분류 경계를 사람이 직접 확인하는 검수 도구</p>
       </header>
 
       <section class="notice-card" aria-labelledby="notice-title">
@@ -24,7 +22,7 @@
         <div>
           <h2 id="notice-title">검수 전용 화면</h2>
           <p>
-            이 화면의 정보는 확정된 카테고리가 아닙니다. 여러 표본을 함께 확인한 뒤에만 분류 규칙으로 기록합니다.
+            ID 대역은 분류 후보이며 확정된 카테고리가 아닙니다. 원시 그룹 번호는 저장 구획을 나타내는 메타데이터로만 표시합니다.
           </p>
         </div>
       </section>
@@ -58,11 +56,48 @@
         </div>
       </section>
 
+      <section id="band-panel" class="review-card" aria-labelledby="band-title" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="section-label">ID BANDS</p>
+            <h2 id="band-title">100,000 단위 ID 대역</h2>
+          </div>
+          <p id="band-status" class="section-status" aria-live="polite"></p>
+        </div>
+        <p class="section-description">
+          아카이브 전체를 ID 순서로 묶었습니다. 하나의 대역이 여러 원시 그룹을 가로지를 수 있으며, 그룹 번호는 분류에 사용하지 않습니다.
+        </p>
+        <ul id="band-list" class="band-list"></ul>
+      </section>
+
+      <section id="sample-panel" class="review-card" aria-labelledby="sample-title" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="section-label">CONTACT SHEET</p>
+            <h2 id="sample-title">대역 표본 이미지</h2>
+          </div>
+          <p id="sample-status" class="section-status" aria-live="polite"></p>
+        </div>
+        <p class="section-description">
+          선택한 대역 전체에서 같은 이미지 블록을 가리키는 중복 레코드를 제외하고 최대 24개를 균등하게 골랐습니다.
+        </p>
+        <div class="subsection-heading">
+          <h3>대역 경계</h3>
+          <span>아카이브 전체의 첫 레코드와 끝 레코드</span>
+        </div>
+        <div id="boundary-grid" class="boundary-grid"></div>
+        <div class="subsection-heading sample-heading">
+          <h3>대역 표본</h3>
+          <span>중복 제거 후 균등 선택</span>
+        </div>
+        <div id="sample-grid" class="sample-grid"></div>
+      </section>
+
       <section class="next-card" aria-labelledby="next-title">
-        <p class="section-label">NEXT REVIEW STEP</p>
-        <h2 id="next-title">여러 구간의 표본을 함께 비교합니다</h2>
+        <p class="section-label">REVIEW PRINCIPLE</p>
+        <h2 id="next-title">숫자 대역은 후보, 실제 이미지는 검증 근거입니다</h2>
         <p>
-          다음 단계에서는 한 장이 아니라 제한된 수의 이미지를 접촉 시트로 표시합니다. 표본 수와 간격은 실제 화면을 보며 조정합니다.
+          비어 있는 예약 ID에는 확정 분류를 만들지 않습니다. 존재하는 레코드의 경계와 표본을 확인한 뒤에만 분류 상태를 승격합니다.
         </p>
       </section>
     </main>
