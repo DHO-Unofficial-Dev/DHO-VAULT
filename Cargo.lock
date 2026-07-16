@@ -545,6 +545,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "dho-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "dho-client"
 version = "0.1.0"
 dependencies = [
