@@ -8,15 +8,10 @@ const directoryDetails = document.querySelector("#directory-details");
 const gameDirectory = document.querySelector("#game-directory");
 const resourceDirectory = document.querySelector("#resource-directory");
 const archiveList = document.querySelector("#archive-list");
-const groupPanel = document.querySelector("#group-panel");
-const groupTitle = document.querySelector("#group-title");
-const groupStatus = document.querySelector("#group-status");
-const groupList = document.querySelector("#group-list");
-const rangePanel = document.querySelector("#range-panel");
-const rangeTitle = document.querySelector("#range-title");
-const rangeStatus = document.querySelector("#range-status");
-const rangeDescription = document.querySelector("#range-description");
-const rangeList = document.querySelector("#range-list");
+const bandPanel = document.querySelector("#band-panel");
+const bandTitle = document.querySelector("#band-title");
+const bandStatus = document.querySelector("#band-status");
+const bandList = document.querySelector("#band-list");
 const samplePanel = document.querySelector("#sample-panel");
 const sampleTitle = document.querySelector("#sample-title");
 const sampleStatus = document.querySelector("#sample-status");
@@ -24,6 +19,14 @@ const boundaryGrid = document.querySelector("#boundary-grid");
 const sampleGrid = document.querySelector("#sample-grid");
 
 let sampleUrls = [];
+
+function formatNumber(value) {
+  return new Intl.NumberFormat("ko-KR").format(value);
+}
+
+function formatIdRange(start, end) {
+  return `${formatNumber(start)}–${formatNumber(end)}`;
+}
 
 function setStatus(kind, title, message) {
   statusCard.dataset.status = kind;
@@ -47,38 +50,26 @@ function revokeSampleUrls() {
 function clearSamples() {
   revokeSampleUrls();
   samplePanel.hidden = true;
-  sampleTitle.textContent = "표본 이미지";
+  sampleTitle.textContent = "대역 표본 이미지";
   sampleStatus.textContent = "";
   boundaryGrid.replaceChildren();
   sampleGrid.replaceChildren();
 }
 
-function clearRanges() {
+function clearBands() {
   clearSamples();
-  rangePanel.hidden = true;
-  rangeTitle.textContent = "원시 ID 구간 후보";
-  rangeStatus.textContent = "";
-  rangeList.replaceChildren();
-}
-
-function clearGroups() {
-  clearRanges();
-  groupPanel.hidden = true;
-  groupTitle.textContent = "원시 그룹";
-  groupStatus.textContent = "";
-  groupList.replaceChildren();
+  bandPanel.hidden = true;
+  bandTitle.textContent = "100,000 단위 ID 대역";
+  bandStatus.textContent = "";
+  bandList.replaceChildren();
 }
 
 function clearSummary() {
-  clearGroups();
+  clearBands();
   directoryDetails.hidden = true;
   gameDirectory.textContent = "";
   resourceDirectory.textContent = "";
   archiveList.replaceChildren();
-}
-
-function formatNumber(value) {
-  return new Intl.NumberFormat("ko-KR").format(value);
 }
 
 function createActionButton(label, action) {
@@ -88,6 +79,13 @@ function createActionButton(label, action) {
   button.textContent = label;
   button.addEventListener("click", action);
   return button;
+}
+
+function createErrorItem(error) {
+  const item = document.createElement("li");
+  item.className = "error-message";
+  item.textContent = String(error);
+  return item;
 }
 
 function renderSummary(summary) {
@@ -109,7 +107,7 @@ function renderSummary(summary) {
     item.append(
       prefix,
       content,
-      createActionButton("그룹 보기", () => openArchive(archive.prefix)),
+      createActionButton("ID 대역 보기", () => openArchiveBands(archive.prefix)),
     );
     archiveList.append(item);
   }
@@ -121,66 +119,43 @@ function renderSummary(summary) {
   );
 }
 
-function renderGroups(prefix, groups) {
-  groupList.replaceChildren();
-  for (const group of groups) {
+function renderBands(result) {
+  bandList.replaceChildren();
+  for (const band of result.bands) {
     const item = document.createElement("li");
     const title = document.createElement("strong");
     const detail = document.createElement("span");
-    title.textContent = `그룹 ${group.groupCode}`;
-    detail.textContent = `레코드 ${formatNumber(group.recordCount)} · 고유 이미지 ${formatNumber(group.uniqueBlockCount)} · ID ${formatNumber(group.minIconId)}–${formatNumber(group.maxIconId)}`;
-    item.append(
-      title,
-      detail,
-      createActionButton("구간 보기", () => openGroupRanges(prefix, group.groupCode)),
-    );
-    groupList.append(item);
-  }
-}
-
-function renderRanges(result) {
-  rangeList.replaceChildren();
-  for (const range of result.ranges) {
-    const item = document.createElement("li");
-    const title = document.createElement("strong");
-    const detail = document.createElement("span");
-    title.textContent = `ID ${formatNumber(range.startIconId)}–${formatNumber(range.endIconId)}`;
-    detail.textContent = `레코드 ${formatNumber(range.recordCount)} · 고유 이미지 ${formatNumber(range.uniqueBlockCount)}`;
+    const groups = band.groupCodes.map((value) => formatNumber(value)).join(", ");
+    title.textContent = `ID ${formatIdRange(band.startIconId, band.endIconId)}`;
+    detail.textContent = `실제 ID ${formatIdRange(band.firstActualIconId, band.lastActualIconId)} · 레코드 ${formatNumber(band.recordCount)} · 고유 이미지 ${formatNumber(band.uniqueBlockCount)} · 원시 그룹 ${groups}`;
     item.append(
       title,
       detail,
       createActionButton("표본 보기", () =>
-        openRange(
-          result.prefix,
-          result.groupCode,
-          range.startIconId,
-          range.endIconId,
-        ),
+        openBand(result.prefix, band.startIconId, band.endIconId),
       ),
     );
-    rangeList.append(item);
+    bandList.append(item);
   }
 }
 
-async function openArchive(prefix) {
-  clearGroups();
-  groupPanel.hidden = false;
-  groupTitle.textContent = `${prefix.toUpperCase()} 원시 그룹`;
-  groupStatus.textContent = "그룹 정보를 읽는 중…";
+async function openArchiveBands(prefix) {
+  clearBands();
+  bandPanel.hidden = false;
+  bandTitle.textContent = `${prefix.toUpperCase()} · 100,000 단위 ID 대역`;
+  bandStatus.textContent = "아카이브 전체 ID를 묶는 중…";
   setBusy(true);
 
   try {
-    const groups = await window.__TAURI__.core.invoke("list_archive_groups", { prefix });
-    renderGroups(prefix, groups);
-    groupStatus.textContent = `${formatNumber(groups.length)}개 그룹`;
-    groupPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+    const result = await window.__TAURI__.core.invoke("list_archive_id_bands", {
+      prefix,
+    });
+    renderBands(result);
+    bandStatus.textContent = `${formatNumber(result.bands.length)}개 대역 · 단위 ${formatNumber(result.bandSize)}`;
+    bandPanel.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
-    groupStatus.textContent = "불러오지 못함";
-    groupList.replaceChildren();
-    const message = document.createElement("p");
-    message.className = "error-message";
-    message.textContent = String(error);
-    groupList.append(message);
+    bandStatus.textContent = "불러오지 못함";
+    bandList.replaceChildren(createErrorItem(error));
   } finally {
     setBusy(false);
   }
@@ -198,7 +173,7 @@ function createSampleCard(sample, boundaryLabel = null) {
   image.src = url;
   image.alt = `${boundaryLabel ? `${boundaryLabel} · ` : ""}아이콘 ID ${sample.iconId}`;
   image.loading = "lazy";
-  caption.textContent = `ID ${formatNumber(sample.iconId)} · 블록 ${formatNumber(sample.blockIndex)} · ${sample.width}×${sample.height}`;
+  caption.textContent = `ID ${formatNumber(sample.iconId)} · 그룹 ${formatNumber(sample.groupCode)} · 블록 ${formatNumber(sample.blockIndex)} · ${sample.width}×${sample.height}`;
   if (boundaryLabel !== null) {
     const badge = document.createElement("strong");
     badge.textContent = boundaryLabel;
@@ -216,6 +191,7 @@ function renderSamples(result) {
 
   const sameBoundary =
     result.firstRecord.iconId === result.lastRecord.iconId &&
+    result.firstRecord.groupCode === result.lastRecord.groupCode &&
     result.firstRecord.blockIndex === result.lastRecord.blockIndex;
   boundaryGrid.append(
     createSampleCard(result.firstRecord, sameBoundary ? "처음 · 끝" : "처음"),
@@ -229,56 +205,26 @@ function renderSamples(result) {
   }
 }
 
-async function openGroupRanges(prefix, groupCode) {
-  clearRanges();
-  rangePanel.hidden = false;
-  rangeTitle.textContent = `${prefix.toUpperCase()} · 그룹 ${groupCode} · 원시 ID 구간`;
-  rangeStatus.textContent = "ID 간격을 확인하는 중…";
-  setBusy(true);
-
-  try {
-    const result = await window.__TAURI__.core.invoke("list_group_id_ranges", {
-      prefix,
-      groupCode,
-    });
-    renderRanges(result);
-    rangeDescription.textContent = `인접한 ID 차이가 ${formatNumber(result.gapThreshold)}을 넘는 지점에서 기계적으로 나눴습니다. 카테고리 경계로 확정된 값이 아닙니다.`;
-    rangeStatus.textContent = `${formatNumber(result.ranges.length)}개 구간 후보`;
-    rangePanel.scrollIntoView({ behavior: "smooth", block: "start" });
-  } catch (error) {
-    rangeStatus.textContent = "불러오지 못함";
-    const message = document.createElement("p");
-    message.className = "error-message";
-    message.textContent = String(error);
-    rangeList.append(message);
-  } finally {
-    setBusy(false);
-  }
-}
-
-async function openRange(prefix, groupCode, startIconId, endIconId) {
+async function openBand(prefix, startIconId, endIconId) {
   clearSamples();
   samplePanel.hidden = false;
-  sampleTitle.textContent = `${prefix.toUpperCase()} · 그룹 ${groupCode} · ID ${formatNumber(startIconId)}–${formatNumber(endIconId)}`;
-  sampleStatus.textContent = "표본 이미지를 만드는 중…";
+  sampleTitle.textContent = `${prefix.toUpperCase()} · ID ${formatIdRange(startIconId, endIconId)}`;
+  sampleStatus.textContent = "대역 표본 이미지를 만드는 중…";
   setBusy(true);
 
   try {
-    const result = await window.__TAURI__.core.invoke("sample_archive_range", {
+    const result = await window.__TAURI__.core.invoke("sample_archive_band", {
       prefix,
-      groupCode,
       startIconId,
       endIconId,
     });
     renderSamples(result);
-    sampleStatus.textContent = `고유 이미지 ${formatNumber(result.uniqueBlockCount)}개 중 ${formatNumber(result.samples.length)}개 · 전체 레코드 ${formatNumber(result.recordCount)}개`;
+    const groups = result.groupCodes.map((value) => formatNumber(value)).join(", ");
+    sampleStatus.textContent = `고유 이미지 ${formatNumber(result.uniqueBlockCount)}개 중 ${formatNumber(result.samples.length)}개 · 레코드 ${formatNumber(result.recordCount)}개 · 원시 그룹 ${groups}`;
     samplePanel.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
     sampleStatus.textContent = "추출하지 못함";
-    const message = document.createElement("p");
-    message.className = "error-message";
-    message.textContent = String(error);
-    sampleGrid.append(message);
+    sampleGrid.replaceChildren(createErrorItem(error));
   } finally {
     setBusy(false);
   }

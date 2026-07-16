@@ -4,7 +4,10 @@
 
 mod archive_session;
 
-use archive_session::{ArchiveGroupSummary, CuratorSession, GroupIdRanges, RangeSamples};
+use archive_session::{
+    ArchiveBandSamples, ArchiveGroupSummary, ArchiveIdBands, CuratorSession, GroupIdRanges,
+    RangeSamples,
+};
 use dho_client::{GameDirectorySummary, inspect_game_directory};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -57,6 +60,42 @@ async fn list_archive_groups(
 }
 
 #[tauri::command]
+async fn list_archive_id_bands(
+    prefix: String,
+    session: State<'_, SharedCuratorSession>,
+) -> Result<ArchiveIdBands, String> {
+    let session = session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .lock()
+            .map_err(|_| "검수 세션을 열지 못했습니다.".to_owned())?
+            .archive_id_bands(&prefix)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("ID 대역을 불러오는 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn sample_archive_band(
+    prefix: String,
+    start_icon_id: u32,
+    end_icon_id: u32,
+    session: State<'_, SharedCuratorSession>,
+) -> Result<ArchiveBandSamples, String> {
+    let session = session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .lock()
+            .map_err(|_| "검수 세션을 열지 못했습니다.".to_owned())?
+            .archive_band_samples(&prefix, start_icon_id, end_icon_id)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("ID 대역 표본을 만드는 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
 async fn list_group_id_ranges(
     prefix: String,
     group_code: u32,
@@ -100,6 +139,8 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             pick_game_directory,
+            list_archive_id_bands,
+            sample_archive_band,
             list_archive_groups,
             list_group_id_ranges,
             sample_archive_range

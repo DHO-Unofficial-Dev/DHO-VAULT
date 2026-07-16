@@ -331,7 +331,8 @@ button:disabled {
 }
 
 .group-list,
-.range-list {
+.range-list,
+.band-list {
   display: grid;
   gap: var(--space-2);
   margin: 0;
@@ -340,7 +341,8 @@ button:disabled {
 }
 
 .group-list li,
-.range-list li {
+.range-list li,
+.band-list li {
   display: grid;
   grid-template-columns: 6rem minmax(0, 1fr) auto;
   gap: var(--space-2);
@@ -350,15 +352,21 @@ button:disabled {
   background: var(--surface-strong);
 }
 
+.band-list li {
+  grid-template-columns: 14rem minmax(0, 1fr) auto;
+}
+
 .group-list strong,
-.range-list strong {
+.range-list strong,
+.band-list strong {
   color: var(--ink);
   font-family: var(--font-mono);
   font-size: 0.85rem;
 }
 
 .group-list span,
-.range-list span {
+.range-list span,
+.band-list span {
   color: var(--muted);
   font-size: 0.8rem;
 }
@@ -493,7 +501,8 @@ button:disabled {
   .directory-details div,
   .archive-list li,
   .group-list li,
-  .range-list li {
+  .range-list li,
+  .band-list li {
     grid-template-columns: 1fr;
   }
 

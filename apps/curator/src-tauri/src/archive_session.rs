@@ -3,7 +3,7 @@
 use dho_client::SUPPORTED_ARCHIVE_PREFIXES;
 use dho_extract::{ExtractError, LoadedArchive, ResourceKey};
 use serde::Serialize;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
@@ -11,6 +11,7 @@ use std::path::PathBuf;
 const MAX_SAMPLE_COUNT: usize = 24;
 const MAX_SAMPLE_OUTPUT_SIZE: usize = 16 * 1024 * 1024;
 const ICON_ID_GAP_THRESHOLD: u32 = 1_000;
+const ICON_ID_BAND_SIZE: u32 = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +67,40 @@ pub struct RangeSamples {
     pub samples: Vec<ResourceSample>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveIdBandSummary {
+    pub start_icon_id: u32,
+    pub end_icon_id: u32,
+    pub first_actual_icon_id: u32,
+    pub last_actual_icon_id: u32,
+    pub record_count: usize,
+    pub unique_block_count: usize,
+    pub group_codes: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveIdBands {
+    pub prefix: String,
+    pub band_size: u32,
+    pub bands: Vec<ArchiveIdBandSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveBandSamples {
+    pub prefix: String,
+    pub start_icon_id: u32,
+    pub end_icon_id: u32,
+    pub record_count: usize,
+    pub unique_block_count: usize,
+    pub group_codes: Vec<u32>,
+    pub first_record: ResourceSample,
+    pub last_record: ResourceSample,
+    pub samples: Vec<ResourceSample>,
+}
+
 #[derive(Debug, Default)]
 pub struct CuratorSession {
     resource_directory: Option<PathBuf>,
@@ -105,6 +140,129 @@ impl CuratorSession {
                 max_icon_id: group.max_icon_id,
             })
             .collect())
+    }
+
+    pub fn archive_id_bands(
+        &mut self,
+        prefix: &str,
+    ) -> Result<ArchiveIdBands, CuratorSessionError> {
+        let normalized_prefix = normalize_prefix(prefix)?;
+        let archive = self.archive(&normalized_prefix)?;
+        let mut bands = BTreeMap::<u32, BandAccumulator>::new();
+
+        for record in archive.records() {
+            let band_start = record.icon_id / ICON_ID_BAND_SIZE * ICON_ID_BAND_SIZE;
+            bands
+                .entry(band_start)
+                .or_insert_with(|| BandAccumulator::new(record.icon_id))
+                .add(record.icon_id, record.block_index, record.group_code);
+        }
+
+        Ok(ArchiveIdBands {
+            prefix: normalized_prefix,
+            band_size: ICON_ID_BAND_SIZE,
+            bands: bands
+                .into_iter()
+                .map(|(start_icon_id, band)| ArchiveIdBandSummary {
+                    start_icon_id,
+                    end_icon_id: start_icon_id.saturating_add(ICON_ID_BAND_SIZE - 1),
+                    first_actual_icon_id: band.first_actual_icon_id,
+                    last_actual_icon_id: band.last_actual_icon_id,
+                    record_count: band.record_count,
+                    unique_block_count: band.block_indices.len(),
+                    group_codes: band.group_codes.into_iter().collect(),
+                })
+                .collect(),
+        })
+    }
+
+    pub fn archive_band_samples(
+        &mut self,
+        prefix: &str,
+        start_icon_id: u32,
+        end_icon_id: u32,
+    ) -> Result<ArchiveBandSamples, CuratorSessionError> {
+        let normalized_prefix = normalize_prefix(prefix)?;
+        if start_icon_id > end_icon_id {
+            return Err(CuratorSessionError::InvalidIdRange {
+                start_icon_id,
+                end_icon_id,
+            });
+        }
+        let archive = self.archive(&normalized_prefix)?;
+        let mut records = archive
+            .records()
+            .iter()
+            .filter(|record| (start_icon_id..=end_icon_id).contains(&record.icon_id))
+            .copied()
+            .collect::<Vec<_>>();
+        let record_count = records.len();
+
+        if records.is_empty() {
+            return Err(CuratorSessionError::ArchiveRangeNotFound {
+                prefix: normalized_prefix,
+                start_icon_id,
+                end_icon_id,
+            });
+        }
+
+        records
+            .sort_unstable_by_key(|record| (record.icon_id, record.group_code, record.block_index));
+        let group_codes = records
+            .iter()
+            .map(|record| record.group_code)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let first = records.first().expect("band contains a first record");
+        let last = records.last().expect("band contains a last record");
+        let first_record = extract_sample(
+            archive,
+            &normalized_prefix,
+            ResourceKey {
+                group_code: first.group_code,
+                icon_id: first.icon_id,
+                block_index: first.block_index,
+            },
+        )?;
+        let last_record = extract_sample(
+            archive,
+            &normalized_prefix,
+            ResourceKey {
+                group_code: last.group_code,
+                icon_id: last.icon_id,
+                block_index: last.block_index,
+            },
+        )?;
+
+        let mut seen_blocks = HashSet::new();
+        records.retain(|record| seen_blocks.insert(record.block_index));
+        let unique_block_count = records.len();
+        let mut samples = Vec::new();
+        for index in evenly_spaced_indices(records.len(), MAX_SAMPLE_COUNT) {
+            let record = records[index];
+            samples.push(extract_sample(
+                archive,
+                &normalized_prefix,
+                ResourceKey {
+                    group_code: record.group_code,
+                    icon_id: record.icon_id,
+                    block_index: record.block_index,
+                },
+            )?);
+        }
+
+        Ok(ArchiveBandSamples {
+            prefix: normalized_prefix,
+            start_icon_id,
+            end_icon_id,
+            record_count,
+            unique_block_count,
+            group_codes,
+            first_record,
+            last_record,
+            samples,
+        })
     }
 
     pub fn group_id_ranges(
@@ -305,6 +463,35 @@ struct GroupAccumulator {
     max_icon_id: u32,
 }
 
+#[derive(Debug)]
+struct BandAccumulator {
+    record_count: usize,
+    block_indices: HashSet<u32>,
+    group_codes: BTreeSet<u32>,
+    first_actual_icon_id: u32,
+    last_actual_icon_id: u32,
+}
+
+impl BandAccumulator {
+    fn new(icon_id: u32) -> Self {
+        Self {
+            record_count: 0,
+            block_indices: HashSet::new(),
+            group_codes: BTreeSet::new(),
+            first_actual_icon_id: icon_id,
+            last_actual_icon_id: icon_id,
+        }
+    }
+
+    fn add(&mut self, icon_id: u32, block_index: u32, group_code: u32) {
+        self.record_count += 1;
+        self.block_indices.insert(block_index);
+        self.group_codes.insert(group_code);
+        self.first_actual_icon_id = self.first_actual_icon_id.min(icon_id);
+        self.last_actual_icon_id = self.last_actual_icon_id.max(icon_id);
+    }
+}
+
 impl GroupAccumulator {
     fn new(icon_id: u32) -> Self {
         Self {
@@ -372,6 +559,11 @@ pub enum CuratorSessionError {
         start_icon_id: u32,
         end_icon_id: u32,
     },
+    ArchiveRangeNotFound {
+        prefix: String,
+        start_icon_id: u32,
+        end_icon_id: u32,
+    },
     Extract {
         prefix: String,
         source: ExtractError,
@@ -415,6 +607,14 @@ impl fmt::Display for CuratorSessionError {
                 formatter,
                 "{prefix} 원시 그룹 {group_code}에서 ID {start_icon_id}–{end_icon_id} 구간을 찾지 못했습니다."
             ),
+            Self::ArchiveRangeNotFound {
+                prefix,
+                start_icon_id,
+                end_icon_id,
+            } => write!(
+                formatter,
+                "{prefix}에서 ID {start_icon_id}–{end_icon_id} 대역의 레코드를 찾지 못했습니다."
+            ),
             Self::Extract { prefix, source } => {
                 write!(
                     formatter,
@@ -433,7 +633,8 @@ impl Error for CuratorSessionError {
             | Self::UnsupportedPrefix { .. }
             | Self::GroupNotFound { .. }
             | Self::InvalidIdRange { .. }
-            | Self::IdRangeNotFound { .. } => None,
+            | Self::IdRangeNotFound { .. }
+            | Self::ArchiveRangeNotFound { .. } => None,
         }
     }
 }
@@ -623,5 +824,67 @@ mod tests {
                 .chain(&second_samples.samples)
                 .all(|sample| sample.png.starts_with(b"\x89PNG\r\n\x1a\n"))
         );
+    }
+
+    #[test]
+    fn groups_archive_records_into_numeric_bands_across_raw_groups() {
+        let directory = TestDirectory::new();
+        write_archive(
+            &directory.0,
+            &[
+                [99_006, 0, 1, 1, 1],
+                [100_100, 1, 1, 1, 1],
+                [199_002, 2, 1, 1, 2],
+                [200_100, 3, 1, 1, 2],
+            ],
+            4,
+        );
+        let mut session = CuratorSession::default();
+        session.set_resource_directory(&directory.0);
+
+        let bands = session.archive_id_bands("sb").expect("summarize ID bands");
+        let samples = session
+            .archive_band_samples("sb", 100_000, 199_999)
+            .expect("sample archive band");
+
+        assert_eq!(bands.band_size, 100_000);
+        assert_eq!(
+            bands.bands,
+            [
+                ArchiveIdBandSummary {
+                    start_icon_id: 0,
+                    end_icon_id: 99_999,
+                    first_actual_icon_id: 99_006,
+                    last_actual_icon_id: 99_006,
+                    record_count: 1,
+                    unique_block_count: 1,
+                    group_codes: vec![1],
+                },
+                ArchiveIdBandSummary {
+                    start_icon_id: 100_000,
+                    end_icon_id: 199_999,
+                    first_actual_icon_id: 100_100,
+                    last_actual_icon_id: 199_002,
+                    record_count: 2,
+                    unique_block_count: 2,
+                    group_codes: vec![1, 2],
+                },
+                ArchiveIdBandSummary {
+                    start_icon_id: 200_000,
+                    end_icon_id: 299_999,
+                    first_actual_icon_id: 200_100,
+                    last_actual_icon_id: 200_100,
+                    record_count: 1,
+                    unique_block_count: 1,
+                    group_codes: vec![2],
+                },
+            ]
+        );
+        assert_eq!(samples.group_codes, [1, 2]);
+        assert_eq!(samples.first_record.icon_id, 100_100);
+        assert_eq!(samples.first_record.group_code, 1);
+        assert_eq!(samples.last_record.icon_id, 199_002);
+        assert_eq!(samples.last_record.group_code, 2);
+        assert_eq!(samples.samples.len(), 2);
     }
 }
