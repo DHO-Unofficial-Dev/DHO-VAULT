@@ -20,6 +20,7 @@ const rangeList = document.querySelector("#range-list");
 const samplePanel = document.querySelector("#sample-panel");
 const sampleTitle = document.querySelector("#sample-title");
 const sampleStatus = document.querySelector("#sample-status");
+const boundaryGrid = document.querySelector("#boundary-grid");
 const sampleGrid = document.querySelector("#sample-grid");
 
 let sampleUrls = [];
@@ -48,6 +49,7 @@ function clearSamples() {
   samplePanel.hidden = true;
   sampleTitle.textContent = "표본 이미지";
   sampleStatus.textContent = "";
+  boundaryGrid.replaceChildren();
   sampleGrid.replaceChildren();
 }
 
@@ -184,24 +186,46 @@ async function openArchive(prefix) {
   }
 }
 
+function createSampleCard(sample, boundaryLabel = null) {
+  const card = document.createElement("figure");
+  const imageStage = document.createElement("div");
+  const image = document.createElement("img");
+  const caption = document.createElement("figcaption");
+  const url = URL.createObjectURL(
+    new Blob([new Uint8Array(sample.png)], { type: "image/png" }),
+  );
+  sampleUrls.push(url);
+  image.src = url;
+  image.alt = `${boundaryLabel ? `${boundaryLabel} · ` : ""}아이콘 ID ${sample.iconId}`;
+  image.loading = "lazy";
+  caption.textContent = `ID ${formatNumber(sample.iconId)} · 블록 ${formatNumber(sample.blockIndex)} · ${sample.width}×${sample.height}`;
+  if (boundaryLabel !== null) {
+    const badge = document.createElement("strong");
+    badge.textContent = boundaryLabel;
+    imageStage.append(badge);
+    card.className = "boundary-card";
+  }
+  imageStage.append(image);
+  card.append(imageStage, caption);
+  return card;
+}
+
 function renderSamples(result) {
+  boundaryGrid.replaceChildren();
   sampleGrid.replaceChildren();
+
+  const sameBoundary =
+    result.firstRecord.iconId === result.lastRecord.iconId &&
+    result.firstRecord.blockIndex === result.lastRecord.blockIndex;
+  boundaryGrid.append(
+    createSampleCard(result.firstRecord, sameBoundary ? "처음 · 끝" : "처음"),
+  );
+  if (!sameBoundary) {
+    boundaryGrid.append(createSampleCard(result.lastRecord, "끝"));
+  }
+
   for (const sample of result.samples) {
-    const card = document.createElement("figure");
-    const imageStage = document.createElement("div");
-    const image = document.createElement("img");
-    const caption = document.createElement("figcaption");
-    const url = URL.createObjectURL(
-      new Blob([new Uint8Array(sample.png)], { type: "image/png" }),
-    );
-    sampleUrls.push(url);
-    image.src = url;
-    image.alt = `아이콘 ID ${sample.iconId}`;
-    image.loading = "lazy";
-    caption.textContent = `ID ${formatNumber(sample.iconId)} · 블록 ${formatNumber(sample.blockIndex)} · ${sample.width}×${sample.height}`;
-    imageStage.append(image);
-    card.append(imageStage, caption);
-    sampleGrid.append(card);
+    sampleGrid.append(createSampleCard(sample));
   }
 }
 

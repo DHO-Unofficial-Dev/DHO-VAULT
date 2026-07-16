@@ -61,6 +61,8 @@ pub struct RangeSamples {
     pub end_icon_id: u32,
     pub record_count: usize,
     pub unique_block_count: usize,
+    pub first_record: ResourceSample,
+    pub last_record: ResourceSample,
     pub samples: Vec<ResourceSample>,
 }
 
@@ -200,6 +202,27 @@ impl CuratorSession {
         }
 
         records.sort_unstable_by_key(|record| (record.icon_id, record.block_index));
+        let first_record = records.first().expect("range contains a first record");
+        let last_record = records.last().expect("range contains a last record");
+        let first_record = extract_sample(
+            archive,
+            &normalized_prefix,
+            ResourceKey {
+                group_code: first_record.group_code,
+                icon_id: first_record.icon_id,
+                block_index: first_record.block_index,
+            },
+        )?;
+        let last_record = extract_sample(
+            archive,
+            &normalized_prefix,
+            ResourceKey {
+                group_code: last_record.group_code,
+                icon_id: last_record.icon_id,
+                block_index: last_record.block_index,
+            },
+        )?;
+
         let mut seen_blocks = HashSet::new();
         records.retain(|record| seen_blocks.insert(record.block_index));
         let unique_block_count = records.len();
@@ -212,21 +235,7 @@ impl CuratorSession {
                 icon_id: record.icon_id,
                 block_index: record.block_index,
             };
-            let extracted = archive
-                .extract_png(key, MAX_SAMPLE_OUTPUT_SIZE)
-                .map_err(|source| CuratorSessionError::Extract {
-                    prefix: normalized_prefix.clone(),
-                    source,
-                })?;
-            samples.push(ResourceSample {
-                prefix: normalized_prefix.clone(),
-                group_code,
-                icon_id: record.icon_id,
-                block_index: record.block_index,
-                width: extracted.width,
-                height: extracted.height,
-                png: extracted.png,
-            });
+            samples.push(extract_sample(archive, &normalized_prefix, key)?);
         }
 
         Ok(RangeSamples {
@@ -236,6 +245,8 @@ impl CuratorSession {
             end_icon_id,
             record_count,
             unique_block_count,
+            first_record,
+            last_record,
             samples,
         })
     }
@@ -262,6 +273,28 @@ impl CuratorSession {
             .get(&prefix)
             .expect("archive was inserted before lookup"))
     }
+}
+
+fn extract_sample(
+    archive: &LoadedArchive,
+    prefix: &str,
+    key: ResourceKey,
+) -> Result<ResourceSample, CuratorSessionError> {
+    let extracted = archive
+        .extract_png(key, MAX_SAMPLE_OUTPUT_SIZE)
+        .map_err(|source| CuratorSessionError::Extract {
+            prefix: prefix.to_owned(),
+            source,
+        })?;
+    Ok(ResourceSample {
+        prefix: prefix.to_owned(),
+        group_code: key.group_code,
+        icon_id: key.icon_id,
+        block_index: key.block_index,
+        width: extracted.width,
+        height: extracted.height,
+        png: extracted.png,
+    })
 }
 
 #[derive(Debug)]
@@ -572,6 +605,8 @@ mod tests {
         assert_eq!(ranges.gap_threshold, 1_000);
         assert_eq!(first_samples.record_count, 2);
         assert_eq!(first_samples.unique_block_count, 1);
+        assert_eq!(first_samples.first_record.icon_id, 100);
+        assert_eq!(first_samples.last_record.icon_id, 200);
         assert_eq!(
             first_samples
                 .samples

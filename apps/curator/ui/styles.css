@@ -74,6 +74,7 @@ body {
 
 h1,
 h2,
+h3,
 p {
   margin-top: 0;
 }
@@ -368,14 +369,47 @@ button:disabled {
   gap: var(--space-2);
 }
 
-.sample-grid figure {
+.subsection-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  align-items: baseline;
+  margin: var(--space-4) 0 var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rule);
+}
+
+.subsection-heading h3 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.subsection-heading span {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.sample-heading {
+  margin-top: var(--space-4);
+}
+
+.boundary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 18rem));
+  gap: var(--space-2);
+}
+
+.sample-grid figure,
+.boundary-grid figure {
   min-width: 0;
   margin: 0;
   border: 1px solid var(--rule);
   background: var(--surface-strong);
 }
 
-.sample-grid figure > div {
+.sample-grid figure > div,
+.boundary-grid figure > div {
+  position: relative;
   display: grid;
   min-height: 8rem;
   place-items: center;
@@ -390,14 +424,35 @@ button:disabled {
   background-size: 1rem 1rem;
 }
 
-.sample-grid img {
+.sample-grid img,
+.boundary-grid img {
   display: block;
   max-width: 100%;
   max-height: 7rem;
   image-rendering: pixelated;
 }
 
-.sample-grid figcaption {
+.boundary-grid figure > div {
+  min-height: 12rem;
+}
+
+.boundary-grid img {
+  max-height: 10rem;
+}
+
+.boundary-card strong {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  padding: 0.25rem 0.45rem;
+  color: var(--bg);
+  background: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+
+.sample-grid figcaption,
+.boundary-grid figcaption {
   padding: 0.55rem;
   color: var(--muted);
   font-family: var(--font-mono);
@@ -453,5 +508,9 @@ button:disabled {
 
   .section-status {
     text-align: left;
+  }
+
+  .boundary-grid {
+    grid-template-columns: 1fr;
   }
 }
