@@ -3,6 +3,7 @@
 //! Human-reviewed category metadata kept separate from raw archive facts.
 
 mod sb;
+mod sc;
 
 use serde::Serialize;
 
@@ -12,6 +13,7 @@ pub struct CatalogRecordKey<'a> {
     pub archive: &'a str,
     pub group_code: u32,
     pub icon_id: u32,
+    pub block_index: u32,
 }
 
 /// A display hierarchy such as `장비 > 방어구 > 머리`.
@@ -84,7 +86,12 @@ pub struct ReservationSuggestion {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuleScope {
+    ExactBlock(u32),
     ExactId(u32),
+    BlockRange {
+        start: u32,
+        end: u32,
+    },
     IdRange {
         start: u32,
         end: u32,
@@ -96,12 +103,22 @@ pub(crate) enum RuleScope {
 impl RuleScope {
     fn score(self, key: CatalogRecordKey<'_>) -> Option<(u8, u32)> {
         match self {
-            Self::ExactId(icon_id) if icon_id == key.icon_id => Some((3, u32::MAX)),
+            Self::ExactBlock(block_index) if block_index == key.block_index => Some((5, u32::MAX)),
+            Self::ExactId(icon_id) if icon_id == key.icon_id => Some((4, u32::MAX)),
+            Self::BlockRange { start, end }
+                if start <= key.block_index && key.block_index <= end =>
+            {
+                Some((3, u32::MAX - end.saturating_sub(start)))
+            }
             Self::IdRange { start, end } if start <= key.icon_id && key.icon_id <= end => {
                 Some((2, u32::MAX - end.saturating_sub(start)))
             }
             Self::Group(group_code) if group_code == key.group_code => Some((1, 0)),
-            Self::ExactId(_) | Self::IdRange { .. } | Self::Group(_) => None,
+            Self::ExactBlock(_)
+            | Self::ExactId(_)
+            | Self::BlockRange { .. }
+            | Self::IdRange { .. }
+            | Self::Group(_) => None,
         }
     }
 }
@@ -243,6 +260,8 @@ impl<'a> Catalog<'a> {
 pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
     if key.archive.eq_ignore_ascii_case("sb") {
         Catalog::new(sb::RECORD_RULES, sb::RESERVATION_RULES).classify(key)
+    } else if key.archive.eq_ignore_ascii_case("sc") {
+        Catalog::new(sc::RECORD_RULES, &[]).classify(key)
     } else {
         RecordClassification::unknown()
     }
@@ -265,11 +284,37 @@ mod tests {
             archive: "sb",
             group_code,
             icon_id,
+            block_index: 0,
+        }
+    }
+
+    fn sc_key(group_code: u32, icon_id: u32, block_index: u32) -> CatalogRecordKey<'static> {
+        CatalogRecordKey {
+            archive: "sc",
+            group_code,
+            icon_id,
+            block_index,
         }
     }
 
     fn assert_category(icon_id: u32, expected: &[&str]) {
         let classification = classify_record(key(0, icon_id));
+        assert_eq!(
+            classification.category.map(CategoryPath::segments),
+            Some(expected)
+        );
+        assert_eq!(
+            classification.boundary_status,
+            VerificationStatus::HumanVerified
+        );
+        assert_eq!(
+            classification.meaning_status,
+            VerificationStatus::HumanVerified
+        );
+    }
+
+    fn assert_sc_category(block_index: u32, expected: &[&str]) {
+        let classification = classify_record(sc_key(0, 0, block_index));
         assert_eq!(
             classification.category.map(CategoryPath::segments),
             Some(expected)
@@ -381,13 +426,82 @@ mod tests {
     fn unsupported_archives_remain_unknown() {
         assert_eq!(
             classify_record(CatalogRecordKey {
-                archive: "sc",
+                archive: "sd",
                 group_code: 0,
                 icon_id: 200,
+                block_index: 0,
             }),
             RecordClassification::unknown()
         );
-        assert_eq!(reservation_candidate("sc", 200), None);
+        assert_eq!(reservation_candidate("sd", 200), None);
+    }
+
+    #[test]
+    fn classifies_representative_verified_sc_block_ranges() {
+        for (block_index, expected) in [
+            (0, &["교역품"][..]),
+            (683, &["선박"]),
+            (927, &["선박", "선박 재료", "재질"]),
+            (998, &["도시", "도시 내 건물"]),
+            (1_028, &["선박", "돛 무늬"]),
+            (1_135, &["UI 아이콘", "주점 메뉴"]),
+            (1_270, &["UI 아이콘", "카드"]),
+            (1_337, &["인물", "부관 아이콘"]),
+            (1_473, &["UI 아이콘", "타로"]),
+            (1_507, &["발견물", "1", "리스트 이미지 (48×48)"]),
+            (4_434, &["아팔타멘토", "집사"]),
+            (4_476, &["개인농장"]),
+            (4_490, &["UI 아이콘", "생산"]),
+            (4_498, &["UI 아이콘", "테크닉"]),
+            (4_532, &["개척도시"]),
+            (4_656, &["대학·학술협회·부관학교"]),
+            (4_921, &["인물", "미분류 초상화"]),
+            (5_115, &["기타"]),
+            (5_232, &["기타"]),
+            (5_233, &["발견물", "2", "리스트 이미지 (48×48)"]),
+            (5_265, &["인물", "NPC 초상화"]),
+            (5_327, &["인물", "미분류 초상화"]),
+            (5_593, &["잠재능력"]),
+            (5_940, &["기타"]),
+        ] {
+            assert_sc_category(block_index, expected);
+        }
+    }
+
+    #[test]
+    fn sc_repeated_ids_are_disambiguated_by_block_index() {
+        let preceding_misc = classify_record(sc_key(36, 12, 5_592));
+        assert_eq!(
+            preceding_misc.category.map(CategoryPath::segments),
+            Some(&["기타"][..])
+        );
+
+        let potential = classify_record(sc_key(36, 12, 5_604));
+        assert_eq!(
+            potential.category.map(CategoryPath::segments),
+            Some(&["잠재능력"][..])
+        );
+    }
+
+    #[test]
+    fn sc_candidate_ranges_remain_unclassified() {
+        for block_index in [4_458, 4_475, 5_311, 5_326] {
+            assert_eq!(
+                classify_record(sc_key(0, 0, block_index)),
+                RecordClassification::unknown()
+            );
+        }
+    }
+
+    #[test]
+    fn sc_reviewed_placeholder_is_explicitly_unknown() {
+        let classification = classify_record(sc_key(21, 9_999, 4_920));
+        assert_eq!(classification.category, None);
+        assert_eq!(
+            classification.boundary_status,
+            VerificationStatus::HumanVerified
+        );
+        assert_eq!(classification.meaning_status, VerificationStatus::Unknown);
     }
 
     #[test]
@@ -414,8 +528,10 @@ mod tests {
     }
 
     #[test]
-    fn exact_then_range_then_group_priority_is_stable() {
+    fn exact_block_then_exact_id_then_ranges_then_group_priority_is_stable() {
+        const BLOCK_RANGE: CategoryPath = CategoryPath::new(&["블록 범위"]);
         const RANGE: CategoryPath = CategoryPath::new(&["범위"]);
+        const EXACT_ID: CategoryPath = CategoryPath::new(&["개별 ID"]);
         const GROUP: CategoryPath = CategoryPath::new(&["그룹"]);
         const RULES: &[RecordRule] = &[
             RecordRule::verified(RuleScope::Group(7), GROUP, CategorySource::InGame),
@@ -424,21 +540,41 @@ mod tests {
                 RANGE,
                 CategorySource::InGame,
             ),
-            RecordRule::explicit_unknown(RuleScope::ExactId(42)),
+            RecordRule::verified(
+                RuleScope::BlockRange { start: 10, end: 20 },
+                BLOCK_RANGE,
+                CategorySource::InGame,
+            ),
+            RecordRule::verified(RuleScope::ExactId(42), EXACT_ID, CategorySource::InGame),
+            RecordRule::explicit_unknown(RuleScope::ExactBlock(15)),
         ];
         let catalog = Catalog::new(RULES, &[]);
 
-        assert_eq!(catalog.classify(key(7, 42)).category, None);
+        assert_eq!(catalog.classify(sc_key(7, 42, 15)).category, None);
         assert_eq!(
             catalog
-                .classify(key(7, 50))
+                .classify(sc_key(7, 42, 14))
+                .category
+                .map(CategoryPath::segments),
+            Some(&["개별 ID"][..])
+        );
+        assert_eq!(
+            catalog
+                .classify(sc_key(7, 50, 14))
+                .category
+                .map(CategoryPath::segments),
+            Some(&["블록 범위"][..])
+        );
+        assert_eq!(
+            catalog
+                .classify(sc_key(7, 50, 200))
                 .category
                 .map(CategoryPath::segments),
             Some(&["범위"][..])
         );
         assert_eq!(
             catalog
-                .classify(key(7, 200))
+                .classify(sc_key(7, 200, 200))
                 .category
                 .map(CategoryPath::segments),
             Some(&["그룹"][..])
