@@ -564,6 +564,9 @@ name = "dho-curator"
 version = "0.1.0"
 dependencies = [
  "dho-client",
+ "dho-extract",
+ "flate2",
+ "serde",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
