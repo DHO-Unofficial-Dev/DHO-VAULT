@@ -65,8 +65,8 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
         CategorySource::Custom,
     ),
     verified_block_range(5_115, 5_232, MISCELLANEOUS, CategorySource::Custom),
-    verified_block_range(5_233, 5_264, DISCOVERY_SET_2_SMALL, CategorySource::Custom),
-    verified_block_range(5_265, 5_310, PERSON_NPC_PORTRAIT, CategorySource::Custom),
+    verified_block_range(5_233, 5_265, DISCOVERY_SET_2_SMALL, CategorySource::Custom),
+    verified_block_range(5_266, 5_310, PERSON_NPC_PORTRAIT, CategorySource::Custom),
     // 5311..=5326 remains a candidate for aide rescue portraits.
     verified_block_range(
         5_327,
