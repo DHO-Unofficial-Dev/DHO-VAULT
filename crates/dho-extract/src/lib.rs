@@ -2,11 +2,12 @@
 
 //! Read-only loading and on-demand extraction of indexed DHO image resources.
 
+use dho_catalog::{AssemblyPlan, VerificationStatus, assembly_plan};
 use dho_core::{
     ArchiveBlockDecodeError, ArchiveDiagnostic, ArchiveLayout, BlockScanError, IndexParseError,
     IndexRecord, IndexedArchive, build_archive_layout, scan_data_file,
 };
-use dho_image::{PixelDecodeError, PngEncodeError, RgbaImage};
+use dho_image::{ImageAssemblyError, PixelDecodeError, PngEncodeError, RgbaImage};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File};
@@ -44,6 +45,16 @@ pub struct ResourceKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedResource {
     pub key: ResourceKey,
+    pub width: u32,
+    pub height: u32,
+    pub png: Vec<u8>,
+}
+
+/// One completed image joined from a human-verified physical block range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedAssembly {
+    pub first_block: u32,
+    pub last_block: u32,
     pub width: u32,
     pub height: u32,
     pub png: Vec<u8>,
@@ -144,14 +155,111 @@ impl LoadedArchive {
             });
         }
 
+        let image = self.decode_record(record, max_output_size)?;
+        let png = image.encode_png().map_err(ExtractError::PngEncode)?;
+
+        Ok(ExtractedResource {
+            key,
+            width: record.width,
+            height: record.height,
+            png,
+        })
+    }
+
+    /// Joins the completed image containing a block only when its rule was human-verified.
+    pub fn extract_verified_assembly(
+        &self,
+        block_index: u32,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+    ) -> Result<Option<ExtractedAssembly>, ExtractError> {
+        let Some(plan) = assembly_plan(self.prefix.as_str(), block_index) else {
+            return Ok(None);
+        };
+
+        self.extract_assembly(plan, max_tile_output_size, max_assembled_output_size)
+            .map(Some)
+    }
+
+    fn extract_assembly(
+        &self,
+        plan: AssemblyPlan,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+    ) -> Result<ExtractedAssembly, ExtractError> {
+        if !plan.rule.archive.eq_ignore_ascii_case(self.prefix.as_str()) {
+            return Err(ExtractError::AssemblyArchiveMismatch {
+                expected: plan.rule.archive,
+                actual: self.prefix.as_str().to_owned(),
+            });
+        }
+        if plan.rule.status != VerificationStatus::HumanVerified {
+            return Err(ExtractError::AssemblyRuleNotVerified {
+                first_block: plan.first_block,
+                last_block: plan.last_block,
+            });
+        }
+
+        let mut tiles = Vec::new();
+        for block_index in plan.first_block..=plan.last_block {
+            let record = self.record_for_block(block_index)?;
+            tiles.push(self.decode_record(record, max_tile_output_size)?);
+        }
+
+        let image = RgbaImage::assemble_grid(
+            &tiles,
+            plan.rule.columns,
+            plan.rule.rows,
+            plan.rule.output_width,
+            plan.rule.output_height,
+            max_assembled_output_size,
+        )
+        .map_err(ExtractError::ImageAssembly)?;
+        let png = image.encode_png().map_err(ExtractError::PngEncode)?;
+
+        Ok(ExtractedAssembly {
+            first_block: plan.first_block,
+            last_block: plan.last_block,
+            width: image.width(),
+            height: image.height(),
+            png,
+        })
+    }
+
+    fn record_for_block(&self, block_index: u32) -> Result<IndexRecord, ExtractError> {
+        let mut records = self
+            .index
+            .records
+            .iter()
+            .filter(|record| record.block_index == block_index)
+            .copied();
+        let record = records
+            .next()
+            .ok_or(ExtractError::AssemblyTileRecordNotFound { block_index })?;
+        if let Some(conflict) = records
+            .find(|candidate| candidate.width != record.width || candidate.height != record.height)
+        {
+            return Err(ExtractError::ConflictingBlockDimensions {
+                block_index,
+                first: (record.width, record.height),
+                conflicting: (conflict.width, conflict.height),
+            });
+        }
+        Ok(record)
+    }
+
+    fn decode_record(
+        &self,
+        record: IndexRecord,
+        max_output_size: usize,
+    ) -> Result<RgbaImage, ExtractError> {
+        let block_index = record.block_index;
         let block = self
             .layout
             .blocks
-            .get(usize::try_from(key.block_index).unwrap_or(usize::MAX))
-            .filter(|block| block.block_index == Some(key.block_index))
-            .ok_or(ExtractError::BlockUnavailable {
-                block_index: key.block_index,
-            })?;
+            .get(usize::try_from(block_index).unwrap_or(usize::MAX))
+            .filter(|block| block.block_index == Some(block_index))
+            .ok_or(ExtractError::BlockUnavailable { block_index })?;
         let location = block.kind.location();
         let data_file = self
             .data_files
@@ -172,14 +280,7 @@ impl LoadedArchive {
             .map_err(ExtractError::BlockDecode)?;
         let image = RgbaImage::from_bgra(record.width, record.height, &decoded)
             .map_err(ExtractError::PixelDecode)?;
-        let png = image.encode_png().map_err(ExtractError::PngEncode)?;
-
-        Ok(ExtractedResource {
-            key,
-            width: record.width,
-            height: record.height,
-            png,
-        })
+        Ok(image)
     }
 }
 
@@ -266,6 +367,22 @@ pub enum ExtractError {
         first: (u32, u32),
         conflicting: (u32, u32),
     },
+    AssemblyTileRecordNotFound {
+        block_index: u32,
+    },
+    ConflictingBlockDimensions {
+        block_index: u32,
+        first: (u32, u32),
+        conflicting: (u32, u32),
+    },
+    AssemblyArchiveMismatch {
+        expected: &'static str,
+        actual: String,
+    },
+    AssemblyRuleNotVerified {
+        first_block: u32,
+        last_block: u32,
+    },
     BlockUnavailable {
         block_index: u32,
     },
@@ -274,6 +391,7 @@ pub enum ExtractError {
     },
     BlockDecode(ArchiveBlockDecodeError),
     PixelDecode(PixelDecodeError),
+    ImageAssembly(ImageAssemblyError),
     PngEncode(PngEncodeError),
 }
 
@@ -324,6 +442,30 @@ impl fmt::Display for ExtractError {
                 conflicting.0,
                 conflicting.1
             ),
+            Self::AssemblyTileRecordNotFound { block_index } => write!(
+                formatter,
+                "assembly tile has no index record: block={block_index}"
+            ),
+            Self::ConflictingBlockDimensions {
+                block_index,
+                first,
+                conflicting,
+            } => write!(
+                formatter,
+                "assembly tile records disagree on dimensions for block={block_index}: {}x{} versus {}x{}",
+                first.0, first.1, conflicting.0, conflicting.1
+            ),
+            Self::AssemblyArchiveMismatch { expected, actual } => write!(
+                formatter,
+                "assembly rule belongs to archive {expected}, not {actual}"
+            ),
+            Self::AssemblyRuleNotVerified {
+                first_block,
+                last_block,
+            } => write!(
+                formatter,
+                "assembly rule for blocks {first_block}..={last_block} is not human-verified"
+            ),
             Self::BlockUnavailable { block_index } => {
                 write!(formatter, "resolved block {block_index} is unavailable")
             }
@@ -332,6 +474,7 @@ impl fmt::Display for ExtractError {
             }
             Self::BlockDecode(error) => error.fmt(formatter),
             Self::PixelDecode(error) => error.fmt(formatter),
+            Self::ImageAssembly(error) => error.fmt(formatter),
             Self::PngEncode(error) => error.fmt(formatter),
         }
     }
@@ -346,10 +489,15 @@ impl Error for ExtractError {
             Self::BlockScan { source, .. } => Some(source),
             Self::BlockDecode(error) => Some(error),
             Self::PixelDecode(error) => Some(error),
+            Self::ImageAssembly(error) => Some(error),
             Self::PngEncode(error) => Some(error),
             Self::InvalidLayout { .. }
             | Self::ResourceNotFound { .. }
             | Self::ConflictingRecordDimensions { .. }
+            | Self::AssemblyTileRecordNotFound { .. }
+            | Self::ConflictingBlockDimensions { .. }
+            | Self::AssemblyArchiveMismatch { .. }
+            | Self::AssemblyRuleNotVerified { .. }
             | Self::BlockUnavailable { .. }
             | Self::DataFileUnavailable { .. } => None,
         }
@@ -397,7 +545,12 @@ mod tests {
             .map(|record| record[4])
             .collect::<std::collections::HashSet<_>>()
             .len() as u32;
-        for value in [records.len() as u32, group_count, 1, 1, 1, 1, 0] {
+        let block_count = records
+            .iter()
+            .map(|record| record[1])
+            .max()
+            .map_or(0, |block_index| block_index + 1);
+        for value in [records.len() as u32, group_count, 1, 1, block_count, 1, 0] {
             push_u32(&mut index, value);
         }
         for record in records {
@@ -511,5 +664,79 @@ mod tests {
             error,
             ExtractError::ConflictingRecordDimensions { .. }
         ));
+    }
+
+    #[test]
+    fn decodes_and_joins_physical_blocks_from_an_assembly_plan() {
+        let directory = TestDirectory::new();
+        let records = [
+            [100, 0, 2, 1, 9],
+            [101, 1, 1, 1, 9],
+            [102, 2, 2, 2, 9],
+            [103, 3, 1, 2, 9],
+        ];
+        let raw_tiles = [
+            vec![0, 0, 255, 255, 0, 0, 255, 255],
+            vec![0, 255, 0, 255],
+            [255, 0, 0, 255].repeat(4),
+            [0, 255, 255, 255].repeat(2),
+        ];
+        let data = raw_tiles
+            .iter()
+            .flat_map(|raw| zlib_block(raw))
+            .collect::<Vec<_>>();
+        write_archive(&directory.0, &records, &data);
+        let archive = LoadedArchive::open(&directory.0, "sc").expect("open test archive");
+        let rule = dho_catalog::AssemblyRule {
+            archive: "sc",
+            start_block: 0,
+            end_block: 3,
+            tiles_per_image: 4,
+            columns: 2,
+            rows: 2,
+            output_width: 3,
+            output_height: 3,
+            tile_order: dho_catalog::TileOrder::RowMajor,
+            status: VerificationStatus::HumanVerified,
+        };
+        let plan = AssemblyPlan {
+            rule,
+            image_index: 0,
+            first_block: 0,
+            last_block: 3,
+            tile_index: 0,
+            row: 0,
+            column: 0,
+        };
+
+        let assembled = archive
+            .extract_assembly(plan, 16, 36)
+            .expect("extract assembled PNG");
+        let decoded = image::load_from_memory_with_format(&assembled.png, image::ImageFormat::Png)
+            .expect("decode assembled PNG")
+            .into_rgba8();
+
+        assert_eq!((assembled.first_block, assembled.last_block), (0, 3));
+        assert_eq!((assembled.width, assembled.height), (3, 3));
+        assert_eq!(
+            decoded.as_raw(),
+            &[
+                255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+                255, 255, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255, 255, 255, 0, 255,
+            ]
+        );
+    }
+
+    #[test]
+    fn returns_none_when_a_block_has_no_verified_assembly_rule() {
+        let directory = TestDirectory::new();
+        write_archive(&directory.0, &[[7, 0, 1, 1, 9]], &[1, 2, 3, 4]);
+        let archive = LoadedArchive::open(&directory.0, "sc").expect("open test archive");
+
+        let assembled = archive
+            .extract_verified_assembly(0, 4, 4)
+            .expect("look up verified assembly");
+
+        assert_eq!(assembled, None);
     }
 }
