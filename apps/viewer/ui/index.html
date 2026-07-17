@@ -57,9 +57,25 @@
           <p id="category-status" class="section-status" aria-live="polite"></p>
         </div>
         <p class="section-description">
-            실제 게임 이미지와 경계를 확인한 카테고리만 표시합니다. 현재는 카테고리별 확인된 이미지 수를 제공합니다.
+          실제 게임 이미지와 경계를 확인한 카테고리만 표시합니다. 카테고리를 선택하면 한 번에 32개씩 이미지를 불러옵니다.
         </p>
         <div id="category-groups" class="category-groups"></div>
+      </section>
+
+      <section id="gallery-panel" class="catalog-card gallery-card" aria-labelledby="gallery-title" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="section-label">IMAGE GALLERY</p>
+            <h2 id="gallery-title">카테고리를 선택해 주세요</h2>
+          </div>
+          <p id="gallery-status" class="section-status" aria-live="polite"></p>
+        </div>
+        <div id="gallery-grid" class="gallery-grid" aria-live="polite"></div>
+        <nav class="gallery-navigation" aria-label="이미지 페이지 이동">
+          <button id="previous-page" class="secondary-button" type="button">이전</button>
+          <span id="page-position"></span>
+          <button id="next-page" class="secondary-button" type="button">다음</button>
+        </nav>
       </section>
     </main>
   </body>

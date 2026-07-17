@@ -7,7 +7,7 @@ use dho_core::{
     ArchiveBlockDecodeError, ArchiveDiagnostic, ArchiveLayout, BlockScanError, IndexParseError,
     IndexRecord, IndexedArchive, build_archive_layout, scan_data_file,
 };
-use dho_image::{ImageAssemblyError, PixelDecodeError, PngEncodeError, RgbaImage};
+use dho_image::{ImageAssemblyError, PixelDecodeError, PngEncodeError, RgbaImage, ThumbnailError};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File};
@@ -50,11 +50,34 @@ pub struct ExtractedResource {
     pub png: Vec<u8>,
 }
 
+/// One physical resource resized for a bounded gallery preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedThumbnail {
+    pub key: ResourceKey,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub width: u32,
+    pub height: u32,
+    pub png: Vec<u8>,
+}
+
 /// One completed image joined from a human-verified physical block range.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedAssembly {
     pub first_block: u32,
     pub last_block: u32,
+    pub width: u32,
+    pub height: u32,
+    pub png: Vec<u8>,
+}
+
+/// One completed, human-verified image resized for a bounded gallery preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractedAssemblyThumbnail {
+    pub first_block: u32,
+    pub last_block: u32,
+    pub source_width: u32,
+    pub source_height: u32,
     pub width: u32,
     pub height: u32,
     pub png: Vec<u8>,
@@ -135,26 +158,7 @@ impl LoadedArchive {
         key: ResourceKey,
         max_output_size: usize,
     ) -> Result<ExtractedResource, ExtractError> {
-        let mut matching_records = self.index.records.iter().filter(|record| {
-            record.group_code == key.group_code
-                && record.icon_id == key.icon_id
-                && record.block_index == key.block_index
-        });
-        let record = matching_records
-            .next()
-            .copied()
-            .ok_or(ExtractError::ResourceNotFound { key })?;
-        if let Some(conflict) = matching_records
-            .copied()
-            .find(|candidate| candidate.width != record.width || candidate.height != record.height)
-        {
-            return Err(ExtractError::ConflictingRecordDimensions {
-                key,
-                first: (record.width, record.height),
-                conflicting: (conflict.width, conflict.height),
-            });
-        }
-
+        let record = self.record_for_key(key)?;
         let image = self.decode_record(record, max_output_size)?;
         let png = image.encode_png().map_err(ExtractError::PngEncode)?;
 
@@ -162,6 +166,32 @@ impl LoadedArchive {
             key,
             width: record.width,
             height: record.height,
+            png,
+        })
+    }
+
+    /// Decodes one physical record and returns a bounded PNG thumbnail.
+    pub fn extract_thumbnail_png(
+        &self,
+        key: ResourceKey,
+        max_decode_size: usize,
+        max_width: u32,
+        max_height: u32,
+        max_thumbnail_output_size: usize,
+    ) -> Result<ExtractedThumbnail, ExtractError> {
+        let record = self.record_for_key(key)?;
+        let image = self.decode_record(record, max_decode_size)?;
+        let thumbnail = image
+            .thumbnail(max_width, max_height, max_thumbnail_output_size)
+            .map_err(ExtractError::Thumbnail)?;
+        let png = thumbnail.encode_png().map_err(ExtractError::PngEncode)?;
+
+        Ok(ExtractedThumbnail {
+            key,
+            source_width: record.width,
+            source_height: record.height,
+            width: thumbnail.width(),
+            height: thumbnail.height(),
             png,
         })
     }
@@ -181,12 +211,80 @@ impl LoadedArchive {
             .map(Some)
     }
 
+    /// Joins a verified image and returns only a bounded PNG thumbnail.
+    pub fn extract_verified_assembly_thumbnail(
+        &self,
+        block_index: u32,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+        max_width: u32,
+        max_height: u32,
+        max_thumbnail_output_size: usize,
+    ) -> Result<Option<ExtractedAssemblyThumbnail>, ExtractError> {
+        let Some(plan) = assembly_plan(self.prefix.as_str(), block_index) else {
+            return Ok(None);
+        };
+        self.extract_assembly_thumbnail(
+            plan,
+            max_tile_output_size,
+            max_assembled_output_size,
+            max_width,
+            max_height,
+            max_thumbnail_output_size,
+        )
+        .map(Some)
+    }
+
+    fn extract_assembly_thumbnail(
+        &self,
+        plan: AssemblyPlan,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+        max_width: u32,
+        max_height: u32,
+        max_thumbnail_output_size: usize,
+    ) -> Result<ExtractedAssemblyThumbnail, ExtractError> {
+        let image = self.decode_assembly(plan, max_tile_output_size, max_assembled_output_size)?;
+        let thumbnail = image
+            .thumbnail(max_width, max_height, max_thumbnail_output_size)
+            .map_err(ExtractError::Thumbnail)?;
+        let png = thumbnail.encode_png().map_err(ExtractError::PngEncode)?;
+
+        Ok(ExtractedAssemblyThumbnail {
+            first_block: plan.first_block,
+            last_block: plan.last_block,
+            source_width: image.width(),
+            source_height: image.height(),
+            width: thumbnail.width(),
+            height: thumbnail.height(),
+            png,
+        })
+    }
+
     fn extract_assembly(
         &self,
         plan: AssemblyPlan,
         max_tile_output_size: usize,
         max_assembled_output_size: usize,
     ) -> Result<ExtractedAssembly, ExtractError> {
+        let image = self.decode_assembly(plan, max_tile_output_size, max_assembled_output_size)?;
+        let png = image.encode_png().map_err(ExtractError::PngEncode)?;
+
+        Ok(ExtractedAssembly {
+            first_block: plan.first_block,
+            last_block: plan.last_block,
+            width: image.width(),
+            height: image.height(),
+            png,
+        })
+    }
+
+    fn decode_assembly(
+        &self,
+        plan: AssemblyPlan,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+    ) -> Result<RgbaImage, ExtractError> {
         if !plan.rule.archive.eq_ignore_ascii_case(self.prefix.as_str()) {
             return Err(ExtractError::AssemblyArchiveMismatch {
                 expected: plan.rule.archive,
@@ -206,7 +304,7 @@ impl LoadedArchive {
             tiles.push(self.decode_record(record, max_tile_output_size)?);
         }
 
-        let image = RgbaImage::assemble_grid(
+        RgbaImage::assemble_grid(
             &tiles,
             plan.rule.columns,
             plan.rule.rows,
@@ -214,16 +312,30 @@ impl LoadedArchive {
             plan.rule.output_height,
             max_assembled_output_size,
         )
-        .map_err(ExtractError::ImageAssembly)?;
-        let png = image.encode_png().map_err(ExtractError::PngEncode)?;
+        .map_err(ExtractError::ImageAssembly)
+    }
 
-        Ok(ExtractedAssembly {
-            first_block: plan.first_block,
-            last_block: plan.last_block,
-            width: image.width(),
-            height: image.height(),
-            png,
-        })
+    fn record_for_key(&self, key: ResourceKey) -> Result<IndexRecord, ExtractError> {
+        let mut matching_records = self.index.records.iter().filter(|record| {
+            record.group_code == key.group_code
+                && record.icon_id == key.icon_id
+                && record.block_index == key.block_index
+        });
+        let record = matching_records
+            .next()
+            .copied()
+            .ok_or(ExtractError::ResourceNotFound { key })?;
+        if let Some(conflict) = matching_records
+            .copied()
+            .find(|candidate| candidate.width != record.width || candidate.height != record.height)
+        {
+            return Err(ExtractError::ConflictingRecordDimensions {
+                key,
+                first: (record.width, record.height),
+                conflicting: (conflict.width, conflict.height),
+            });
+        }
+        Ok(record)
     }
 
     fn record_for_block(&self, block_index: u32) -> Result<IndexRecord, ExtractError> {
@@ -392,6 +504,7 @@ pub enum ExtractError {
     BlockDecode(ArchiveBlockDecodeError),
     PixelDecode(PixelDecodeError),
     ImageAssembly(ImageAssemblyError),
+    Thumbnail(ThumbnailError),
     PngEncode(PngEncodeError),
 }
 
@@ -475,6 +588,7 @@ impl fmt::Display for ExtractError {
             Self::BlockDecode(error) => error.fmt(formatter),
             Self::PixelDecode(error) => error.fmt(formatter),
             Self::ImageAssembly(error) => error.fmt(formatter),
+            Self::Thumbnail(error) => error.fmt(formatter),
             Self::PngEncode(error) => error.fmt(formatter),
         }
     }
@@ -490,6 +604,7 @@ impl Error for ExtractError {
             Self::BlockDecode(error) => Some(error),
             Self::PixelDecode(error) => Some(error),
             Self::ImageAssembly(error) => Some(error),
+            Self::Thumbnail(error) => Some(error),
             Self::PngEncode(error) => Some(error),
             Self::InvalidLayout { .. }
             | Self::ResourceNotFound { .. }
@@ -593,6 +708,25 @@ mod tests {
         assert_eq!(archive.resource_keys().collect::<Vec<_>>(), [key()]);
         assert_eq!((extracted.width, extracted.height), (1, 1));
         assert_eq!(&extracted.png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn extracts_one_resource_as_a_bounded_thumbnail() {
+        let directory = TestDirectory::new();
+        write_archive(
+            &directory.0,
+            &[[7, 0, 2, 1, 9]],
+            &zlib_block(&[1, 2, 3, 255, 4, 5, 6, 255]),
+        );
+        let archive = LoadedArchive::open(&directory.0, "sc").expect("open test archive");
+
+        let thumbnail = archive
+            .extract_thumbnail_png(key(), 8, 1, 1, 4)
+            .expect("extract thumbnail");
+
+        assert_eq!((thumbnail.source_width, thumbnail.source_height), (2, 1));
+        assert_eq!((thumbnail.width, thumbnail.height), (1, 1));
+        assert_eq!(&thumbnail.png[..8], b"\x89PNG\r\n\x1a\n");
     }
 
     #[test]
@@ -725,6 +859,13 @@ mod tests {
                 255, 255, 0, 255, 0, 0, 255, 255, 0, 0, 255, 255, 255, 255, 0, 255,
             ]
         );
+
+        let thumbnail = archive
+            .extract_assembly_thumbnail(plan, 16, 36, 2, 2, 16)
+            .expect("extract assembled thumbnail");
+        assert_eq!((thumbnail.source_width, thumbnail.source_height), (3, 3));
+        assert_eq!((thumbnail.width, thumbnail.height), (2, 2));
+        assert_eq!(&thumbnail.png[..8], b"\x89PNG\r\n\x1a\n");
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! Pixel conversion and encoding for decoded DHO image resources.
 
 use image::codecs::png::PngEncoder;
+use image::imageops::FilterType;
 use image::{ExtendedColorType, ImageEncoder};
 use std::error::Error;
 use std::fmt;
@@ -50,6 +51,54 @@ impl RgbaImage {
 
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+
+    /// Shrinks an image to fit within the requested bounds without enlarging it.
+    pub fn thumbnail(
+        &self,
+        max_width: u32,
+        max_height: u32,
+        max_output_size: usize,
+    ) -> Result<Self, ThumbnailError> {
+        if max_width == 0 || max_height == 0 {
+            return Err(ThumbnailError::EmptyBounds {
+                max_width,
+                max_height,
+            });
+        }
+
+        let (width, height) = thumbnail_dimensions(self.width, self.height, max_width, max_height)
+            .ok_or(ThumbnailError::DimensionOverflow {
+                width: self.width,
+                height: self.height,
+                max_width,
+                max_height,
+            })?;
+        let required =
+            pixel_byte_len(width, height).map_err(|_| ThumbnailError::DimensionOverflow {
+                width: self.width,
+                height: self.height,
+                max_width,
+                max_height,
+            })?;
+        if required > max_output_size {
+            return Err(ThumbnailError::OutputTooLarge {
+                required,
+                maximum: max_output_size,
+            });
+        }
+        if (width, height) == (self.width, self.height) {
+            return Ok(self.clone());
+        }
+
+        let source = image::RgbaImage::from_raw(self.width, self.height, self.pixels.clone())
+            .expect("validated RGBA pixels match the declared dimensions");
+        let resized = image::imageops::resize(&source, width, height, FilterType::Triangle);
+        Ok(Self {
+            width,
+            height,
+            pixels: resized.into_raw(),
+        })
     }
 
     /// Joins row-major RGBA tiles whose last row or column may be smaller.
@@ -190,6 +239,78 @@ impl RgbaImage {
         Ok(output)
     }
 }
+
+fn thumbnail_dimensions(
+    width: u32,
+    height: u32,
+    max_width: u32,
+    max_height: u32,
+) -> Option<(u32, u32)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    if width <= max_width && height <= max_height {
+        return Some((width, height));
+    }
+
+    if u64::from(width) * u64::from(max_height) > u64::from(height) * u64::from(max_width) {
+        let numerator = u64::from(height) * u64::from(max_width);
+        let scaled_height = ((numerator + u64::from(width) / 2) / u64::from(width)).max(1);
+        Some((max_width, u32::try_from(scaled_height).ok()?))
+    } else {
+        let numerator = u64::from(width) * u64::from(max_height);
+        let scaled_width = ((numerator + u64::from(height) / 2) / u64::from(height)).max(1);
+        Some((u32::try_from(scaled_width).ok()?, max_height))
+    }
+}
+
+/// Invalid bounds or resource limits while creating a display thumbnail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThumbnailError {
+    EmptyBounds {
+        max_width: u32,
+        max_height: u32,
+    },
+    DimensionOverflow {
+        width: u32,
+        height: u32,
+        max_width: u32,
+        max_height: u32,
+    },
+    OutputTooLarge {
+        required: usize,
+        maximum: usize,
+    },
+}
+
+impl fmt::Display for ThumbnailError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyBounds {
+                max_width,
+                max_height,
+            } => write!(
+                formatter,
+                "thumbnail bounds must be non-zero: {max_width}x{max_height}"
+            ),
+            Self::DimensionOverflow {
+                width,
+                height,
+                max_width,
+                max_height,
+            } => write!(
+                formatter,
+                "thumbnail dimensions overflow: source={width}x{height}, bounds={max_width}x{max_height}"
+            ),
+            Self::OutputTooLarge { required, maximum } => write!(
+                formatter,
+                "thumbnail requires {required} decoded bytes, exceeding the limit of {maximum}"
+            ),
+        }
+    }
+}
+
+impl Error for ThumbnailError {}
 
 /// Invalid dimensions or byte counts in a decoded image block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,6 +554,55 @@ mod tests {
             height,
             pixels,
         }
+    }
+
+    #[test]
+    fn shrinks_a_thumbnail_without_changing_its_aspect_ratio() {
+        let image = solid_tile(8, 4, [10, 20, 30, 255]);
+
+        let thumbnail = image.thumbnail(3, 3, 24).expect("create thumbnail");
+
+        assert_eq!((thumbnail.width(), thumbnail.height()), (3, 2));
+        assert_eq!(thumbnail.pixels().len(), 24);
+    }
+
+    #[test]
+    fn does_not_enlarge_an_image_that_already_fits() {
+        let image = solid_tile(2, 3, [10, 20, 30, 255]);
+
+        let thumbnail = image.thumbnail(160, 160, 24).expect("keep image size");
+
+        assert_eq!(thumbnail, image);
+    }
+
+    #[test]
+    fn rejects_empty_thumbnail_bounds() {
+        let image = solid_tile(2, 3, [10, 20, 30, 255]);
+
+        let error = image.thumbnail(0, 160, 24).unwrap_err();
+
+        assert_eq!(
+            error,
+            ThumbnailError::EmptyBounds {
+                max_width: 0,
+                max_height: 160,
+            }
+        );
+    }
+
+    #[test]
+    fn enforces_the_thumbnail_output_limit() {
+        let image = solid_tile(4, 4, [10, 20, 30, 255]);
+
+        let error = image.thumbnail(4, 4, 63).unwrap_err();
+
+        assert_eq!(
+            error,
+            ThumbnailError::OutputTooLarge {
+                required: 64,
+                maximum: 63,
+            }
+        );
     }
 
     #[test]
