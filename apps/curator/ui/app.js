@@ -24,6 +24,19 @@ const assemblyGridLabel = document.querySelector("#assembly-grid-label");
 const assemblyTileGrid = document.querySelector("#assembly-tile-grid");
 const assemblyResult = document.querySelector("#assembly-result");
 
+const verificationLabels = {
+  unknown: "미확정",
+  candidate: "후보",
+  human_verified: "검증됨",
+  rejected: "거절됨",
+};
+
+const categorySourceLabels = {
+  in_game: "게임 내 분류",
+  custom: "사용자 정의",
+  temporary: "임시 검수 분류",
+};
+
 let sampleUrls = [];
 let assemblyUrls = [];
 
@@ -122,6 +135,50 @@ function createErrorItem(error) {
   return item;
 }
 
+function verificationLabel(status) {
+  return verificationLabels[status] ?? status;
+}
+
+function createClassificationChip(label, status) {
+  const chip = document.createElement("span");
+  chip.className = "classification-chip";
+  chip.dataset.status = status;
+  chip.textContent = `${label} ${verificationLabel(status)}`;
+  return chip;
+}
+
+function createClassificationSummary(classification) {
+  const summary = document.createElement("div");
+  const category = document.createElement("strong");
+  const details = document.createElement("div");
+  const categoryPath = classification.category;
+
+  summary.className = "classification-summary";
+  category.className = "classification-category";
+  category.textContent = Array.isArray(categoryPath)
+    ? categoryPath.join(" > ")
+    : classification.boundaryStatus === "human_verified"
+      ? "미분류"
+      : "미확정";
+  details.className = "classification-details";
+
+  if (classification.categorySource !== null) {
+    const source = document.createElement("span");
+    source.className = "classification-source";
+    source.textContent =
+      categorySourceLabels[classification.categorySource] ??
+      classification.categorySource;
+    details.append(source);
+  }
+
+  details.append(
+    createClassificationChip("경계", classification.boundaryStatus),
+    createClassificationChip("의미", classification.meaningStatus),
+  );
+  summary.append(category, details);
+  return summary;
+}
+
 function renderSummary(summary) {
   gameDirectory.textContent = summary.gameDirectory;
   resourceDirectory.textContent = summary.resourceDirectory;
@@ -200,6 +257,7 @@ function createSampleCard(sample, boundaryLabel = null) {
   const imageStage = document.createElement("div");
   const image = document.createElement("img");
   const caption = document.createElement("figcaption");
+  imageStage.className = "sample-image-stage";
   image.src = createPngUrl(sample.png, sampleUrls);
   image.alt = `${boundaryLabel ? `${boundaryLabel} · ` : ""}아이콘 ID ${sample.iconId}`;
   image.loading = "lazy";
@@ -211,7 +269,11 @@ function createSampleCard(sample, boundaryLabel = null) {
     card.className = "boundary-card";
   }
   imageStage.append(image);
-  card.append(imageStage, caption);
+  card.append(
+    imageStage,
+    caption,
+    createClassificationSummary(sample.classification),
+  );
   if (sample.hasVerifiedAssembly) {
     const actions = document.createElement("div");
     actions.className = "sample-card-actions";

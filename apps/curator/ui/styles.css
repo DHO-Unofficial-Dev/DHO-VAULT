@@ -415,8 +415,8 @@ button:disabled {
   background: var(--surface-strong);
 }
 
-.sample-grid figure > div,
-.boundary-grid figure > div {
+.sample-grid .sample-image-stage,
+.boundary-grid .sample-image-stage {
   position: relative;
   display: grid;
   min-height: 8rem;
@@ -440,7 +440,7 @@ button:disabled {
   image-rendering: pixelated;
 }
 
-.boundary-grid figure > div {
+.boundary-grid .sample-image-stage {
   min-height: 12rem;
 }
 
@@ -468,6 +468,50 @@ button:disabled {
   font-family: var(--font-mono);
   font-size: 0.66rem;
   line-height: 1.5;
+}
+
+.classification-summary {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0 0.55rem 0.55rem;
+}
+
+.classification-category {
+  color: var(--ink);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.classification-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.classification-source,
+.classification-chip {
+  padding: 0.18rem 0.32rem;
+  border: 1px solid var(--rule);
+  color: var(--muted);
+  background: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 0.58rem;
+  line-height: 1.25;
+}
+
+.classification-chip[data-status="human_verified"] {
+  border-color: rgba(216, 168, 75, 0.55);
+  color: var(--accent);
+}
+
+.classification-chip[data-status="candidate"] {
+  border-color: rgba(139, 154, 170, 0.7);
+  color: #bdc8d2;
+}
+
+.classification-chip[data-status="rejected"] {
+  border-color: rgba(199, 90, 72, 0.65);
+  color: #f1b5a9;
 }
 
 .sample-card-actions {
