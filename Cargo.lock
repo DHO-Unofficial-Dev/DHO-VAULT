@@ -555,6 +555,7 @@ dependencies = [
 name = "dho-client"
 version = "0.1.0"
 dependencies = [
+ "dho-catalog",
  "dho-core",
  "serde",
 ]
