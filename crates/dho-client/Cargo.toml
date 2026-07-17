@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+dho-catalog = { path = "../dho-catalog" }
 dho-core = { path = "../dho-core" }
 serde = { version = "=1.0.228", features = ["derive"] }
 

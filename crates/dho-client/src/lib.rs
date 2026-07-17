@@ -2,8 +2,10 @@
 
 //! Read-only discovery and inspection of a DHO game client installation.
 
+use dho_catalog::{CatalogRecordKey, VerificationStatus, assembly_plan, classify_record};
 use dho_core::{IndexParseError, IndexedArchive};
 use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -28,6 +30,14 @@ pub struct GameDirectorySummary {
     pub game_directory: String,
     pub resource_directory: String,
     pub archives: Vec<ArchiveIndexSummary>,
+    pub verified_categories: Vec<VerifiedCategorySummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifiedCategorySummary {
+    pub path: Vec<String>,
+    pub asset_count: usize,
 }
 
 pub fn inspect_game_directory(
@@ -53,6 +63,7 @@ pub fn inspect_game_directory(
     }
 
     let mut archives = Vec::new();
+    let mut verified_assets = BTreeMap::<Vec<&'static str>, BTreeSet<(String, u32)>>::new();
     for prefix in SUPPORTED_ARCHIVE_PREFIXES {
         let path = resource_directory.join(format!("{prefix}000000.bin"));
         if !path.is_file() {
@@ -70,6 +81,28 @@ pub fn inspect_game_directory(
                 source,
             })?;
         let header = index.header;
+        for record in &index.records {
+            let classification = classify_record(CatalogRecordKey {
+                archive: prefix,
+                group_code: record.group_code,
+                icon_id: record.icon_id,
+                block_index: record.block_index,
+            });
+            if classification.boundary_status != VerificationStatus::HumanVerified
+                || classification.meaning_status != VerificationStatus::HumanVerified
+            {
+                continue;
+            }
+            let Some(category) = classification.category else {
+                continue;
+            };
+            let canonical_block = assembly_plan(prefix, record.block_index)
+                .map_or(record.block_index, |plan| plan.first_block);
+            verified_assets
+                .entry(category.segments().to_vec())
+                .or_default()
+                .insert((prefix.to_owned(), canonical_block));
+        }
         archives.push(ArchiveIndexSummary {
             prefix: prefix.to_owned(),
             record_count: header.record_count,
@@ -89,6 +122,13 @@ pub fn inspect_game_directory(
         game_directory: game_directory.to_string_lossy().into_owned(),
         resource_directory: resource_directory.to_string_lossy().into_owned(),
         archives,
+        verified_categories: verified_assets
+            .into_iter()
+            .map(|(path, assets)| VerifiedCategorySummary {
+                path: path.into_iter().map(str::to_owned).collect(),
+                asset_count: assets.len(),
+            })
+            .collect(),
     })
 }
 
@@ -212,12 +252,31 @@ mod tests {
     }
 
     fn write_index(path: &Path, group_code: u32) {
+        write_index_records(path, &[[7, 0, 48, 48, group_code]], 1);
+    }
+
+    fn write_index_records(path: &Path, records: &[[u32; 5]], image_block_count: u32) {
         let mut bytes = Vec::new();
-        for value in [1, 1, 48, 48, 1, 1, 0] {
+        let group_count = records
+            .iter()
+            .map(|record| record[4])
+            .collect::<BTreeSet<_>>()
+            .len() as u32;
+        for value in [
+            records.len() as u32,
+            group_count,
+            48,
+            48,
+            image_block_count,
+            1,
+            0,
+        ] {
             push_u32(&mut bytes, value);
         }
-        for value in [7, 0, 48, 48, group_code] {
-            push_u32(&mut bytes, value);
+        for record in records {
+            for value in record {
+                push_u32(&mut bytes, *value);
+            }
         }
         fs::write(path, bytes).expect("write test index");
     }
@@ -243,6 +302,56 @@ mod tests {
         assert_eq!(summary.archives[0].group_count, 1);
         assert_eq!(summary.archives[0].image_block_count, 1);
         assert_eq!(summary.archives[0].archive_count, 1);
+        assert_eq!(
+            summary.verified_categories,
+            [VerifiedCategorySummary {
+                path: ["장비", "방어구", "몸"].map(str::to_owned).to_vec(),
+                asset_count: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn summarizes_only_verified_unique_and_assembled_assets() {
+        let directory = TestDirectory::new();
+        let resources = directory.prepare_game();
+        write_index_records(
+            &resources.join("sb000000.bin"),
+            &[
+                [100_100, 0, 48, 48, 1],
+                [100_101, 0, 48, 48, 2],
+                [100_102, 1, 48, 48, 1],
+                [1_200_002, 2, 48, 48, 1],
+            ],
+            3,
+        );
+        let sd_records = (0..28)
+            .map(|offset| [offset + 1, 10_368 + offset, 128, 128, 33])
+            .collect::<Vec<_>>();
+        write_index_records(&resources.join("sd000000.bin"), &sd_records, 10_396);
+
+        let summary = inspect_game_directory(&directory.0).expect("inspect categorized game");
+        let head = summary
+            .verified_categories
+            .iter()
+            .find(|category| category.path == ["장비", "방어구", "머리"])
+            .expect("head equipment category");
+        let book = summary
+            .verified_categories
+            .iter()
+            .find(|category| category.path == ["UI 이미지", "예지의 서", "표지"])
+            .expect("Book of Wisdom category");
+
+        assert_eq!(head.asset_count, 2);
+        assert_eq!(book.asset_count, 1);
+        assert_eq!(
+            summary
+                .verified_categories
+                .iter()
+                .map(|category| category.asset_count)
+                .sum::<usize>(),
+            3
+        );
     }
 
     #[test]

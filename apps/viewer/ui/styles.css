@@ -95,16 +95,20 @@ h1 {
 }
 
 .picker-card,
-.status-card {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: var(--space-3);
-  align-items: start;
+.status-card,
+.catalog-card {
   padding: var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
   box-shadow: 0.5rem 0.5rem 0 var(--rule);
+}
+
+.status-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-3);
+  align-items: start;
 }
 
 .picker-card {
@@ -251,6 +255,106 @@ button:disabled {
   line-height: 1.5;
 }
 
+.catalog-card {
+  margin-top: var(--space-3);
+}
+
+.catalog-card[hidden] {
+  display: none;
+}
+
+.section-heading,
+.category-domain-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.section-label {
+  margin: 0 0 var(--space-1);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.section-status,
+.section-description {
+  color: var(--muted);
+}
+
+.section-status {
+  margin-bottom: 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+}
+
+.section-description {
+  margin: var(--space-2) 0 0;
+  line-height: 1.65;
+}
+
+.category-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.category-domain {
+  min-width: 0;
+  border: 1px solid var(--rule);
+  background: var(--bg);
+}
+
+.category-domain-heading {
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--rule);
+}
+
+.category-domain-heading h3 {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.category-domain-heading span {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+
+.category-list {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  background: var(--rule);
+}
+
+.category-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: baseline;
+  padding: 0.65rem var(--space-2);
+  background: var(--surface);
+}
+
+.category-list strong {
+  min-width: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.category-list span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+
 @keyframes pulse {
   50% {
     opacity: 0.35;
@@ -274,6 +378,15 @@ button:disabled {
 
   .directory-details div,
   .archive-list li {
+    grid-template-columns: 1fr;
+  }
+
+  .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .category-groups {
     grid-template-columns: 1fr;
   }
 }

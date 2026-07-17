@@ -8,6 +8,9 @@ const directoryDetails = document.querySelector("#directory-details");
 const gameDirectory = document.querySelector("#game-directory");
 const resourceDirectory = document.querySelector("#resource-directory");
 const archiveList = document.querySelector("#archive-list");
+const categoryPanel = document.querySelector("#category-panel");
+const categoryStatus = document.querySelector("#category-status");
+const categoryGroups = document.querySelector("#category-groups");
 
 function setStatus(kind, title, message) {
   statusCard.dataset.status = kind;
@@ -16,10 +19,70 @@ function setStatus(kind, title, message) {
 }
 
 function clearSummary() {
+  categoryPanel.hidden = true;
+  categoryStatus.textContent = "";
+  categoryGroups.replaceChildren();
   directoryDetails.hidden = true;
   gameDirectory.textContent = "";
   resourceDirectory.textContent = "";
   archiveList.replaceChildren();
+}
+
+function renderCategories(categories) {
+  categoryGroups.replaceChildren();
+  const groups = new Map();
+  const sorted = [...categories].sort((left, right) =>
+    left.path.join("\u0000").localeCompare(right.path.join("\u0000"), "ko"),
+  );
+
+  for (const category of sorted) {
+    const [domain, ...leaf] = category.path;
+    if (!groups.has(domain)) {
+      groups.set(domain, []);
+    }
+    groups.get(domain).push({
+      label: leaf.length === 0 ? "전체" : leaf.join(" > "),
+      assetCount: category.assetCount,
+    });
+  }
+
+  for (const [domain, entries] of groups) {
+    const section = document.createElement("section");
+    const heading = document.createElement("div");
+    const title = document.createElement("h3");
+    const count = document.createElement("span");
+    const list = document.createElement("ul");
+    const domainTotal = entries.reduce(
+      (total, entry) => total + entry.assetCount,
+      0,
+    );
+    section.className = "category-domain";
+    heading.className = "category-domain-heading";
+    title.textContent = domain;
+    count.textContent = `${formatNumber(domainTotal)}개`;
+    list.className = "category-list";
+    heading.append(title, count);
+
+    for (const entry of entries) {
+      const item = document.createElement("li");
+      const label = document.createElement("strong");
+      const assetCount = document.createElement("span");
+      label.textContent = entry.label;
+      assetCount.textContent = `${formatNumber(entry.assetCount)}개`;
+      item.append(label, assetCount);
+      list.append(item);
+    }
+
+    section.append(heading, list);
+    categoryGroups.append(section);
+  }
+
+  const totalAssets = categories.reduce(
+    (total, category) => total + category.assetCount,
+    0,
+  );
+  categoryStatus.textContent = `${formatNumber(categories.length)}개 카테고리 · ${formatNumber(totalAssets)}개 이미지`;
+  categoryPanel.hidden = false;
 }
 
 function formatNumber(value) {
@@ -42,10 +105,12 @@ function renderSummary(summary) {
     archiveList.append(item);
   }
 
+  renderCategories(summary.verifiedCategories);
+
   setStatus(
     "success",
     "게임 리소스를 확인했습니다",
-    `지원하는 MWC 인덱스 ${summary.archives.length}개를 찾았습니다.`,
+    `지원하는 MWC 인덱스 ${summary.archives.length}개와 확인된 카테고리 ${summary.verifiedCategories.length}개를 찾았습니다.`,
   );
 }
 
