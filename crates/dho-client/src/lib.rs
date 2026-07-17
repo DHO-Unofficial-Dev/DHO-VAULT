@@ -2,10 +2,13 @@
 
 //! Read-only discovery and inspection of a DHO game client installation.
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use dho_catalog::{CatalogRecordKey, VerificationStatus, assembly_plan, classify_record};
 use dho_core::{IndexParseError, IndexedArchive};
+use dho_extract::{ExtractError, LoadedArchive, ResourceKey};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -13,6 +16,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 4] = ["sb", "sc", "sd", "is"];
+pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 32;
+
+const THUMBNAIL_MAX_WIDTH: u32 = 160;
+const THUMBNAIL_MAX_HEIGHT: u32 = 160;
+const MAX_IMAGE_DECODE_SIZE: usize = 64 * 1024 * 1024;
+const MAX_ASSEMBLED_DECODE_SIZE: usize = 128 * 1024 * 1024;
+const MAX_THUMBNAIL_DECODE_SIZE: usize =
+    THUMBNAIL_MAX_WIDTH as usize * THUMBNAIL_MAX_HEIGHT as usize * 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +49,245 @@ pub struct GameDirectorySummary {
 pub struct VerifiedCategorySummary {
     pub path: Vec<String>,
     pub asset_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifiedCategoryPage {
+    pub path: Vec<String>,
+    pub offset: usize,
+    pub page_size: usize,
+    pub total_count: usize,
+    pub items: Vec<VerifiedAssetThumbnail>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifiedAssetThumbnail {
+    pub archive: String,
+    pub icon_id: u32,
+    pub block_index: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub thumbnail_width: u32,
+    pub thumbnail_height: u32,
+    pub assembled: bool,
+    pub thumbnail_data_url: String,
+}
+
+#[derive(Debug, Default)]
+pub struct ViewerSession {
+    resource_directory: Option<PathBuf>,
+    archives: HashMap<String, LoadedArchive>,
+}
+
+#[derive(Debug, Clone)]
+struct VerifiedAssetRef {
+    prefix: String,
+    key: ResourceKey,
+    canonical_block: u32,
+    assembled: bool,
+}
+
+impl ViewerSession {
+    pub fn set_resource_directory(&mut self, path: impl Into<PathBuf>) {
+        let path = path.into();
+        if self.resource_directory.as_ref() != Some(&path) {
+            self.archives.clear();
+            self.resource_directory = Some(path);
+        }
+    }
+
+    pub fn category_page(
+        &mut self,
+        path: &[String],
+        offset: usize,
+        page_size: usize,
+    ) -> Result<VerifiedCategoryPage, ViewerSessionError> {
+        if path.is_empty() {
+            return Err(ViewerSessionError::EmptyCategoryPath);
+        }
+        if !(1..=VIEWER_CATEGORY_PAGE_SIZE).contains(&page_size) {
+            return Err(ViewerSessionError::InvalidPageSize {
+                requested: page_size,
+                maximum: VIEWER_CATEGORY_PAGE_SIZE,
+            });
+        }
+
+        let assets = self.verified_assets(path)?;
+        if assets.is_empty() {
+            return Err(ViewerSessionError::CategoryNotFound {
+                path: path.to_vec(),
+            });
+        }
+        if offset >= assets.len() {
+            return Err(ViewerSessionError::OffsetOutOfRange {
+                offset,
+                total_count: assets.len(),
+            });
+        }
+
+        let end = offset.saturating_add(page_size).min(assets.len());
+        let selected = assets[offset..end].to_vec();
+        let mut items = Vec::with_capacity(selected.len());
+        for asset in selected {
+            let archive = self.archive(&asset.prefix)?;
+            let thumbnail = if asset.assembled {
+                let extracted = archive
+                    .extract_verified_assembly_thumbnail(
+                        asset.canonical_block,
+                        MAX_IMAGE_DECODE_SIZE,
+                        MAX_ASSEMBLED_DECODE_SIZE,
+                        THUMBNAIL_MAX_WIDTH,
+                        THUMBNAIL_MAX_HEIGHT,
+                        MAX_THUMBNAIL_DECODE_SIZE,
+                    )
+                    .map_err(|source| ViewerSessionError::Extract {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                        source,
+                    })?
+                    .ok_or_else(|| ViewerSessionError::AssemblyRuleMissing {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                    })?;
+                VerifiedAssetThumbnail {
+                    archive: asset.prefix,
+                    icon_id: asset.key.icon_id,
+                    block_index: extracted.first_block,
+                    source_width: extracted.source_width,
+                    source_height: extracted.source_height,
+                    thumbnail_width: extracted.width,
+                    thumbnail_height: extracted.height,
+                    assembled: true,
+                    thumbnail_data_url: png_data_url(&extracted.png),
+                }
+            } else {
+                let extracted = archive
+                    .extract_thumbnail_png(
+                        asset.key,
+                        MAX_IMAGE_DECODE_SIZE,
+                        THUMBNAIL_MAX_WIDTH,
+                        THUMBNAIL_MAX_HEIGHT,
+                        MAX_THUMBNAIL_DECODE_SIZE,
+                    )
+                    .map_err(|source| ViewerSessionError::Extract {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                        source,
+                    })?;
+                VerifiedAssetThumbnail {
+                    archive: asset.prefix,
+                    icon_id: asset.key.icon_id,
+                    block_index: asset.canonical_block,
+                    source_width: extracted.source_width,
+                    source_height: extracted.source_height,
+                    thumbnail_width: extracted.width,
+                    thumbnail_height: extracted.height,
+                    assembled: false,
+                    thumbnail_data_url: png_data_url(&extracted.png),
+                }
+            };
+            items.push(thumbnail);
+        }
+
+        Ok(VerifiedCategoryPage {
+            path: path.to_vec(),
+            offset,
+            page_size,
+            total_count: assets.len(),
+            items,
+        })
+    }
+
+    fn verified_assets(
+        &mut self,
+        path: &[String],
+    ) -> Result<Vec<VerifiedAssetRef>, ViewerSessionError> {
+        let resource_directory = self
+            .resource_directory
+            .clone()
+            .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
+        let mut assets = Vec::new();
+
+        for prefix in SUPPORTED_ARCHIVE_PREFIXES {
+            if !resource_directory
+                .join(format!("{prefix}000000.bin"))
+                .is_file()
+            {
+                continue;
+            }
+            let archive = self.archive(prefix)?;
+            let mut unique = BTreeMap::<u32, ResourceKey>::new();
+            for record in archive.records() {
+                let classification = classify_record(CatalogRecordKey {
+                    archive: prefix,
+                    group_code: record.group_code,
+                    icon_id: record.icon_id,
+                    block_index: record.block_index,
+                });
+                if classification.boundary_status != VerificationStatus::HumanVerified
+                    || classification.meaning_status != VerificationStatus::HumanVerified
+                    || !classification
+                        .category
+                        .is_some_and(|category| category_matches(category.segments(), path))
+                {
+                    continue;
+                }
+                let canonical_block = assembly_plan(prefix, record.block_index)
+                    .map_or(record.block_index, |plan| plan.first_block);
+                unique.entry(canonical_block).or_insert(ResourceKey {
+                    group_code: record.group_code,
+                    icon_id: record.icon_id,
+                    block_index: record.block_index,
+                });
+            }
+            assets.extend(
+                unique
+                    .into_iter()
+                    .map(|(canonical_block, key)| VerifiedAssetRef {
+                        prefix: prefix.to_owned(),
+                        key,
+                        canonical_block,
+                        assembled: assembly_plan(prefix, canonical_block).is_some(),
+                    }),
+            );
+        }
+
+        Ok(assets)
+    }
+
+    fn archive(&mut self, prefix: &str) -> Result<&LoadedArchive, ViewerSessionError> {
+        let resource_directory = self
+            .resource_directory
+            .clone()
+            .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
+        if !self.archives.contains_key(prefix) {
+            let archive = LoadedArchive::open(&resource_directory, prefix).map_err(|source| {
+                ViewerSessionError::OpenArchive {
+                    prefix: prefix.to_owned(),
+                    source,
+                }
+            })?;
+            self.archives.insert(prefix.to_owned(), archive);
+        }
+        Ok(self
+            .archives
+            .get(prefix)
+            .expect("archive was inserted before lookup"))
+    }
+}
+
+fn category_matches(segments: &[&str], path: &[String]) -> bool {
+    segments.len() == path.len()
+        && segments
+            .iter()
+            .zip(path)
+            .all(|(segment, expected)| *segment == expected)
+}
+
+fn png_data_url(png: &[u8]) -> String {
+    format!("data:image/png;base64,{}", BASE64_STANDARD.encode(png))
 }
 
 pub fn inspect_game_directory(
@@ -133,6 +383,100 @@ pub fn inspect_game_directory(
 }
 
 #[derive(Debug)]
+pub enum ViewerSessionError {
+    ResourceDirectoryNotSelected,
+    EmptyCategoryPath,
+    InvalidPageSize {
+        requested: usize,
+        maximum: usize,
+    },
+    CategoryNotFound {
+        path: Vec<String>,
+    },
+    OffsetOutOfRange {
+        offset: usize,
+        total_count: usize,
+    },
+    OpenArchive {
+        prefix: String,
+        source: ExtractError,
+    },
+    Extract {
+        prefix: String,
+        block_index: u32,
+        source: ExtractError,
+    },
+    AssemblyRuleMissing {
+        prefix: String,
+        block_index: u32,
+    },
+}
+
+impl fmt::Display for ViewerSessionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ResourceDirectoryNotSelected => {
+                write!(formatter, "먼저 게임 폴더를 선택해 주세요.")
+            }
+            Self::EmptyCategoryPath => write!(formatter, "카테고리 경로가 비어 있습니다."),
+            Self::InvalidPageSize { requested, maximum } => write!(
+                formatter,
+                "한 번에 불러올 이미지 수는 1개부터 {maximum}개까지입니다: {requested}"
+            ),
+            Self::CategoryNotFound { path } => {
+                write!(
+                    formatter,
+                    "확인된 카테고리를 찾지 못했습니다: {}",
+                    path.join(" > ")
+                )
+            }
+            Self::OffsetOutOfRange {
+                offset,
+                total_count,
+            } => write!(
+                formatter,
+                "이미지 시작 위치가 카테고리 범위를 벗어났습니다: {offset}/{total_count}"
+            ),
+            Self::OpenArchive { prefix, source } => {
+                write!(
+                    formatter,
+                    "{prefix} 이미지 묶음을 열지 못했습니다: {source}"
+                )
+            }
+            Self::Extract {
+                prefix,
+                block_index,
+                source,
+            } => write!(
+                formatter,
+                "{prefix} 이미지 {block_index}의 썸네일을 만들지 못했습니다: {source}"
+            ),
+            Self::AssemblyRuleMissing {
+                prefix,
+                block_index,
+            } => write!(
+                formatter,
+                "{prefix} 이미지 {block_index}의 검증된 조립 규칙을 찾지 못했습니다."
+            ),
+        }
+    }
+}
+
+impl Error for ViewerSessionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::OpenArchive { source, .. } | Self::Extract { source, .. } => Some(source),
+            Self::ResourceDirectoryNotSelected
+            | Self::EmptyCategoryPath
+            | Self::InvalidPageSize { .. }
+            | Self::CategoryNotFound { .. }
+            | Self::OffsetOutOfRange { .. }
+            | Self::AssemblyRuleMissing { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum GameDirectoryError {
     NotDirectory {
         path: PathBuf,
@@ -216,6 +560,9 @@ impl Error for GameDirectoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
@@ -279,6 +626,25 @@ mod tests {
             }
         }
         fs::write(path, bytes).expect("write test index");
+    }
+
+    fn zlib_block(raw: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(raw).expect("write zlib input");
+        let compressed = encoder.finish().expect("finish zlib stream");
+        let mut block = b"MWC\x1a".to_vec();
+        push_u32(&mut block, raw.len() as u32);
+        push_u32(&mut block, compressed.len() as u32);
+        block.extend_from_slice(&compressed);
+        block
+    }
+
+    fn write_data_file(path: &Path, blocks: &[Vec<u8>]) {
+        let data = blocks
+            .iter()
+            .flat_map(|raw| zlib_block(raw))
+            .collect::<Vec<_>>();
+        fs::write(path, data).expect("write test data file");
     }
 
     #[test]
@@ -352,6 +718,82 @@ mod tests {
                 .sum::<usize>(),
             3
         );
+    }
+
+    #[test]
+    fn pages_verified_category_thumbnails_without_duplicate_blocks() {
+        let directory = TestDirectory::new();
+        let resources = directory.prepare_game();
+        write_index_records(
+            &resources.join("sb000000.bin"),
+            &[
+                [100_100, 0, 2, 1, 1],
+                [100_101, 0, 2, 1, 2],
+                [100_102, 1, 1, 2, 1],
+                [1_200_002, 2, 1, 1, 1],
+            ],
+            3,
+        );
+        write_data_file(
+            &resources.join("sb000001.bin"),
+            &[
+                vec![0, 0, 255, 255, 0, 0, 255, 255],
+                vec![0, 255, 0, 255, 0, 255, 0, 255],
+                vec![255, 0, 0, 255],
+            ],
+        );
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(&resources);
+        let category = ["장비", "방어구", "머리"].map(str::to_owned);
+
+        let first = session
+            .category_page(&category, 0, 1)
+            .expect("load first thumbnail page");
+        let second = session
+            .category_page(&category, 1, 1)
+            .expect("load second thumbnail page");
+
+        assert_eq!(first.total_count, 2);
+        assert_eq!(first.items.len(), 1);
+        assert_eq!(first.items[0].block_index, 0);
+        assert_eq!(
+            (first.items[0].source_width, first.items[0].source_height),
+            (2, 1)
+        );
+        assert!(!first.items[0].assembled);
+        assert!(
+            first.items[0]
+                .thumbnail_data_url
+                .starts_with("data:image/png;base64,")
+        );
+        assert_eq!(second.items[0].block_index, 1);
+
+        let error = session.category_page(&category, 2, 1).unwrap_err();
+        assert!(matches!(
+            error,
+            ViewerSessionError::OffsetOutOfRange {
+                offset: 2,
+                total_count: 2,
+            }
+        ));
+    }
+
+    #[test]
+    fn enforces_the_viewer_category_page_size() {
+        let mut session = ViewerSession::default();
+        let category = ["장비".to_owned()];
+
+        let error = session
+            .category_page(&category, 0, VIEWER_CATEGORY_PAGE_SIZE + 1)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ViewerSessionError::InvalidPageSize {
+                requested,
+                maximum: VIEWER_CATEGORY_PAGE_SIZE,
+            } if requested == VIEWER_CATEGORY_PAGE_SIZE + 1
+        ));
     }
 
     #[test]
