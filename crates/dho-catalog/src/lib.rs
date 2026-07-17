@@ -2,10 +2,12 @@
 
 //! Human-reviewed category metadata kept separate from raw archive facts.
 
+mod assembly;
 mod sb;
 mod sc;
 mod sd;
 
+pub use assembly::{AssemblyPlan, AssemblyRule, TileOrder};
 use serde::Serialize;
 
 /// One raw record identity used by the category resolver.
@@ -276,6 +278,11 @@ pub fn reservation_candidate(archive: &str, icon_id: u32) -> Option<ReservationS
         .eq_ignore_ascii_case("sb")
         .then(|| Catalog::new(sb::RECORD_RULES, sb::RESERVATION_RULES).reservation(icon_id))
         .flatten()
+}
+
+/// Returns the verified completed-image range and tile position for one physical block.
+pub fn assembly_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
+    assembly::find_plan(archive, block_index)
 }
 
 #[cfg(test)]
@@ -564,6 +571,59 @@ mod tests {
                 RecordClassification::unknown()
             );
         }
+    }
+
+    #[test]
+    fn resolves_verified_sd_assembly_rule_boundaries() {
+        for (start, end, image_count, columns, rows, width, height) in [
+            (10_156, 10_175, 5, 2, 2, 155, 256),
+            (10_203, 10_242, 10, 2, 2, 248, 156),
+            (10_368, 10_395, 1, 7, 4, 782, 404),
+            (10_396, 10_399, 1, 2, 2, 256, 256),
+            (10_400, 10_405, 1, 3, 2, 294, 166),
+            (10_406, 10_409, 1, 2, 2, 166, 166),
+            (10_439, 10_470, 1, 8, 4, 1_024, 512),
+            (10_617, 10_800, 46, 2, 2, 192, 192),
+        ] {
+            let first = assembly_plan("SD", start).expect("first assembly block");
+            let last = assembly_plan("sd", end).expect("last assembly block");
+
+            assert_eq!(first.rule.start_block, start);
+            assert_eq!(first.rule.end_block, end);
+            assert_eq!(first.rule.image_count(), image_count);
+            assert_eq!(first.rule.columns, columns);
+            assert_eq!(first.rule.rows, rows);
+            assert_eq!(first.rule.output_width, width);
+            assert_eq!(first.rule.output_height, height);
+            assert_eq!(first.rule.status, VerificationStatus::HumanVerified);
+            assert_eq!(last.image_index, image_count - 1);
+            assert_eq!(last.last_block, end);
+            assert_eq!(last.row, rows - 1);
+            assert_eq!(last.column, columns - 1);
+        }
+    }
+
+    #[test]
+    fn repeated_sd_assembly_sets_report_image_and_tile_positions() {
+        let blessing_last_tile = assembly_plan("sd", 10_159).expect("first blessing end");
+        assert_eq!(blessing_last_tile.image_index, 0);
+        assert_eq!(blessing_last_tile.first_block, 10_156);
+        assert_eq!(blessing_last_tile.last_block, 10_159);
+        assert_eq!(blessing_last_tile.tile_index, 3);
+        assert_eq!(blessing_last_tile.row, 1);
+        assert_eq!(blessing_last_tile.column, 1);
+
+        let next_blessing = assembly_plan("sd", 10_160).expect("second blessing start");
+        assert_eq!(next_blessing.image_index, 1);
+        assert_eq!(next_blessing.first_block, 10_160);
+        assert_eq!(next_blessing.tile_index, 0);
+        assert_eq!(next_blessing.row, 0);
+        assert_eq!(next_blessing.column, 0);
+
+        for block_index in [8_842, 9_291, 10_012, 10_419, 10_438] {
+            assert_eq!(assembly_plan("sd", block_index), None);
+        }
+        assert_eq!(assembly_plan("sc", 10_156), None);
     }
 
     #[test]
