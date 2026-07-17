@@ -93,6 +93,35 @@
         <div id="sample-grid" class="sample-grid"></div>
       </section>
 
+      <section id="assembly-panel" class="review-card" aria-labelledby="assembly-title" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="section-label">VERIFIED ASSEMBLY</p>
+            <h2 id="assembly-title">검증된 조립 결과</h2>
+          </div>
+          <p id="assembly-status" class="section-status" aria-live="polite"></p>
+        </div>
+        <p class="section-description">
+          사람이 확인한 행·열 순서로 원본 타일을 배치한 결과입니다. 이 화면은 검수용이며 미검증 조립은 표시하지 않습니다.
+        </p>
+        <div class="assembly-layout">
+          <section class="assembly-source" aria-labelledby="assembly-source-title">
+            <div class="subsection-heading">
+              <h3 id="assembly-source-title">원본 타일</h3>
+              <span id="assembly-grid-label"></span>
+            </div>
+            <div id="assembly-tile-grid" class="assembly-tile-grid"></div>
+          </section>
+          <section class="assembly-output" aria-labelledby="assembly-output-title">
+            <div class="subsection-heading">
+              <h3 id="assembly-output-title">완성 이미지</h3>
+              <span>행 우선 조립</span>
+            </div>
+            <figure id="assembly-result" class="assembly-result"></figure>
+          </section>
+        </div>
+      </section>
+
       <section class="next-card" aria-labelledby="next-title">
         <p class="section-label">REVIEW PRINCIPLE</p>
         <h2 id="next-title">숫자 대역은 후보, 실제 이미지는 검증 근거입니다</h2>

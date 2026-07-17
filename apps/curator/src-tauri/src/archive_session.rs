@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
+use dho_catalog::assembly_plan;
 use dho_client::SUPPORTED_ARCHIVE_PREFIXES;
 use dho_extract::{ExtractError, LoadedArchive, ResourceKey};
 use serde::Serialize;
@@ -10,6 +11,7 @@ use std::path::PathBuf;
 
 const MAX_SAMPLE_COUNT: usize = 24;
 const MAX_SAMPLE_OUTPUT_SIZE: usize = 16 * 1024 * 1024;
+const MAX_ASSEMBLED_OUTPUT_SIZE: usize = 64 * 1024 * 1024;
 const ICON_ID_GAP_THRESHOLD: u32 = 1_000;
 const ICON_ID_BAND_SIZE: u32 = 100_000;
 
@@ -32,6 +34,22 @@ pub struct ResourceSample {
     pub block_index: u32,
     pub width: u32,
     pub height: u32,
+    pub has_verified_assembly: bool,
+    pub png: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblyPreview {
+    pub prefix: String,
+    pub requested_block_index: u32,
+    pub first_block: u32,
+    pub last_block: u32,
+    pub columns: u32,
+    pub rows: u32,
+    pub width: u32,
+    pub height: u32,
+    pub tiles: Vec<ResourceSample>,
     pub png: Vec<u8>,
 }
 
@@ -409,6 +427,70 @@ impl CuratorSession {
         })
     }
 
+    pub fn assembly_preview(
+        &mut self,
+        prefix: &str,
+        block_index: u32,
+    ) -> Result<AssemblyPreview, CuratorSessionError> {
+        let normalized_prefix = normalize_prefix(prefix)?;
+        let plan = assembly_plan(&normalized_prefix, block_index).ok_or_else(|| {
+            CuratorSessionError::VerifiedAssemblyNotFound {
+                prefix: normalized_prefix.clone(),
+                block_index,
+            }
+        })?;
+        let archive = self.archive(&normalized_prefix)?;
+        let assembled = archive
+            .extract_verified_assembly(
+                block_index,
+                MAX_SAMPLE_OUTPUT_SIZE,
+                MAX_ASSEMBLED_OUTPUT_SIZE,
+            )
+            .map_err(|source| CuratorSessionError::Extract {
+                prefix: normalized_prefix.clone(),
+                source,
+            })?
+            .ok_or_else(|| CuratorSessionError::VerifiedAssemblyNotFound {
+                prefix: normalized_prefix.clone(),
+                block_index,
+            })?;
+
+        let mut tiles = Vec::new();
+        for tile_block_index in plan.first_block..=plan.last_block {
+            let record = archive
+                .records()
+                .iter()
+                .find(|record| record.block_index == tile_block_index)
+                .copied()
+                .ok_or_else(|| CuratorSessionError::AssemblyTileRecordNotFound {
+                    prefix: normalized_prefix.clone(),
+                    block_index: tile_block_index,
+                })?;
+            tiles.push(extract_sample(
+                archive,
+                &normalized_prefix,
+                ResourceKey {
+                    group_code: record.group_code,
+                    icon_id: record.icon_id,
+                    block_index: record.block_index,
+                },
+            )?);
+        }
+
+        Ok(AssemblyPreview {
+            prefix: normalized_prefix,
+            requested_block_index: block_index,
+            first_block: assembled.first_block,
+            last_block: assembled.last_block,
+            columns: plan.rule.columns,
+            rows: plan.rule.rows,
+            width: assembled.width,
+            height: assembled.height,
+            tiles,
+            png: assembled.png,
+        })
+    }
+
     fn archive(&mut self, prefix: &str) -> Result<&LoadedArchive, CuratorSessionError> {
         let prefix = normalize_prefix(prefix)?;
         let resource_directory = self
@@ -451,6 +533,7 @@ fn extract_sample(
         block_index: key.block_index,
         width: extracted.width,
         height: extracted.height,
+        has_verified_assembly: assembly_plan(prefix, key.block_index).is_some(),
         png: extracted.png,
     })
 }
@@ -564,6 +647,14 @@ pub enum CuratorSessionError {
         start_icon_id: u32,
         end_icon_id: u32,
     },
+    VerifiedAssemblyNotFound {
+        prefix: String,
+        block_index: u32,
+    },
+    AssemblyTileRecordNotFound {
+        prefix: String,
+        block_index: u32,
+    },
     Extract {
         prefix: String,
         source: ExtractError,
@@ -615,6 +706,20 @@ impl fmt::Display for CuratorSessionError {
                 formatter,
                 "{prefix}에서 ID {start_icon_id}–{end_icon_id} 대역의 레코드를 찾지 못했습니다."
             ),
+            Self::VerifiedAssemblyNotFound {
+                prefix,
+                block_index,
+            } => write!(
+                formatter,
+                "{prefix} 블록 {block_index}에는 사람이 검증한 조립 규칙이 없습니다."
+            ),
+            Self::AssemblyTileRecordNotFound {
+                prefix,
+                block_index,
+            } => write!(
+                formatter,
+                "{prefix} 조립 타일 블록 {block_index}의 인덱스 레코드를 찾지 못했습니다."
+            ),
             Self::Extract { prefix, source } => {
                 write!(
                     formatter,
@@ -634,7 +739,9 @@ impl Error for CuratorSessionError {
             | Self::GroupNotFound { .. }
             | Self::InvalidIdRange { .. }
             | Self::IdRangeNotFound { .. }
-            | Self::ArchiveRangeNotFound { .. } => None,
+            | Self::ArchiveRangeNotFound { .. }
+            | Self::VerifiedAssemblyNotFound { .. }
+            | Self::AssemblyTileRecordNotFound { .. } => None,
         }
     }
 }
@@ -743,6 +850,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_block_without_a_verified_assembly_rule() {
+        let directory = TestDirectory::new();
+        let mut session = CuratorSession::default();
+        session.set_resource_directory(&directory.0);
+
+        let error = session.assembly_preview("sb", 0).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CuratorSessionError::VerifiedAssemblyNotFound {
+                ref prefix,
+                block_index: 0,
+            } if prefix == "sb"
+        ));
+    }
+
+    #[test]
     fn splits_large_id_gaps_and_deduplicates_each_range_before_sampling() {
         let directory = TestDirectory::new();
         write_archive(
@@ -823,6 +947,13 @@ mod tests {
                 .iter()
                 .chain(&second_samples.samples)
                 .all(|sample| sample.png.starts_with(b"\x89PNG\r\n\x1a\n"))
+        );
+        assert!(
+            first_samples
+                .samples
+                .iter()
+                .chain(&second_samples.samples)
+                .all(|sample| !sample.has_verified_assembly)
         );
     }
 

@@ -570,6 +570,7 @@ dependencies = [
 name = "dho-curator"
 version = "0.1.0"
 dependencies = [
+ "dho-catalog",
  "dho-client",
  "dho-extract",
  "flate2",
