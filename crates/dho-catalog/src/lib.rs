@@ -4,6 +4,7 @@
 
 mod sb;
 mod sc;
+mod sd;
 
 use serde::Serialize;
 
@@ -262,6 +263,8 @@ pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
         Catalog::new(sb::RECORD_RULES, sb::RESERVATION_RULES).classify(key)
     } else if key.archive.eq_ignore_ascii_case("sc") {
         Catalog::new(sc::RECORD_RULES, &[]).classify(key)
+    } else if key.archive.eq_ignore_ascii_case("sd") {
+        Catalog::new(sd::RECORD_RULES, &[]).classify(key)
     } else {
         RecordClassification::unknown()
     }
@@ -297,6 +300,15 @@ mod tests {
         }
     }
 
+    fn sd_key(block_index: u32) -> CatalogRecordKey<'static> {
+        CatalogRecordKey {
+            archive: "sd",
+            group_code: 0,
+            icon_id: 0,
+            block_index,
+        }
+    }
+
     fn assert_category(icon_id: u32, expected: &[&str]) {
         let classification = classify_record(key(0, icon_id));
         assert_eq!(
@@ -315,6 +327,22 @@ mod tests {
 
     fn assert_sc_category(block_index: u32, expected: &[&str]) {
         let classification = classify_record(sc_key(0, 0, block_index));
+        assert_eq!(
+            classification.category.map(CategoryPath::segments),
+            Some(expected)
+        );
+        assert_eq!(
+            classification.boundary_status,
+            VerificationStatus::HumanVerified
+        );
+        assert_eq!(
+            classification.meaning_status,
+            VerificationStatus::HumanVerified
+        );
+    }
+
+    fn assert_sd_category(block_index: u32, expected: &[&str]) {
+        let classification = classify_record(sd_key(block_index));
         assert_eq!(
             classification.category.map(CategoryPath::segments),
             Some(expected)
@@ -426,7 +454,7 @@ mod tests {
     fn unsupported_archives_remain_unknown() {
         assert_eq!(
             classify_record(CatalogRecordKey {
-                archive: "sd",
+                archive: "unknown",
                 group_code: 0,
                 icon_id: 200,
                 block_index: 0,
@@ -466,6 +494,75 @@ mod tests {
             (5_940, &["기타"]),
         ] {
             assert_sc_category(block_index, expected);
+        }
+    }
+
+    #[test]
+    fn classifies_verified_sd_block_range_boundaries() {
+        for (start, end, expected) in [
+            (0, 2_926, &["발견물", "1", "획득 이미지 (128×128)"][..]),
+            (3_071, 3_288, &["전투"]),
+            (3_289, 3_314, &["입항허가", "획득 이미지 (128×128)"]),
+            (3_315, 3_507, &["도움말"]),
+            (4_023, 4_026, &["클라이언트", "스플래시 UI"]),
+            (7_933, 8_718, &["도움말"]),
+            (8_842, 9_248, &["지도", "세계지도"]),
+            (9_291, 9_978, &["지도", "필드 지도"]),
+            (9_979, 10_011, &["발견물", "2", "획득 이미지 (128×128)"]),
+            (10_012, 10_155, &["지도", "던전 지도"]),
+            (10_156, 10_175, &["가호"]),
+            (10_176, 10_199, &["이벤트"]),
+            (10_200, 10_202, &["인물", "미분류 초상화"]),
+            (10_203, 10_242, &["클라이언트", "플레이스홀더"]),
+            (10_243, 10_271, &["전승", "미발견 이미지 (128×128)"]),
+            (10_272, 10_303, &["인물", "구조 부관", "초상화"]),
+            (10_304, 10_367, &["인물", "구조 부관", "구조 이미지"]),
+            (10_368, 10_395, &["UI 이미지", "예지의 서", "표지"]),
+            (
+                10_396,
+                10_399,
+                &["UI 이미지", "예지의 서", "유산의 장", "레거시 테마 UI"],
+            ),
+            (
+                10_400,
+                10_418,
+                &["UI 이미지", "예지의 서", "유산의 장", "레거시 상세 UI"],
+            ),
+            (10_439, 10_470, &["UI 이미지", "별자리 조사", "천구도"]),
+            (
+                10_471,
+                10_543,
+                &["UI 이미지", "별자리 조사", "별자리선 표시"],
+            ),
+            (
+                10_544,
+                10_616,
+                &["UI 이미지", "별자리 조사", "별자리선과 그림 표시"],
+            ),
+            (
+                10_617,
+                10_800,
+                &["UI 이미지", "별자리 조사", "별자리 이미지"],
+            ),
+            (10_801, 10_811, &["인물", "미분류 초상화"]),
+            (10_812, 10_821, &["캐러밴", "낙타"]),
+            (10_822, 10_830, &["캐러밴", "대장 초상화"]),
+        ] {
+            assert_sd_category(start, expected);
+            assert_sd_category(end, expected);
+        }
+    }
+
+    #[test]
+    fn sd_unverified_ranges_remain_unclassified() {
+        for block_index in [
+            2_927, 3_070, 3_508, 4_022, 4_027, 6_268, 7_932, 8_719, 8_841, 9_249, 9_290, 10_419,
+            10_438, 10_831,
+        ] {
+            assert_eq!(
+                classify_record(sd_key(block_index)),
+                RecordClassification::unknown()
+            );
         }
     }
 
