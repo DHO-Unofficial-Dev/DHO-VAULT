@@ -78,5 +78,31 @@
         </nav>
       </section>
     </main>
+
+    <dialog id="asset-detail" class="detail-dialog" aria-labelledby="detail-title">
+      <div class="detail-header">
+        <div>
+          <p class="section-label">IMAGE DETAIL</p>
+          <h2 id="detail-title">이미지 상세 보기</h2>
+        </div>
+        <button id="close-detail" class="secondary-button" type="button">닫기</button>
+      </div>
+      <div id="detail-content" class="detail-content" data-status="idle">
+        <div class="detail-preview-frame">
+          <img id="detail-preview" alt="" hidden />
+        </div>
+        <p id="detail-message" class="detail-message" aria-live="polite"></p>
+        <dl id="detail-metadata" class="detail-metadata" hidden>
+          <div>
+            <dt>원본 크기</dt>
+            <dd id="detail-source-size"></dd>
+          </div>
+          <div>
+            <dt>미리보기</dt>
+            <dd id="detail-preview-size"></dd>
+          </div>
+        </dl>
+      </div>
+    </dialog>
   </body>
 </html>

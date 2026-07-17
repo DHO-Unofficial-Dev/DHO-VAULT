@@ -18,9 +18,19 @@ const galleryGrid = document.querySelector("#gallery-grid");
 const previousPage = document.querySelector("#previous-page");
 const nextPage = document.querySelector("#next-page");
 const pagePosition = document.querySelector("#page-position");
+const detailDialog = document.querySelector("#asset-detail");
+const detailTitle = document.querySelector("#detail-title");
+const detailContent = document.querySelector("#detail-content");
+const detailPreview = document.querySelector("#detail-preview");
+const detailMessage = document.querySelector("#detail-message");
+const detailMetadata = document.querySelector("#detail-metadata");
+const detailSourceSize = document.querySelector("#detail-source-size");
+const detailPreviewSize = document.querySelector("#detail-preview-size");
+const closeDetailButton = document.querySelector("#close-detail");
 
 let currentPage = null;
 let galleryRequestId = 0;
+let detailRequestId = 0;
 
 function setStatus(kind, title, message) {
   statusCard.dataset.status = kind;
@@ -29,6 +39,7 @@ function setStatus(kind, title, message) {
 }
 
 function clearSummary() {
+  closeDetail();
   galleryRequestId += 1;
   currentPage = null;
   galleryPanel.hidden = true;
@@ -130,22 +141,32 @@ function renderGallery(page) {
   galleryTitle.textContent = page.path.join(" > ");
 
   for (const [index, item] of page.items.entries()) {
-    const figure = document.createElement("figure");
+    const button = document.createElement("button");
     const frame = document.createElement("div");
     const image = document.createElement("img");
-    const caption = document.createElement("figcaption");
-    figure.className = "gallery-item";
+    const caption = document.createElement("span");
+    const position = page.offset + index + 1;
+    button.type = "button";
+    button.className = "gallery-item";
+    button.setAttribute(
+      "aria-label",
+      `${page.path.at(-1)} 이미지 ${position} 상세 보기`,
+    );
     frame.className = "thumbnail-frame";
+    caption.className = "gallery-caption";
     image.src = item.thumbnailDataUrl;
-    image.alt = `${page.path.at(-1)} 이미지 ${page.offset + index + 1}`;
+    image.alt = `${page.path.at(-1)} 이미지 ${position}`;
     image.width = item.thumbnailWidth;
     image.height = item.thumbnailHeight;
     image.loading = "lazy";
     image.decoding = "async";
     caption.textContent = `${formatNumber(item.sourceWidth)} × ${formatNumber(item.sourceHeight)}`;
     frame.append(image);
-    figure.append(frame, caption);
-    galleryGrid.append(figure);
+    button.append(frame, caption);
+    button.addEventListener("click", () => {
+      loadAssetDetail(page.path, item, position);
+    });
+    galleryGrid.append(button);
   }
 
   const first = page.offset + 1;
@@ -156,6 +177,67 @@ function renderGallery(page) {
   pagePosition.textContent = `${formatNumber(currentNumber)} / ${formatNumber(pageCount)} 페이지`;
   previousPage.disabled = page.offset === 0;
   nextPage.disabled = last >= page.totalCount;
+}
+
+function resetDetail() {
+  detailContent.dataset.status = "idle";
+  detailPreview.hidden = true;
+  detailPreview.removeAttribute("src");
+  detailPreview.alt = "";
+  detailMessage.textContent = "";
+  detailMetadata.hidden = true;
+  detailSourceSize.textContent = "";
+  detailPreviewSize.textContent = "";
+}
+
+function closeDetail() {
+  detailRequestId += 1;
+  resetDetail();
+  if (detailDialog.open) {
+    detailDialog.close();
+  }
+}
+
+async function loadAssetDetail(path, item, position) {
+  const requestId = ++detailRequestId;
+  resetDetail();
+  detailTitle.textContent = `${path.at(-1)} 이미지 ${position}`;
+  detailContent.dataset.status = "loading";
+  detailMessage.textContent = "선택한 이미지를 불러오는 중입니다";
+  if (!detailDialog.open) {
+    detailDialog.showModal();
+  }
+
+  try {
+    const detail = await window.__TAURI__.core.invoke(
+      "load_verified_asset_detail",
+      {
+        path,
+        archive: item.archive,
+        blockIndex: item.blockIndex,
+      },
+    );
+    if (requestId !== detailRequestId) {
+      return;
+    }
+    detailContent.dataset.status = "ready";
+    detailPreview.src = detail.previewDataUrl;
+    detailPreview.alt = `${detail.path.at(-1)} 이미지 ${position} 미리보기`;
+    detailPreview.width = detail.previewWidth;
+    detailPreview.height = detail.previewHeight;
+    detailPreview.hidden = false;
+    detailMessage.textContent = detail.assembled
+      ? "검증된 조립 완성본입니다."
+      : "선택한 이미지의 큰 미리보기입니다.";
+    detailSourceSize.textContent = `${formatNumber(detail.sourceWidth)} × ${formatNumber(detail.sourceHeight)}`;
+    detailPreviewSize.textContent = `${formatNumber(detail.previewWidth)} × ${formatNumber(detail.previewHeight)}`;
+    detailMetadata.hidden = false;
+  } catch (error) {
+    if (requestId === detailRequestId) {
+      detailContent.dataset.status = "error";
+      detailMessage.textContent = String(error);
+    }
+  }
 }
 
 async function loadCategoryPage(path, offset) {
@@ -266,4 +348,10 @@ nextPage.addEventListener("click", () => {
       currentPage.offset + currentPage.pageSize,
     );
   }
+});
+
+closeDetailButton.addEventListener("click", closeDetail);
+detailDialog.addEventListener("close", () => {
+  detailRequestId += 1;
+  resetDetail();
 });

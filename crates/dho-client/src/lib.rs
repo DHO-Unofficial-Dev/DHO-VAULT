@@ -20,10 +20,13 @@ pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 32;
 
 const THUMBNAIL_MAX_WIDTH: u32 = 160;
 const THUMBNAIL_MAX_HEIGHT: u32 = 160;
+const DETAIL_MAX_WIDTH: u32 = 1024;
+const DETAIL_MAX_HEIGHT: u32 = 1024;
 const MAX_IMAGE_DECODE_SIZE: usize = 64 * 1024 * 1024;
 const MAX_ASSEMBLED_DECODE_SIZE: usize = 128 * 1024 * 1024;
 const MAX_THUMBNAIL_DECODE_SIZE: usize =
     THUMBNAIL_MAX_WIDTH as usize * THUMBNAIL_MAX_HEIGHT as usize * 4;
+const MAX_DETAIL_DECODE_SIZE: usize = DETAIL_MAX_WIDTH as usize * DETAIL_MAX_HEIGHT as usize * 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,6 +76,21 @@ pub struct VerifiedAssetThumbnail {
     pub thumbnail_height: u32,
     pub assembled: bool,
     pub thumbnail_data_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifiedAssetDetail {
+    pub path: Vec<String>,
+    pub archive: String,
+    pub icon_id: u32,
+    pub block_index: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub preview_width: u32,
+    pub preview_height: u32,
+    pub assembled: bool,
+    pub preview_data_url: String,
 }
 
 #[derive(Debug, Default)]
@@ -198,6 +216,87 @@ impl ViewerSession {
             total_count: assets.len(),
             items,
         })
+    }
+
+    pub fn asset_detail(
+        &mut self,
+        path: &[String],
+        prefix: &str,
+        block_index: u32,
+    ) -> Result<VerifiedAssetDetail, ViewerSessionError> {
+        if path.is_empty() {
+            return Err(ViewerSessionError::EmptyCategoryPath);
+        }
+        let normalized_prefix = prefix.to_ascii_lowercase();
+        let asset = self
+            .verified_assets(path)?
+            .into_iter()
+            .find(|asset| asset.prefix == normalized_prefix && asset.canonical_block == block_index)
+            .ok_or_else(|| ViewerSessionError::AssetNotFound {
+                path: path.to_vec(),
+                prefix: normalized_prefix.clone(),
+                block_index,
+            })?;
+        let archive = self.archive(&asset.prefix)?;
+
+        if asset.assembled {
+            let extracted = archive
+                .extract_verified_assembly_thumbnail(
+                    asset.canonical_block,
+                    MAX_IMAGE_DECODE_SIZE,
+                    MAX_ASSEMBLED_DECODE_SIZE,
+                    DETAIL_MAX_WIDTH,
+                    DETAIL_MAX_HEIGHT,
+                    MAX_DETAIL_DECODE_SIZE,
+                )
+                .map_err(|source| ViewerSessionError::Extract {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                    source,
+                })?
+                .ok_or_else(|| ViewerSessionError::AssemblyRuleMissing {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                })?;
+            Ok(VerifiedAssetDetail {
+                path: path.to_vec(),
+                archive: asset.prefix,
+                icon_id: asset.key.icon_id,
+                block_index: extracted.first_block,
+                source_width: extracted.source_width,
+                source_height: extracted.source_height,
+                preview_width: extracted.width,
+                preview_height: extracted.height,
+                assembled: true,
+                preview_data_url: png_data_url(&extracted.png),
+            })
+        } else {
+            let extracted = archive
+                .extract_thumbnail_png(
+                    asset.key,
+                    MAX_IMAGE_DECODE_SIZE,
+                    DETAIL_MAX_WIDTH,
+                    DETAIL_MAX_HEIGHT,
+                    MAX_DETAIL_DECODE_SIZE,
+                )
+                .map_err(|source| ViewerSessionError::Extract {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                    source,
+                })?;
+            Ok(VerifiedAssetDetail {
+                path: path.to_vec(),
+                archive: asset.prefix,
+                icon_id: asset.key.icon_id,
+                block_index: asset.canonical_block,
+                source_width: extracted.source_width,
+                source_height: extracted.source_height,
+                preview_width: extracted.width,
+                preview_height: extracted.height,
+                assembled: false,
+                preview_data_url: png_data_url(&extracted.png),
+            })
+        }
     }
 
     fn verified_assets(
@@ -393,6 +492,11 @@ pub enum ViewerSessionError {
     CategoryNotFound {
         path: Vec<String>,
     },
+    AssetNotFound {
+        path: Vec<String>,
+        prefix: String,
+        block_index: u32,
+    },
     OffsetOutOfRange {
         offset: usize,
         total_count: usize,
@@ -430,6 +534,15 @@ impl fmt::Display for ViewerSessionError {
                     path.join(" > ")
                 )
             }
+            Self::AssetNotFound {
+                path,
+                prefix,
+                block_index,
+            } => write!(
+                formatter,
+                "카테고리에 속한 확인된 이미지를 찾지 못했습니다: {} / {prefix} {block_index}",
+                path.join(" > ")
+            ),
             Self::OffsetOutOfRange {
                 offset,
                 total_count,
@@ -470,6 +583,7 @@ impl Error for ViewerSessionError {
             | Self::EmptyCategoryPath
             | Self::InvalidPageSize { .. }
             | Self::CategoryNotFound { .. }
+            | Self::AssetNotFound { .. }
             | Self::OffsetOutOfRange { .. }
             | Self::AssemblyRuleMissing { .. } => None,
         }
@@ -767,6 +881,28 @@ mod tests {
                 .starts_with("data:image/png;base64,")
         );
         assert_eq!(second.items[0].block_index, 1);
+
+        let detail = session
+            .asset_detail(&category, "SB", 0)
+            .expect("load verified asset detail");
+        assert_eq!((detail.source_width, detail.source_height), (2, 1));
+        assert_eq!((detail.preview_width, detail.preview_height), (2, 1));
+        assert!(!detail.assembled);
+        assert!(
+            detail
+                .preview_data_url
+                .starts_with("data:image/png;base64,")
+        );
+
+        let detail_error = session.asset_detail(&category, "sb", 2).unwrap_err();
+        assert!(matches!(
+            detail_error,
+            ViewerSessionError::AssetNotFound {
+                ref path,
+                ref prefix,
+                block_index: 2,
+            } if path == &category && prefix == "sb"
+        ));
 
         let error = session.category_page(&category, 2, 1).unwrap_err();
         assert!(matches!(
