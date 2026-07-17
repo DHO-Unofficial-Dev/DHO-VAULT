@@ -460,12 +460,93 @@ button:disabled {
 }
 
 .sample-grid figcaption,
-.boundary-grid figcaption {
+.boundary-grid figcaption,
+.assembly-tile-grid figcaption,
+.assembly-result figcaption {
   padding: 0.55rem;
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 0.66rem;
   line-height: 1.5;
+}
+
+.sample-card-actions {
+  padding: 0 0.55rem 0.55rem;
+}
+
+.sample-card-actions .secondary-button {
+  width: 100%;
+}
+
+.assembly-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-4);
+}
+
+.assembly-source,
+.assembly-output {
+  min-width: 0;
+}
+
+.assembly-layout .subsection-heading {
+  margin-top: 0;
+}
+
+.assembly-tile-grid {
+  display: grid;
+  grid-template-columns: repeat(var(--assembly-columns, 1), minmax(5rem, 8rem));
+  gap: 2px;
+  justify-content: start;
+  padding: 2px;
+  border: 1px solid var(--rule);
+  background: var(--rule);
+  overflow-x: auto;
+}
+
+.assembly-tile-grid figure,
+.assembly-result {
+  min-width: 0;
+  margin: 0;
+  background: var(--surface-strong);
+}
+
+.assembly-tile-grid figure > div,
+.assembly-result > div {
+  display: grid;
+  place-items: center;
+  background-color: #d8d8d8;
+  background-image:
+    linear-gradient(45deg, #a8a8a8 25%, transparent 25%),
+    linear-gradient(-45deg, #a8a8a8 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #a8a8a8 75%),
+    linear-gradient(-45deg, transparent 75%, #a8a8a8 75%);
+  background-position: 0 0, 0 0.5rem, 0.5rem -0.5rem, -0.5rem 0;
+  background-size: 1rem 1rem;
+}
+
+.assembly-tile-grid figure > div {
+  min-height: 8rem;
+  padding: var(--space-1);
+}
+
+.assembly-tile-grid img {
+  display: block;
+  max-width: 100%;
+  max-height: 8rem;
+  image-rendering: pixelated;
+}
+
+.assembly-result > div {
+  min-height: 18rem;
+  padding: var(--space-2);
+}
+
+.assembly-result img {
+  display: block;
+  max-width: 100%;
+  max-height: 32rem;
+  image-rendering: pixelated;
 }
 
 .error-message {

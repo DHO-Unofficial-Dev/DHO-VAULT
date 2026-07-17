@@ -5,8 +5,8 @@
 mod archive_session;
 
 use archive_session::{
-    ArchiveBandSamples, ArchiveGroupSummary, ArchiveIdBands, CuratorSession, GroupIdRanges,
-    RangeSamples,
+    ArchiveBandSamples, ArchiveGroupSummary, ArchiveIdBands, AssemblyPreview, CuratorSession,
+    GroupIdRanges, RangeSamples,
 };
 use dho_client::{GameDirectorySummary, inspect_game_directory};
 use std::path::PathBuf;
@@ -133,6 +133,24 @@ async fn sample_archive_range(
     .map_err(|error| format!("표본 이미지를 만드는 작업이 중단되었습니다: {error}"))?
 }
 
+#[tauri::command]
+async fn preview_verified_assembly(
+    prefix: String,
+    block_index: u32,
+    session: State<'_, SharedCuratorSession>,
+) -> Result<AssemblyPreview, String> {
+    let session = session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .lock()
+            .map_err(|_| "검수 세션을 열지 못했습니다.".to_owned())?
+            .assembly_preview(&prefix, block_index)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("조립 미리보기 작업이 중단되었습니다: {error}"))?
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(CuratorSession::default())))
@@ -143,7 +161,8 @@ fn main() {
             sample_archive_band,
             list_archive_groups,
             list_group_id_ranges,
-            sample_archive_range
+            sample_archive_range,
+            preview_verified_assembly
         ])
         .run(tauri::generate_context!())
         .expect("failed to run DHO Vault Curator");

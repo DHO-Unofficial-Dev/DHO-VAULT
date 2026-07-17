@@ -17,8 +17,15 @@ const sampleTitle = document.querySelector("#sample-title");
 const sampleStatus = document.querySelector("#sample-status");
 const boundaryGrid = document.querySelector("#boundary-grid");
 const sampleGrid = document.querySelector("#sample-grid");
+const assemblyPanel = document.querySelector("#assembly-panel");
+const assemblyTitle = document.querySelector("#assembly-title");
+const assemblyStatus = document.querySelector("#assembly-status");
+const assemblyGridLabel = document.querySelector("#assembly-grid-label");
+const assemblyTileGrid = document.querySelector("#assembly-tile-grid");
+const assemblyResult = document.querySelector("#assembly-result");
 
 let sampleUrls = [];
+let assemblyUrls = [];
 
 function formatNumber(value) {
   return new Intl.NumberFormat("ko-KR").format(value);
@@ -47,7 +54,34 @@ function revokeSampleUrls() {
   sampleUrls = [];
 }
 
+function revokeAssemblyUrls() {
+  for (const url of assemblyUrls) {
+    URL.revokeObjectURL(url);
+  }
+  assemblyUrls = [];
+}
+
+function createPngUrl(png, urls) {
+  const url = URL.createObjectURL(
+    new Blob([new Uint8Array(png)], { type: "image/png" }),
+  );
+  urls.push(url);
+  return url;
+}
+
+function clearAssembly() {
+  revokeAssemblyUrls();
+  assemblyPanel.hidden = true;
+  assemblyTitle.textContent = "검증된 조립 결과";
+  assemblyStatus.textContent = "";
+  assemblyGridLabel.textContent = "";
+  assemblyTileGrid.style.removeProperty("--assembly-columns");
+  assemblyTileGrid.replaceChildren();
+  assemblyResult.replaceChildren();
+}
+
 function clearSamples() {
+  clearAssembly();
   revokeSampleUrls();
   samplePanel.hidden = true;
   sampleTitle.textContent = "대역 표본 이미지";
@@ -166,11 +200,7 @@ function createSampleCard(sample, boundaryLabel = null) {
   const imageStage = document.createElement("div");
   const image = document.createElement("img");
   const caption = document.createElement("figcaption");
-  const url = URL.createObjectURL(
-    new Blob([new Uint8Array(sample.png)], { type: "image/png" }),
-  );
-  sampleUrls.push(url);
-  image.src = url;
+  image.src = createPngUrl(sample.png, sampleUrls);
   image.alt = `${boundaryLabel ? `${boundaryLabel} · ` : ""}아이콘 ID ${sample.iconId}`;
   image.loading = "lazy";
   caption.textContent = `ID ${formatNumber(sample.iconId)} · 그룹 ${formatNumber(sample.groupCode)} · 블록 ${formatNumber(sample.blockIndex)} · ${sample.width}×${sample.height}`;
@@ -182,7 +212,74 @@ function createSampleCard(sample, boundaryLabel = null) {
   }
   imageStage.append(image);
   card.append(imageStage, caption);
+  if (sample.hasVerifiedAssembly) {
+    const actions = document.createElement("div");
+    actions.className = "sample-card-actions";
+    actions.append(
+      createActionButton("조립 결과 보기", () =>
+        openAssembly(sample.prefix, sample.blockIndex),
+      ),
+    );
+    card.append(actions);
+  }
   return card;
+}
+
+function createAssemblyTile(tile, index) {
+  const card = document.createElement("figure");
+  const stage = document.createElement("div");
+  const image = document.createElement("img");
+  const caption = document.createElement("figcaption");
+  image.src = createPngUrl(tile.png, assemblyUrls);
+  image.alt = `조립 타일 ${index + 1} · 블록 ${tile.blockIndex}`;
+  image.loading = "lazy";
+  caption.textContent = `${index + 1} · 블록 ${formatNumber(tile.blockIndex)} · ${tile.width}×${tile.height}`;
+  stage.append(image);
+  card.append(stage, caption);
+  return card;
+}
+
+function renderAssembly(result) {
+  assemblyTileGrid.replaceChildren();
+  assemblyResult.replaceChildren();
+  assemblyTileGrid.style.setProperty("--assembly-columns", result.columns);
+  assemblyGridLabel.textContent = `${result.columns}열 × ${result.rows}행 · ${formatNumber(result.tiles.length)}조각`;
+
+  for (const [index, tile] of result.tiles.entries()) {
+    assemblyTileGrid.append(createAssemblyTile(tile, index));
+  }
+
+  const imageStage = document.createElement("div");
+  const image = document.createElement("img");
+  const caption = document.createElement("figcaption");
+  image.src = createPngUrl(result.png, assemblyUrls);
+  image.alt = `${result.prefix.toUpperCase()} 블록 ${formatIdRange(result.firstBlock, result.lastBlock)} 조립 결과`;
+  caption.textContent = `블록 ${formatIdRange(result.firstBlock, result.lastBlock)} · ${result.width}×${result.height}`;
+  imageStage.append(image);
+  assemblyResult.append(imageStage, caption);
+}
+
+async function openAssembly(prefix, blockIndex) {
+  clearAssembly();
+  assemblyPanel.hidden = false;
+  assemblyTitle.textContent = `${prefix.toUpperCase()} · 블록 ${formatNumber(blockIndex)} 조립 결과`;
+  assemblyStatus.textContent = "검증된 원본 타일을 조립하는 중…";
+  setBusy(true);
+
+  try {
+    const result = await window.__TAURI__.core.invoke("preview_verified_assembly", {
+      prefix,
+      blockIndex,
+    });
+    renderAssembly(result);
+    assemblyStatus.textContent = `블록 ${formatIdRange(result.firstBlock, result.lastBlock)} · ${result.columns}열 × ${result.rows}행 · ${result.width}×${result.height}`;
+    assemblyPanel.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (error) {
+    assemblyStatus.textContent = "조립하지 못함";
+    assemblyTileGrid.replaceChildren(createErrorItem(error));
+  } finally {
+    setBusy(false);
+  }
 }
 
 function renderSamples(result) {
@@ -249,4 +346,7 @@ selectButton.addEventListener("click", async () => {
   }
 });
 
-window.addEventListener("beforeunload", revokeSampleUrls);
+window.addEventListener("beforeunload", () => {
+  revokeSampleUrls();
+  revokeAssemblyUrls();
+});
