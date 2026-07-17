@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use dho_catalog::assembly_plan;
+use dho_catalog::{CatalogRecordKey, RecordClassification, assembly_plan, classify_record};
 use dho_client::SUPPORTED_ARCHIVE_PREFIXES;
 use dho_extract::{ExtractError, LoadedArchive, ResourceKey};
 use serde::Serialize;
@@ -34,6 +34,7 @@ pub struct ResourceSample {
     pub block_index: u32,
     pub width: u32,
     pub height: u32,
+    pub classification: RecordClassification,
     pub has_verified_assembly: bool,
     pub png: Vec<u8>,
 }
@@ -533,6 +534,12 @@ fn extract_sample(
         block_index: key.block_index,
         width: extracted.width,
         height: extracted.height,
+        classification: classify_record(CatalogRecordKey {
+            archive: prefix,
+            group_code: key.group_code,
+            icon_id: key.icon_id,
+            block_index: key.block_index,
+        }),
         has_verified_assembly: assembly_plan(prefix, key.block_index).is_some(),
         png: extracted.png,
     })
@@ -749,6 +756,7 @@ impl Error for CuratorSessionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dho_catalog::VerificationStatus;
     use flate2::Compression;
     use flate2::write::ZlibEncoder;
     use std::fs;
@@ -864,6 +872,36 @@ mod tests {
                 block_index: 0,
             } if prefix == "sb"
         ));
+    }
+
+    #[test]
+    fn includes_reviewed_and_unreviewed_classifications_in_samples() {
+        let directory = TestDirectory::new();
+        write_archive(
+            &directory.0,
+            &[[1_200_001, 0, 1, 1, 9], [1_200_002, 1, 1, 1, 9]],
+            2,
+        );
+        let mut session = CuratorSession::default();
+        session.set_resource_directory(&directory.0);
+
+        let samples = session
+            .range_samples("sb", 9, 1_200_001, 1_200_002)
+            .expect("sample classifications");
+
+        assert_eq!(samples.first_record.classification.category, None);
+        assert_eq!(
+            samples.first_record.classification.boundary_status,
+            VerificationStatus::HumanVerified
+        );
+        assert_eq!(
+            samples.first_record.classification.meaning_status,
+            VerificationStatus::Unknown
+        );
+        assert_eq!(
+            samples.last_record.classification,
+            RecordClassification::unknown()
+        );
     }
 
     #[test]
