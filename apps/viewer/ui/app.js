@@ -16,6 +16,15 @@ const galleryTitle = document.querySelector("#gallery-title");
 const galleryStatus = document.querySelector("#gallery-status");
 const galleryGrid = document.querySelector("#gallery-grid");
 const savePageButton = document.querySelector("#save-page");
+const saveCategoryButton = document.querySelector("#save-category");
+const categoryExport = document.querySelector("#category-export");
+const categoryExportStatus = document.querySelector("#category-export-status");
+const categoryExportProgress = document.querySelector(
+  "#category-export-progress",
+);
+const cancelCategoryExportButton = document.querySelector(
+  "#cancel-category-export",
+);
 const previousPage = document.querySelector("#previous-page");
 const nextPage = document.querySelector("#next-page");
 const pagePosition = document.querySelector("#page-position");
@@ -34,6 +43,12 @@ let currentPage = null;
 let galleryRequestId = 0;
 let detailRequestId = 0;
 let currentDetail = null;
+let currentCategoryExport = null;
+let categoryExportPollTimer = null;
+let categoryExportBusy = false;
+let categoryExportCancelRequested = false;
+
+const CATEGORY_EXPORT_POLL_INTERVAL = 250;
 
 function setStatus(kind, title, message) {
   statusCard.dataset.status = kind;
@@ -41,8 +56,51 @@ function setStatus(kind, title, message) {
   statusMessage.textContent = message;
 }
 
+function clearCategoryExportPoll() {
+  if (categoryExportPollTimer !== null) {
+    window.clearTimeout(categoryExportPollTimer);
+    categoryExportPollTimer = null;
+  }
+}
+
+function hideCategoryExport() {
+  clearCategoryExportPoll();
+  currentCategoryExport = null;
+  categoryExportCancelRequested = false;
+  categoryExport.hidden = true;
+  categoryExportStatus.textContent = "";
+  categoryExportProgress.value = 0;
+  categoryExportProgress.max = 1;
+  cancelCategoryExportButton.disabled = true;
+  cancelCategoryExportButton.textContent = "저장 취소";
+}
+
+function setCategoryExportBusy(busy) {
+  categoryExportBusy = busy;
+  selectButton.disabled = busy;
+  for (const button of categoryGroups.querySelectorAll(".category-button")) {
+    button.disabled = busy;
+  }
+  for (const button of galleryGrid.querySelectorAll(".gallery-item")) {
+    button.disabled = busy;
+  }
+  savePageButton.disabled = busy || currentPage === null;
+  saveCategoryButton.disabled = busy || currentPage === null;
+  if (currentPage === null) {
+    previousPage.disabled = true;
+    nextPage.disabled = true;
+  } else {
+    previousPage.disabled = busy || currentPage.offset === 0;
+    nextPage.disabled =
+      busy ||
+      currentPage.offset + currentPage.items.length >= currentPage.totalCount;
+  }
+}
+
 function clearSummary() {
   closeDetail();
+  hideCategoryExport();
+  categoryExportBusy = false;
   galleryRequestId += 1;
   currentPage = null;
   galleryPanel.hidden = true;
@@ -50,6 +108,7 @@ function clearSummary() {
   galleryStatus.textContent = "";
   savePageButton.disabled = true;
   savePageButton.textContent = "현재 페이지 저장";
+  saveCategoryButton.disabled = true;
   galleryGrid.replaceChildren();
   pagePosition.textContent = "";
   categoryPanel.hidden = true;
@@ -153,6 +212,7 @@ function renderGallery(page) {
     const position = page.offset + index + 1;
     button.type = "button";
     button.className = "gallery-item";
+    button.disabled = categoryExportBusy;
     button.setAttribute(
       "aria-label",
       `${page.path.at(-1)} 이미지 ${position} 상세 보기`,
@@ -180,9 +240,10 @@ function renderGallery(page) {
   const pageCount = Math.ceil(page.totalCount / page.pageSize);
   galleryStatus.textContent = galleryPageStatus(page);
   pagePosition.textContent = `${formatNumber(currentNumber)} / ${formatNumber(pageCount)} 페이지`;
-  savePageButton.disabled = false;
-  previousPage.disabled = page.offset === 0;
-  nextPage.disabled = last >= page.totalCount;
+  savePageButton.disabled = categoryExportBusy;
+  saveCategoryButton.disabled = categoryExportBusy;
+  previousPage.disabled = categoryExportBusy || page.offset === 0;
+  nextPage.disabled = categoryExportBusy || last >= page.totalCount;
 }
 
 function galleryPageStatus(page) {
@@ -197,6 +258,7 @@ async function saveCurrentPage() {
   }
   const requestedPage = currentPage;
   savePageButton.disabled = true;
+  saveCategoryButton.disabled = true;
   savePageButton.textContent = "저장 중…";
   galleryStatus.textContent = "저장할 폴더를 선택해 주세요";
 
@@ -223,7 +285,134 @@ async function saveCurrentPage() {
   } finally {
     if (currentPage === requestedPage) {
       savePageButton.disabled = false;
+      saveCategoryButton.disabled = categoryExportBusy;
       savePageButton.textContent = "현재 페이지 저장";
+    }
+  }
+}
+
+function scheduleCategoryExportPoll() {
+  clearCategoryExportPoll();
+  categoryExportPollTimer = window.setTimeout(
+    pollCategoryExport,
+    CATEGORY_EXPORT_POLL_INTERVAL,
+  );
+}
+
+function finishCategoryExport(message) {
+  clearCategoryExportPoll();
+  currentCategoryExport = null;
+  categoryExportCancelRequested = false;
+  categoryExportStatus.textContent = message;
+  cancelCategoryExportButton.disabled = true;
+  cancelCategoryExportButton.textContent = "저장 취소";
+  setCategoryExportBusy(false);
+}
+
+async function pollCategoryExport() {
+  if (currentCategoryExport === null) {
+    return;
+  }
+  const requestedExport = currentCategoryExport;
+
+  try {
+    const status = await window.__TAURI__.core.invoke(
+      "get_verified_category_export_status",
+      { jobId: requestedExport.jobId },
+    );
+    if (currentCategoryExport !== requestedExport) {
+      return;
+    }
+    categoryExportProgress.max = Math.max(1, status.totalCount);
+    categoryExportProgress.value = status.completedCount;
+
+    if (status.state === "running") {
+      categoryExportStatus.textContent = categoryExportCancelRequested
+        ? `${formatNumber(status.completedCount)} / ${formatNumber(status.totalCount)}개 · 취소 준비 중`
+        : `${formatNumber(status.completedCount)} / ${formatNumber(status.totalCount)}개 저장 중`;
+      scheduleCategoryExportPoll();
+      return;
+    }
+    if (status.state === "completed") {
+      finishCategoryExport(
+        `${formatNumber(status.completedCount)}개 이미지 저장 완료`,
+      );
+      return;
+    }
+    if (status.state === "cancelled") {
+      categoryExportProgress.value = 0;
+      finishCategoryExport("저장을 취소했고 생성한 파일을 정리했습니다.");
+      return;
+    }
+    categoryExportProgress.value = 0;
+    finishCategoryExport(
+      `저장하지 못했습니다: ${status.error ?? "알 수 없는 오류"}`,
+    );
+  } catch (error) {
+    finishCategoryExport(
+      `저장 상태를 확인하지 못했습니다: ${String(error)}`,
+    );
+  }
+}
+
+async function startCategoryExport() {
+  if (currentPage === null || categoryExportBusy) {
+    return;
+  }
+  const requestedPage = currentPage;
+  hideCategoryExport();
+  categoryExport.hidden = false;
+  categoryExportStatus.textContent = "저장할 폴더를 선택해 주세요";
+  cancelCategoryExportButton.disabled = true;
+  setCategoryExportBusy(true);
+
+  try {
+    const started = await window.__TAURI__.core.invoke(
+      "start_verified_category_export",
+      { path: requestedPage.path },
+    );
+    if (currentPage !== requestedPage) {
+      return;
+    }
+    if (started === null) {
+      hideCategoryExport();
+      setCategoryExportBusy(false);
+      return;
+    }
+    currentCategoryExport = started;
+    categoryExportProgress.max = Math.max(1, started.totalCount);
+    categoryExportProgress.value = 0;
+    categoryExportStatus.textContent = `0 / ${formatNumber(started.totalCount)}개 저장 중`;
+    cancelCategoryExportButton.disabled = false;
+    scheduleCategoryExportPoll();
+  } catch (error) {
+    currentCategoryExport = null;
+    categoryExportStatus.textContent = `전체 저장을 시작하지 못했습니다: ${String(error)}`;
+    cancelCategoryExportButton.disabled = true;
+    setCategoryExportBusy(false);
+  }
+}
+
+async function cancelCategoryExport() {
+  if (currentCategoryExport === null) {
+    return;
+  }
+  const requestedExport = currentCategoryExport;
+  categoryExportCancelRequested = true;
+  cancelCategoryExportButton.disabled = true;
+  cancelCategoryExportButton.textContent = "취소 중…";
+  categoryExportStatus.textContent = "현재 이미지 처리가 끝나면 취소합니다";
+
+  try {
+    await window.__TAURI__.core.invoke("cancel_verified_category_export", {
+      jobId: requestedExport.jobId,
+    });
+  } catch (error) {
+    if (currentCategoryExport === requestedExport) {
+      categoryExportCancelRequested = false;
+      categoryExportStatus.textContent = `취소를 요청하지 못했습니다: ${String(error)}`;
+      cancelCategoryExportButton.disabled = false;
+      cancelCategoryExportButton.textContent = "저장 취소";
     }
   }
 }
@@ -334,6 +523,9 @@ async function saveCurrentDetail() {
 
 async function loadCategoryPage(path, offset) {
   const requestId = ++galleryRequestId;
+  if (!categoryExportBusy) {
+    hideCategoryExport();
+  }
   currentPage = null;
   for (const button of categoryGroups.querySelectorAll(".category-button")) {
     button.disabled = true;
@@ -344,6 +536,7 @@ async function loadCategoryPage(path, offset) {
   galleryStatus.textContent = "썸네일을 불러오는 중입니다";
   savePageButton.disabled = true;
   savePageButton.textContent = "현재 페이지 저장";
+  saveCategoryButton.disabled = true;
   galleryGrid.dataset.status = "loading";
   galleryGrid.replaceChildren();
   pagePosition.textContent = "불러오는 중";
@@ -370,7 +563,7 @@ async function loadCategoryPage(path, offset) {
       for (const button of categoryGroups.querySelectorAll(
         ".category-button",
       )) {
-        button.disabled = false;
+        button.disabled = categoryExportBusy;
       }
     }
   }
@@ -448,6 +641,8 @@ nextPage.addEventListener("click", () => {
 closeDetailButton.addEventListener("click", closeDetail);
 downloadDetailButton.addEventListener("click", saveCurrentDetail);
 savePageButton.addEventListener("click", saveCurrentPage);
+saveCategoryButton.addEventListener("click", startCategoryExport);
+cancelCategoryExportButton.addEventListener("click", cancelCategoryExport);
 detailDialog.addEventListener("close", () => {
   detailRequestId += 1;
   resetDetail();

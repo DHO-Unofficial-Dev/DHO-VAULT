@@ -104,6 +104,27 @@ pub struct VerifiedAssetPng {
     pub png: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
+pub struct VerifiedCategoryAsset(VerifiedAssetRef);
+
+impl VerifiedCategoryAsset {
+    pub fn archive(&self) -> &str {
+        &self.0.prefix
+    }
+
+    pub fn icon_id(&self) -> u32 {
+        self.0.key.icon_id
+    }
+
+    pub fn block_index(&self) -> u32 {
+        self.0.canonical_block
+    }
+
+    pub fn assembled(&self) -> bool {
+        self.0.assembled
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ViewerSession {
     resource_directory: Option<PathBuf>,
@@ -203,6 +224,29 @@ impl ViewerSession {
             total_count,
             items,
         })
+    }
+
+    pub fn category_assets(
+        &mut self,
+        path: &[String],
+    ) -> Result<Vec<VerifiedCategoryAsset>, ViewerSessionError> {
+        if path.is_empty() {
+            return Err(ViewerSessionError::EmptyCategoryPath);
+        }
+        let assets = self.verified_assets(path)?;
+        if assets.is_empty() {
+            return Err(ViewerSessionError::CategoryNotFound {
+                path: path.to_vec(),
+            });
+        }
+        Ok(assets.into_iter().map(VerifiedCategoryAsset).collect())
+    }
+
+    pub fn category_asset_png(
+        &mut self,
+        asset: &VerifiedCategoryAsset,
+    ) -> Result<VerifiedAssetPng, ViewerSessionError> {
+        self.extract_asset_png(asset.0.clone())
     }
 
     pub fn asset_detail(
@@ -992,6 +1036,20 @@ mod tests {
         assert!(!png.assembled);
         assert_eq!(&png.png[..8], b"\x89PNG\r\n\x1a\n");
 
+        let category_assets = session
+            .category_assets(&category)
+            .expect("load verified category assets");
+        assert_eq!(category_assets.len(), 2);
+        assert_eq!(category_assets[0].archive(), "sb");
+        assert_eq!(category_assets[0].icon_id(), 100_100);
+        assert_eq!(category_assets[0].block_index(), 0);
+        assert!(!category_assets[0].assembled());
+        let category_png = session
+            .category_asset_png(&category_assets[1])
+            .expect("extract category asset directly");
+        assert_eq!(category_png.block_index, 1);
+        assert_eq!(&category_png.png[..8], b"\x89PNG\r\n\x1a\n");
+
         let detail_error = session.asset_detail(&category, "sb", 2).unwrap_err();
         assert!(matches!(
             detail_error,
@@ -1050,6 +1108,16 @@ mod tests {
         assert_eq!((png.width, png.height), (782, 404));
         assert!(png.assembled);
         assert_eq!(&png.png[..8], b"\x89PNG\r\n\x1a\n");
+
+        let category_assets = session
+            .category_assets(&category)
+            .expect("load verified assembly category");
+        assert_eq!(category_assets.len(), 1);
+        assert!(category_assets[0].assembled());
+        let category_png = session
+            .category_asset_png(&category_assets[0])
+            .expect("extract verified assembly directly");
+        assert_eq!((category_png.width, category_png.height), (782, 404));
     }
 
     #[test]

@@ -4,17 +4,20 @@
 
 use dho_client::{
     GameDirectorySummary, VIEWER_CATEGORY_PAGE_SIZE, VerifiedAssetDetail, VerifiedAssetPng,
-    VerifiedCategoryPage, ViewerSession, inspect_game_directory,
+    VerifiedCategoryAsset, VerifiedCategoryPage, ViewerSession, inspect_game_directory,
 };
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 
 type SharedViewerSession = Arc<Mutex<ViewerSession>>;
+type SharedCategoryExportManager = Arc<CategoryExportManager>;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +40,161 @@ struct PageAssetPlan {
     icon_id: u32,
     block_index: u32,
     assembled: bool,
+}
+
+impl From<&VerifiedCategoryAsset> for PageAssetPlan {
+    fn from(asset: &VerifiedCategoryAsset) -> Self {
+        Self {
+            archive: asset.archive().to_owned(),
+            icon_id: asset.icon_id(),
+            block_index: asset.block_index(),
+            assembled: asset.assembled(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CategoryExportState {
+    Running,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CategoryExportStatus {
+    job_id: u64,
+    state: CategoryExportState,
+    completed_count: usize,
+    total_count: usize,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StartedCategoryExport {
+    job_id: u64,
+    total_count: usize,
+}
+
+#[derive(Debug)]
+struct CategoryExportJob {
+    job_id: u64,
+    cancel: Arc<AtomicBool>,
+    status: Arc<Mutex<CategoryExportStatus>>,
+}
+
+#[derive(Debug)]
+struct CategoryExportControl {
+    job_id: u64,
+    cancel: Arc<AtomicBool>,
+    status: Arc<Mutex<CategoryExportStatus>>,
+}
+
+#[derive(Debug, Default)]
+struct CategoryExportManager {
+    next_job_id: AtomicU64,
+    current: Mutex<Option<CategoryExportJob>>,
+}
+
+impl CategoryExportManager {
+    fn ensure_idle(&self) -> Result<(), String> {
+        let current = self
+            .current
+            .lock()
+            .map_err(|_| "전체 저장 작업 상태를 확인하지 못했습니다.".to_owned())?;
+        if let Some(job) = current.as_ref() {
+            let status = job
+                .status
+                .lock()
+                .map_err(|_| "전체 저장 진행 상태를 확인하지 못했습니다.".to_owned())?;
+            if status.state == CategoryExportState::Running {
+                return Err("이미 카테고리 전체 저장이 진행 중입니다.".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    fn start(&self, total_count: usize) -> Result<CategoryExportControl, String> {
+        let mut current = self
+            .current
+            .lock()
+            .map_err(|_| "전체 저장 작업 상태를 시작하지 못했습니다.".to_owned())?;
+        if let Some(job) = current.as_ref() {
+            let status = job
+                .status
+                .lock()
+                .map_err(|_| "전체 저장 진행 상태를 확인하지 못했습니다.".to_owned())?;
+            if status.state == CategoryExportState::Running {
+                return Err("이미 카테고리 전체 저장이 진행 중입니다.".to_owned());
+            }
+        }
+        let job_id = self.next_job_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let status = Arc::new(Mutex::new(CategoryExportStatus {
+            job_id,
+            state: CategoryExportState::Running,
+            completed_count: 0,
+            total_count,
+            error: None,
+        }));
+        *current = Some(CategoryExportJob {
+            job_id,
+            cancel: cancel.clone(),
+            status: status.clone(),
+        });
+        Ok(CategoryExportControl {
+            job_id,
+            cancel,
+            status,
+        })
+    }
+
+    fn status(&self, job_id: u64) -> Result<CategoryExportStatus, String> {
+        let current = self
+            .current
+            .lock()
+            .map_err(|_| "전체 저장 작업 상태를 확인하지 못했습니다.".to_owned())?;
+        let job = current
+            .as_ref()
+            .filter(|job| job.job_id == job_id)
+            .ok_or_else(|| "전체 저장 작업을 찾지 못했습니다.".to_owned())?;
+        let status = job
+            .status
+            .lock()
+            .map_err(|_| "전체 저장 진행 상태를 확인하지 못했습니다.".to_owned())?
+            .clone();
+        Ok(status)
+    }
+
+    fn cancel(&self, job_id: u64) -> Result<bool, String> {
+        let current = self
+            .current
+            .lock()
+            .map_err(|_| "전체 저장 작업 상태를 확인하지 못했습니다.".to_owned())?;
+        let job = current
+            .as_ref()
+            .filter(|job| job.job_id == job_id)
+            .ok_or_else(|| "전체 저장 작업을 찾지 못했습니다.".to_owned())?;
+        let running = job
+            .status
+            .lock()
+            .map_err(|_| "전체 저장 진행 상태를 확인하지 못했습니다.".to_owned())?
+            .state
+            == CategoryExportState::Running;
+        if running {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        Ok(running)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchSaveOutcome {
+    Completed,
+    Cancelled,
 }
 
 #[tauri::command]
@@ -216,6 +374,77 @@ async fn save_verified_category_page(
     Ok(Some(saved))
 }
 
+#[tauri::command]
+async fn start_verified_category_export(
+    app: tauri::AppHandle,
+    path: Vec<String>,
+    session: State<'_, SharedViewerSession>,
+    exports: State<'_, SharedCategoryExportManager>,
+) -> Result<Option<StartedCategoryExport>, String> {
+    exports.ensure_idle()?;
+    let selection = app
+        .dialog()
+        .file()
+        .set_title("카테고리 전체 PNG 저장 폴더 선택")
+        .blocking_pick_folder();
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let destination = selection
+        .into_path()
+        .map_err(|error| format!("선택한 저장 폴더를 처리하지 못했습니다: {error}"))?;
+
+    let session = session.inner().clone();
+    let manifest_session = session.clone();
+    let assets = tauri::async_runtime::spawn_blocking(move || {
+        manifest_session
+            .lock()
+            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?
+            .category_assets(&path)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("전체 저장 목록 확인 작업이 중단되었습니다: {error}"))??;
+    let plans = assets.iter().map(PageAssetPlan::from).collect::<Vec<_>>();
+    preflight_asset_batch(&destination, &plans)?;
+
+    let exports = exports.inner().clone();
+    let total_count = plans.len();
+    let control = exports.start(total_count)?;
+    let job_id = control.job_id;
+    std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+        run_category_export(
+            session,
+            destination,
+            assets,
+            plans,
+            control.cancel,
+            control.status,
+        );
+    }));
+
+    Ok(Some(StartedCategoryExport {
+        job_id,
+        total_count,
+    }))
+}
+
+#[tauri::command]
+fn get_verified_category_export_status(
+    job_id: u64,
+    exports: State<'_, SharedCategoryExportManager>,
+) -> Result<CategoryExportStatus, String> {
+    exports.status(job_id)
+}
+
+#[tauri::command]
+fn cancel_verified_category_export(
+    job_id: u64,
+    exports: State<'_, SharedCategoryExportManager>,
+) -> Result<bool, String> {
+    exports.cancel(job_id)
+}
+
 fn default_asset_file_name(archive: &str, block_index: u32) -> String {
     let safe_archive = archive
         .chars()
@@ -241,14 +470,10 @@ fn page_asset_file_name(asset: &PageAssetPlan) -> String {
     )
 }
 
-fn save_verified_asset_page<F>(
+fn preflight_asset_batch(
     directory: &Path,
     assets: &[PageAssetPlan],
-    mut load: F,
-) -> Result<(), String>
-where
-    F: FnMut(&PageAssetPlan) -> Result<VerifiedAssetPng, String>,
-{
+) -> Result<Vec<PathBuf>, String> {
     if !directory.is_dir() {
         return Err(format!(
             "저장할 폴더를 찾지 못했습니다: {}",
@@ -256,10 +481,17 @@ where
         ));
     }
 
-    let destinations = assets
-        .iter()
-        .map(|asset| directory.join(page_asset_file_name(asset)))
-        .collect::<Vec<_>>();
+    let mut unique_names = HashSet::with_capacity(assets.len());
+    let mut destinations = Vec::with_capacity(assets.len());
+    for asset in assets {
+        let file_name = page_asset_file_name(asset);
+        if !unique_names.insert(file_name.clone()) {
+            return Err(format!(
+                "저장 목록에 중복된 파일 이름이 있습니다: {file_name}"
+            ));
+        }
+        destinations.push(directory.join(file_name));
+    }
     if let Some(existing) = destinations.iter().find(|path| path.exists()) {
         return Err(format!(
             "같은 이름의 파일이 이미 있습니다. 다른 폴더를 선택해 주세요: {}",
@@ -267,8 +499,27 @@ where
         ));
     }
 
+    Ok(destinations)
+}
+
+fn save_asset_batch<F, P>(
+    directory: &Path,
+    assets: &[PageAssetPlan],
+    cancel: &AtomicBool,
+    mut load: F,
+    mut progress: P,
+) -> Result<BatchSaveOutcome, String>
+where
+    F: FnMut(&PageAssetPlan) -> Result<VerifiedAssetPng, String>,
+    P: FnMut(usize, usize) -> Result<(), String>,
+{
+    let destinations = preflight_asset_batch(directory, assets)?;
     let mut created = Vec::with_capacity(assets.len());
-    for (plan, destination) in assets.iter().zip(&destinations) {
+    for (index, (plan, destination)) in assets.iter().zip(&destinations).enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            remove_created_files(&created);
+            return Ok(BatchSaveOutcome::Cancelled);
+        }
         let asset = match load(plan) {
             Ok(asset) => asset,
             Err(error) => {
@@ -276,6 +527,10 @@ where
                 return Err(error);
             }
         };
+        if cancel.load(Ordering::Relaxed) {
+            remove_created_files(&created);
+            return Ok(BatchSaveOutcome::Cancelled);
+        }
         let result = (|| {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -291,9 +546,89 @@ where
                 destination.display()
             ));
         }
+        if let Err(error) = progress(index + 1, assets.len()) {
+            remove_created_files(&created);
+            return Err(error);
+        }
     }
 
-    Ok(())
+    Ok(BatchSaveOutcome::Completed)
+}
+
+fn save_verified_asset_page<F>(
+    directory: &Path,
+    assets: &[PageAssetPlan],
+    mut load: F,
+) -> Result<(), String>
+where
+    F: FnMut(&PageAssetPlan) -> Result<VerifiedAssetPng, String>,
+{
+    let cancel = AtomicBool::new(false);
+    match save_asset_batch(directory, assets, &cancel, &mut load, |_, _| Ok(()))? {
+        BatchSaveOutcome::Completed => Ok(()),
+        BatchSaveOutcome::Cancelled => {
+            Err("현재 페이지 저장이 예기치 않게 취소되었습니다.".to_owned())
+        }
+    }
+}
+
+fn run_category_export(
+    session: SharedViewerSession,
+    destination: PathBuf,
+    assets: Vec<VerifiedCategoryAsset>,
+    plans: Vec<PageAssetPlan>,
+    cancel: Arc<AtomicBool>,
+    status: Arc<Mutex<CategoryExportStatus>>,
+) {
+    let result = (|| {
+        if assets.len() != plans.len() {
+            return Err("전체 저장 목록의 자산 수가 일치하지 않습니다.".to_owned());
+        }
+        let mut session = session
+            .lock()
+            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?;
+        let mut asset_index = 0;
+        save_asset_batch(
+            &destination,
+            &plans,
+            &cancel,
+            |_| {
+                let asset = assets
+                    .get(asset_index)
+                    .ok_or_else(|| "전체 저장 자산 순서가 일치하지 않습니다.".to_owned())?;
+                asset_index += 1;
+                session
+                    .category_asset_png(asset)
+                    .map_err(|error| error.to_string())
+            },
+            |completed_count, total_count| {
+                let mut current = status
+                    .lock()
+                    .map_err(|_| "전체 저장 진행 상태를 갱신하지 못했습니다.".to_owned())?;
+                current.completed_count = completed_count;
+                current.total_count = total_count;
+                Ok(())
+            },
+        )
+    })();
+
+    if let Ok(mut current) = status.lock() {
+        match result {
+            Ok(BatchSaveOutcome::Completed) => {
+                current.state = CategoryExportState::Completed;
+                current.completed_count = current.total_count;
+            }
+            Ok(BatchSaveOutcome::Cancelled) => {
+                current.state = CategoryExportState::Cancelled;
+                current.completed_count = 0;
+            }
+            Err(error) => {
+                current.state = CategoryExportState::Failed;
+                current.completed_count = 0;
+                current.error = Some(error);
+            }
+        }
+    }
 }
 
 fn remove_created_files(created: &[PathBuf]) {
@@ -305,13 +640,17 @@ fn remove_created_files(created: &[PathBuf]) {
 fn main() {
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(ViewerSession::default())))
+        .manage(Arc::new(CategoryExportManager::default()))
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             pick_game_directory,
             load_verified_category_page,
             load_verified_asset_detail,
             save_verified_asset_png,
-            save_verified_category_page
+            save_verified_category_page,
+            start_verified_category_export,
+            get_verified_category_export_status,
+            cancel_verified_category_export
         ])
         .run(tauri::generate_context!())
         .expect("failed to run DHO-VAULT viewer");
@@ -383,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn removes_files_created_before_a_page_save_failure() {
+    fn rejects_duplicate_file_names_before_writing() {
         let directory = test_directory("page-rollback");
         fs::create_dir(&directory).expect("create test directory");
         let asset = test_plan(1);
@@ -393,7 +732,7 @@ mod tests {
             save_verified_asset_page(&directory, &duplicate_assets, |plan| Ok(test_asset(plan)))
                 .unwrap_err();
 
-        assert!(error.contains("저장하지 못했습니다"));
+        assert!(error.contains("중복된 파일 이름"));
         assert!(!directory.join(page_asset_file_name(&asset)).exists());
         fs::remove_dir_all(directory).expect("remove test directory");
     }
@@ -416,5 +755,52 @@ mod tests {
         assert_eq!(error, "두 번째 이미지 추출 실패");
         assert!(!directory.join(page_asset_file_name(&assets[0])).exists());
         fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn removes_created_files_when_a_batch_is_cancelled() {
+        let directory = test_directory("cancel-rollback");
+        fs::create_dir(&directory).expect("create test directory");
+        let assets = [test_plan(1), test_plan(2)];
+        let cancel = AtomicBool::new(false);
+
+        let outcome = save_asset_batch(
+            &directory,
+            &assets,
+            &cancel,
+            |plan| Ok(test_asset(plan)),
+            |completed_count, _| {
+                if completed_count == 1 {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                Ok(())
+            },
+        )
+        .expect("cancel batch save");
+
+        assert_eq!(outcome, BatchSaveOutcome::Cancelled);
+        assert!(
+            assets
+                .iter()
+                .all(|asset| !directory.join(page_asset_file_name(asset)).exists())
+        );
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn manages_one_category_export_at_a_time() {
+        let manager = CategoryExportManager::default();
+        let first = manager.start(3).expect("start first export");
+
+        assert_eq!(first.job_id, 1);
+        assert_eq!(manager.status(1).expect("first status").total_count, 3);
+        assert!(manager.start(2).is_err());
+        assert!(manager.cancel(1).expect("cancel first export"));
+        assert!(first.cancel.load(Ordering::Relaxed));
+
+        first.status.lock().expect("first status lock").state = CategoryExportState::Cancelled;
+        let second = manager.start(2).expect("start second export");
+        assert_eq!(second.job_id, 2);
+        assert_eq!(manager.status(2).expect("second status").total_count, 2);
     }
 }
