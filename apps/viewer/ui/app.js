@@ -689,18 +689,68 @@ function renderSummary(summary) {
   );
 }
 
+function renderOpenedGameDirectory(opened, automatic) {
+  renderSummary(opened.summary);
+  if (opened.warning !== null) {
+    setStatus(
+      "warning",
+      "게임 리소스는 열었지만 폴더를 기억하지 못했습니다",
+      `${opened.warning} 다음 실행 때 게임 폴더를 다시 선택해야 할 수 있습니다.`,
+    );
+  } else if (automatic) {
+    setStatus(
+      "success",
+      "마지막 게임 폴더를 자동으로 열었습니다",
+      `지원하는 MWC 인덱스 ${opened.summary.archives.length}개와 확인된 카테고리 ${opened.summary.verifiedCategories.length}개를 찾았습니다.`,
+    );
+  }
+}
+
+async function loadSavedGameDirectory() {
+  selectButton.disabled = true;
+  clearSummary();
+  setStatus(
+    "loading",
+    "마지막 게임 폴더를 확인하는 중입니다",
+    "저장된 폴더가 없으면 새 게임 폴더를 선택할 수 있습니다.",
+  );
+
+  try {
+    const opened = await window.__TAURI__.core.invoke(
+      "load_saved_game_directory",
+    );
+    if (opened === null) {
+      setStatus(
+        "idle",
+        "게임 폴더를 선택해 주세요",
+        "처음 한 번 정상 폴더를 선택하면 다음 실행부터 자동으로 엽니다.",
+      );
+      return;
+    }
+    renderOpenedGameDirectory(opened, true);
+  } catch (error) {
+    setStatus(
+      "error",
+      "저장된 게임 폴더를 열지 못했습니다",
+      `${String(error)} 아래 버튼으로 현재 게임 폴더를 다시 선택해 주세요.`,
+    );
+  } finally {
+    selectButton.disabled = false;
+  }
+}
+
 selectButton.addEventListener("click", async () => {
   selectButton.disabled = true;
   clearSummary();
   setStatus("loading", "게임 폴더를 확인하는 중입니다", "폴더 선택 창이 열려 있습니다.");
 
   try {
-    const summary = await window.__TAURI__.core.invoke("pick_game_directory");
-    if (summary === null) {
+    const opened = await window.__TAURI__.core.invoke("pick_game_directory");
+    if (opened === null) {
       setStatus("idle", "선택을 취소했습니다", "원할 때 게임 폴더를 다시 선택할 수 있습니다.");
       return;
     }
-    renderSummary(summary);
+    renderOpenedGameDirectory(opened, false);
   } catch (error) {
     setStatus("error", "게임 폴더를 확인하지 못했습니다", String(error));
   } finally {
@@ -745,3 +795,5 @@ detailDialog.addEventListener("close", () => {
   detailRequestId += 1;
   resetDetail();
 });
+
+loadSavedGameDirectory();
