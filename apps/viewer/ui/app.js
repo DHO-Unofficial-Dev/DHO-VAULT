@@ -26,11 +26,13 @@ const detailMessage = document.querySelector("#detail-message");
 const detailMetadata = document.querySelector("#detail-metadata");
 const detailSourceSize = document.querySelector("#detail-source-size");
 const detailPreviewSize = document.querySelector("#detail-preview-size");
+const downloadDetailButton = document.querySelector("#download-detail");
 const closeDetailButton = document.querySelector("#close-detail");
 
 let currentPage = null;
 let galleryRequestId = 0;
 let detailRequestId = 0;
+let currentDetail = null;
 
 function setStatus(kind, title, message) {
   statusCard.dataset.status = kind;
@@ -180,6 +182,9 @@ function renderGallery(page) {
 }
 
 function resetDetail() {
+  currentDetail = null;
+  downloadDetailButton.disabled = true;
+  downloadDetailButton.textContent = "PNG 저장";
   detailContent.dataset.status = "idle";
   detailPreview.hidden = true;
   detailPreview.removeAttribute("src");
@@ -232,10 +237,50 @@ async function loadAssetDetail(path, item, position) {
     detailSourceSize.textContent = `${formatNumber(detail.sourceWidth)} × ${formatNumber(detail.sourceHeight)}`;
     detailPreviewSize.textContent = `${formatNumber(detail.previewWidth)} × ${formatNumber(detail.previewHeight)}`;
     detailMetadata.hidden = false;
+    currentDetail = {
+      path: detail.path,
+      archive: detail.archive,
+      blockIndex: detail.blockIndex,
+    };
+    downloadDetailButton.disabled = false;
   } catch (error) {
     if (requestId === detailRequestId) {
       detailContent.dataset.status = "error";
       detailMessage.textContent = String(error);
+    }
+  }
+}
+
+async function saveCurrentDetail() {
+  if (currentDetail === null) {
+    return;
+  }
+  const requestedDetail = currentDetail;
+  downloadDetailButton.disabled = true;
+  downloadDetailButton.textContent = "저장 중…";
+  detailMessage.textContent = "저장할 위치를 선택해 주세요.";
+
+  try {
+    const saved = await window.__TAURI__.core.invoke(
+      "save_verified_asset_png",
+      requestedDetail,
+    );
+    if (currentDetail !== requestedDetail) {
+      return;
+    }
+    if (saved === null) {
+      detailMessage.textContent = "저장을 취소했습니다.";
+      return;
+    }
+    detailMessage.textContent = `${saved.fileName} 파일로 저장했습니다.`;
+  } catch (error) {
+    if (currentDetail === requestedDetail) {
+      detailMessage.textContent = `저장하지 못했습니다: ${String(error)}`;
+    }
+  } finally {
+    if (currentDetail === requestedDetail) {
+      downloadDetailButton.disabled = false;
+      downloadDetailButton.textContent = "PNG 저장";
     }
   }
 }
@@ -351,6 +396,7 @@ nextPage.addEventListener("click", () => {
 });
 
 closeDetailButton.addEventListener("click", closeDetail);
+downloadDetailButton.addEventListener("click", saveCurrentDetail);
 detailDialog.addEventListener("close", () => {
   detailRequestId += 1;
   resetDetail();
