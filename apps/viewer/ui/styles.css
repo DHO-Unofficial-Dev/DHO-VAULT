@@ -296,6 +296,23 @@ button:disabled {
   line-height: 1.65;
 }
 
+.gallery-heading-actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.gallery-heading-actions .section-status {
+  max-width: 28rem;
+  text-align: right;
+}
+
+.gallery-heading-actions button {
+  min-height: 2.25rem;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.75rem;
+}
+
 .category-groups {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -624,6 +641,17 @@ button:disabled {
   .section-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .gallery-heading-actions {
+    align-items: stretch;
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .gallery-heading-actions .section-status {
+    max-width: none;
+    text-align: left;
   }
 
   .category-groups {

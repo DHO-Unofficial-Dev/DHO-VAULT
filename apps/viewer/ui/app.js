@@ -15,6 +15,7 @@ const galleryPanel = document.querySelector("#gallery-panel");
 const galleryTitle = document.querySelector("#gallery-title");
 const galleryStatus = document.querySelector("#gallery-status");
 const galleryGrid = document.querySelector("#gallery-grid");
+const savePageButton = document.querySelector("#save-page");
 const previousPage = document.querySelector("#previous-page");
 const nextPage = document.querySelector("#next-page");
 const pagePosition = document.querySelector("#page-position");
@@ -47,6 +48,8 @@ function clearSummary() {
   galleryPanel.hidden = true;
   galleryTitle.textContent = "카테고리를 선택해 주세요";
   galleryStatus.textContent = "";
+  savePageButton.disabled = true;
+  savePageButton.textContent = "현재 페이지 저장";
   galleryGrid.replaceChildren();
   pagePosition.textContent = "";
   categoryPanel.hidden = true;
@@ -175,10 +178,54 @@ function renderGallery(page) {
   const last = page.offset + page.items.length;
   const currentNumber = Math.floor(page.offset / page.pageSize) + 1;
   const pageCount = Math.ceil(page.totalCount / page.pageSize);
-  galleryStatus.textContent = `${formatNumber(first)}–${formatNumber(last)} / ${formatNumber(page.totalCount)}개`;
+  galleryStatus.textContent = galleryPageStatus(page);
   pagePosition.textContent = `${formatNumber(currentNumber)} / ${formatNumber(pageCount)} 페이지`;
+  savePageButton.disabled = false;
   previousPage.disabled = page.offset === 0;
   nextPage.disabled = last >= page.totalCount;
+}
+
+function galleryPageStatus(page) {
+  const first = page.offset + 1;
+  const last = page.offset + page.items.length;
+  return `${formatNumber(first)}–${formatNumber(last)} / ${formatNumber(page.totalCount)}개`;
+}
+
+async function saveCurrentPage() {
+  if (currentPage === null) {
+    return;
+  }
+  const requestedPage = currentPage;
+  savePageButton.disabled = true;
+  savePageButton.textContent = "저장 중…";
+  galleryStatus.textContent = "저장할 폴더를 선택해 주세요";
+
+  try {
+    const saved = await window.__TAURI__.core.invoke(
+      "save_verified_category_page",
+      {
+        path: requestedPage.path,
+        offset: requestedPage.offset,
+      },
+    );
+    if (currentPage !== requestedPage) {
+      return;
+    }
+    const pageStatus = galleryPageStatus(requestedPage);
+    galleryStatus.textContent =
+      saved === null
+        ? pageStatus
+        : `${pageStatus} · ${formatNumber(saved.savedCount)}개 저장 완료`;
+  } catch (error) {
+    if (currentPage === requestedPage) {
+      galleryStatus.textContent = `${galleryPageStatus(requestedPage)} · 저장하지 못했습니다: ${String(error)}`;
+    }
+  } finally {
+    if (currentPage === requestedPage) {
+      savePageButton.disabled = false;
+      savePageButton.textContent = "현재 페이지 저장";
+    }
+  }
 }
 
 function resetDetail() {
@@ -287,6 +334,7 @@ async function saveCurrentDetail() {
 
 async function loadCategoryPage(path, offset) {
   const requestId = ++galleryRequestId;
+  currentPage = null;
   for (const button of categoryGroups.querySelectorAll(".category-button")) {
     button.disabled = true;
   }
@@ -294,6 +342,8 @@ async function loadCategoryPage(path, offset) {
   galleryPanel.hidden = false;
   galleryTitle.textContent = path.join(" > ");
   galleryStatus.textContent = "썸네일을 불러오는 중입니다";
+  savePageButton.disabled = true;
+  savePageButton.textContent = "현재 페이지 저장";
   galleryGrid.dataset.status = "loading";
   galleryGrid.replaceChildren();
   pagePosition.textContent = "불러오는 중";
@@ -397,6 +447,7 @@ nextPage.addEventListener("click", () => {
 
 closeDetailButton.addEventListener("click", closeDetail);
 downloadDetailButton.addEventListener("click", saveCurrentDetail);
+savePageButton.addEventListener("click", saveCurrentPage);
 detailDialog.addEventListener("close", () => {
   detailRequestId += 1;
   resetDetail();
