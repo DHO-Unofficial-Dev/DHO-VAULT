@@ -133,31 +133,7 @@ impl ViewerSession {
         offset: usize,
         page_size: usize,
     ) -> Result<VerifiedCategoryPage, ViewerSessionError> {
-        if path.is_empty() {
-            return Err(ViewerSessionError::EmptyCategoryPath);
-        }
-        if !(1..=VIEWER_CATEGORY_PAGE_SIZE).contains(&page_size) {
-            return Err(ViewerSessionError::InvalidPageSize {
-                requested: page_size,
-                maximum: VIEWER_CATEGORY_PAGE_SIZE,
-            });
-        }
-
-        let assets = self.verified_assets(path)?;
-        if assets.is_empty() {
-            return Err(ViewerSessionError::CategoryNotFound {
-                path: path.to_vec(),
-            });
-        }
-        if offset >= assets.len() {
-            return Err(ViewerSessionError::OffsetOutOfRange {
-                offset,
-                total_count: assets.len(),
-            });
-        }
-
-        let end = offset.saturating_add(page_size).min(assets.len());
-        let selected = assets[offset..end].to_vec();
+        let (selected, total_count) = self.verified_asset_page(path, offset, page_size)?;
         let mut items = Vec::with_capacity(selected.len());
         for asset in selected {
             let archive = self.archive(&asset.prefix)?;
@@ -224,7 +200,7 @@ impl ViewerSession {
             path: path.to_vec(),
             offset,
             page_size,
-            total_count: assets.len(),
+            total_count,
             items,
         })
     }
@@ -305,6 +281,13 @@ impl ViewerSession {
         block_index: u32,
     ) -> Result<VerifiedAssetPng, ViewerSessionError> {
         let asset = self.verified_asset(path, prefix, block_index)?;
+        self.extract_asset_png(asset)
+    }
+
+    fn extract_asset_png(
+        &mut self,
+        asset: VerifiedAssetRef,
+    ) -> Result<VerifiedAssetPng, ViewerSessionError> {
         let archive = self.archive(&asset.prefix)?;
 
         if asset.assembled {
@@ -350,6 +333,40 @@ impl ViewerSession {
                 png: extracted.png,
             })
         }
+    }
+
+    fn verified_asset_page(
+        &mut self,
+        path: &[String],
+        offset: usize,
+        page_size: usize,
+    ) -> Result<(Vec<VerifiedAssetRef>, usize), ViewerSessionError> {
+        if path.is_empty() {
+            return Err(ViewerSessionError::EmptyCategoryPath);
+        }
+        if !(1..=VIEWER_CATEGORY_PAGE_SIZE).contains(&page_size) {
+            return Err(ViewerSessionError::InvalidPageSize {
+                requested: page_size,
+                maximum: VIEWER_CATEGORY_PAGE_SIZE,
+            });
+        }
+
+        let assets = self.verified_assets(path)?;
+        if assets.is_empty() {
+            return Err(ViewerSessionError::CategoryNotFound {
+                path: path.to_vec(),
+            });
+        }
+        if offset >= assets.len() {
+            return Err(ViewerSessionError::OffsetOutOfRange {
+                offset,
+                total_count: assets.len(),
+            });
+        }
+
+        let total_count = assets.len();
+        let end = offset.saturating_add(page_size).min(total_count);
+        Ok((assets[offset..end].to_vec(), total_count))
     }
 
     fn verified_asset(
