@@ -70,10 +70,24 @@
           </div>
           <div class="gallery-heading-actions">
             <p id="gallery-status" class="section-status" aria-live="polite"></p>
-            <button id="save-page" class="secondary-button" type="button" disabled>
-              현재 페이지 저장
+            <div class="gallery-save-actions">
+              <button id="save-page" class="secondary-button" type="button" disabled>
+                현재 페이지 저장
+              </button>
+              <button id="save-category" type="button" disabled>
+                카테고리 전체 저장
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="category-export" class="category-export" aria-live="polite" hidden>
+          <div class="category-export-heading">
+            <span id="category-export-status"></span>
+            <button id="cancel-category-export" class="secondary-button" type="button">
+              저장 취소
             </button>
           </div>
+          <progress id="category-export-progress" value="0" max="1"></progress>
         </div>
         <div id="gallery-grid" class="gallery-grid" aria-live="polite"></div>
         <nav class="gallery-navigation" aria-label="이미지 페이지 이동">
