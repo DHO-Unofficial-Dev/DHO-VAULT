@@ -8,7 +8,7 @@ use dho_catalog::{CatalogRecordKey, VerificationStatus, assembly_plan, classify_
 use dho_core::{IndexParseError, IndexedArchive};
 use dho_extract::{ExtractError, LoadedArchive, ResourceKey};
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -27,6 +27,8 @@ const MAX_ASSEMBLED_DECODE_SIZE: usize = 128 * 1024 * 1024;
 const MAX_THUMBNAIL_DECODE_SIZE: usize =
     THUMBNAIL_MAX_WIDTH as usize * THUMBNAIL_MAX_HEIGHT as usize * 4;
 const MAX_DETAIL_DECODE_SIZE: usize = DETAIL_MAX_WIDTH as usize * DETAIL_MAX_HEIGHT as usize * 4;
+const THUMBNAIL_CACHE_MAX_ITEMS: usize = 256;
+const THUMBNAIL_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,6 +149,7 @@ pub struct ViewerSession {
     resource_directory: Option<PathBuf>,
     archives: HashMap<String, LoadedArchive>,
     search_assets: Option<Vec<VerifiedSearchAssetRef>>,
+    thumbnail_cache: ThumbnailCache,
 }
 
 #[derive(Debug, Clone)]
@@ -163,12 +166,119 @@ struct VerifiedSearchAssetRef {
     asset: VerifiedAssetRef,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ThumbnailCacheKey {
+    prefix: String,
+    icon_id: u32,
+    canonical_block: u32,
+    assembled: bool,
+}
+
+impl From<&VerifiedAssetRef> for ThumbnailCacheKey {
+    fn from(asset: &VerifiedAssetRef) -> Self {
+        Self {
+            prefix: asset.prefix.clone(),
+            icon_id: asset.key.icon_id,
+            canonical_block: asset.canonical_block,
+            assembled: asset.assembled,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ThumbnailCacheEntry {
+    thumbnail: VerifiedAssetThumbnail,
+    size_bytes: usize,
+}
+
+#[derive(Debug)]
+struct ThumbnailCache {
+    entries: HashMap<ThumbnailCacheKey, ThumbnailCacheEntry>,
+    recency: VecDeque<ThumbnailCacheKey>,
+    total_bytes: usize,
+    max_items: usize,
+    max_bytes: usize,
+}
+
+impl Default for ThumbnailCache {
+    fn default() -> Self {
+        Self::with_limits(THUMBNAIL_CACHE_MAX_ITEMS, THUMBNAIL_CACHE_MAX_BYTES)
+    }
+}
+
+impl ThumbnailCache {
+    fn with_limits(max_items: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            recency: VecDeque::new(),
+            total_bytes: 0,
+            max_items,
+            max_bytes,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.recency.clear();
+        self.total_bytes = 0;
+    }
+
+    fn get(&mut self, key: &ThumbnailCacheKey) -> Option<VerifiedAssetThumbnail> {
+        let thumbnail = self.entries.get(key)?.thumbnail.clone();
+        self.recency.retain(|existing| existing != key);
+        self.recency.push_back(key.clone());
+        Some(thumbnail)
+    }
+
+    fn insert(&mut self, key: ThumbnailCacheKey, thumbnail: VerifiedAssetThumbnail) {
+        let size_bytes = thumbnail_cache_size(&thumbnail);
+        if self.max_items == 0 || size_bytes > self.max_bytes {
+            return;
+        }
+
+        if let Some(previous) = self.entries.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous.size_bytes);
+            self.recency.retain(|existing| existing != &key);
+        }
+
+        while !self.entries.is_empty()
+            && (self.entries.len() >= self.max_items
+                || self.total_bytes.saturating_add(size_bytes) > self.max_bytes)
+        {
+            let Some(oldest) = self.recency.pop_front() else {
+                self.clear();
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.total_bytes = self.total_bytes.saturating_sub(removed.size_bytes);
+            }
+        }
+
+        self.total_bytes = self.total_bytes.saturating_add(size_bytes);
+        self.recency.push_back(key.clone());
+        self.entries.insert(
+            key,
+            ThumbnailCacheEntry {
+                thumbnail,
+                size_bytes,
+            },
+        );
+    }
+}
+
+fn thumbnail_cache_size(thumbnail: &VerifiedAssetThumbnail) -> usize {
+    std::mem::size_of::<VerifiedAssetThumbnail>()
+        .saturating_add(thumbnail.archive.len())
+        .saturating_add(thumbnail.thumbnail_data_url.len())
+}
+
 impl ViewerSession {
     pub fn set_resource_directory(&mut self, path: impl Into<PathBuf>) {
         let path = path.into();
         if self.resource_directory.as_ref() != Some(&path) {
             self.archives.clear();
             self.search_assets = None;
+            self.thumbnail_cache.clear();
             self.resource_directory = Some(path);
         }
     }
@@ -404,8 +514,13 @@ impl ViewerSession {
         &mut self,
         asset: VerifiedAssetRef,
     ) -> Result<VerifiedAssetThumbnail, ViewerSessionError> {
+        let cache_key = ThumbnailCacheKey::from(&asset);
+        if let Some(thumbnail) = self.thumbnail_cache.get(&cache_key) {
+            return Ok(thumbnail);
+        }
+
         let archive = self.archive(&asset.prefix)?;
-        if asset.assembled {
+        let thumbnail = if asset.assembled {
             let extracted = archive
                 .extract_verified_assembly_thumbnail(
                     asset.canonical_block,
@@ -424,7 +539,7 @@ impl ViewerSession {
                     prefix: asset.prefix.clone(),
                     block_index: asset.canonical_block,
                 })?;
-            Ok(VerifiedAssetThumbnail {
+            VerifiedAssetThumbnail {
                 archive: asset.prefix,
                 icon_id: asset.key.icon_id,
                 block_index: extracted.first_block,
@@ -434,7 +549,7 @@ impl ViewerSession {
                 thumbnail_height: extracted.height,
                 assembled: true,
                 thumbnail_data_url: png_data_url(&extracted.png),
-            })
+            }
         } else {
             let extracted = archive
                 .extract_thumbnail_png(
@@ -449,7 +564,7 @@ impl ViewerSession {
                     block_index: asset.canonical_block,
                     source,
                 })?;
-            Ok(VerifiedAssetThumbnail {
+            VerifiedAssetThumbnail {
                 archive: asset.prefix,
                 icon_id: asset.key.icon_id,
                 block_index: asset.canonical_block,
@@ -459,8 +574,10 @@ impl ViewerSession {
                 thumbnail_height: extracted.height,
                 assembled: false,
                 thumbnail_data_url: png_data_url(&extracted.png),
-            })
-        }
+            }
+        };
+        self.thumbnail_cache.insert(cache_key, thumbnail.clone());
+        Ok(thumbnail)
     }
 
     fn verified_asset_page(
@@ -1064,6 +1181,95 @@ mod tests {
             .flat_map(|raw| zlib_block(raw))
             .collect::<Vec<_>>();
         fs::write(path, data).expect("write test data file");
+    }
+
+    fn test_thumbnail(icon_id: u32, data_url_bytes: usize) -> VerifiedAssetThumbnail {
+        VerifiedAssetThumbnail {
+            archive: "sb".to_owned(),
+            icon_id,
+            block_index: icon_id,
+            source_width: 1,
+            source_height: 1,
+            thumbnail_width: 1,
+            thumbnail_height: 1,
+            assembled: false,
+            thumbnail_data_url: "x".repeat(data_url_bytes),
+        }
+    }
+
+    fn test_thumbnail_key(icon_id: u32) -> ThumbnailCacheKey {
+        ThumbnailCacheKey {
+            prefix: "sb".to_owned(),
+            icon_id,
+            canonical_block: icon_id,
+            assembled: false,
+        }
+    }
+
+    #[test]
+    fn thumbnail_cache_evicts_the_least_recently_used_item() {
+        let mut cache = ThumbnailCache::with_limits(2, usize::MAX);
+        let first = test_thumbnail_key(1);
+        let second = test_thumbnail_key(2);
+        let third = test_thumbnail_key(3);
+        cache.insert(first.clone(), test_thumbnail(1, 1));
+        cache.insert(second.clone(), test_thumbnail(2, 1));
+
+        assert_eq!(cache.get(&first).expect("first thumbnail").icon_id, 1);
+        cache.insert(third.clone(), test_thumbnail(3, 1));
+
+        assert!(cache.get(&second).is_none());
+        assert!(cache.get(&first).is_some());
+        assert!(cache.get(&third).is_some());
+        assert_eq!(cache.entries.len(), 2);
+    }
+
+    #[test]
+    fn thumbnail_cache_enforces_its_byte_limit() {
+        let item_size = thumbnail_cache_size(&test_thumbnail(1, 4));
+        let mut cache = ThumbnailCache::with_limits(10, item_size * 2);
+        let first = test_thumbnail_key(1);
+        let second = test_thumbnail_key(2);
+        let third = test_thumbnail_key(3);
+        cache.insert(first.clone(), test_thumbnail(1, 4));
+        cache.insert(second.clone(), test_thumbnail(2, 4));
+        assert_eq!(cache.total_bytes, item_size * 2);
+
+        cache.insert(third.clone(), test_thumbnail(3, 4));
+
+        assert!(cache.get(&first).is_none());
+        assert!(cache.get(&second).is_some());
+        assert!(cache.get(&third).is_some());
+        assert_eq!(cache.total_bytes, item_size * 2);
+    }
+
+    #[test]
+    fn thumbnail_cache_does_not_store_an_oversized_item() {
+        let thumbnail = test_thumbnail(1, 4);
+        let mut cache = ThumbnailCache::with_limits(10, thumbnail_cache_size(&thumbnail) - 1);
+        let key = test_thumbnail_key(1);
+
+        cache.insert(key.clone(), thumbnail);
+
+        assert!(cache.get(&key).is_none());
+        assert_eq!(cache.total_bytes, 0);
+    }
+
+    #[test]
+    fn viewer_session_clears_thumbnails_only_when_the_directory_changes() {
+        let mut session = ViewerSession::default();
+        session.set_resource_directory("first");
+        let key = test_thumbnail_key(1);
+        session
+            .thumbnail_cache
+            .insert(key.clone(), test_thumbnail(1, 1));
+
+        session.set_resource_directory("first");
+        assert!(session.thumbnail_cache.get(&key).is_some());
+
+        session.set_resource_directory("second");
+        assert!(session.thumbnail_cache.get(&key).is_none());
+        assert_eq!(session.thumbnail_cache.total_bytes, 0);
     }
 
     #[test]
