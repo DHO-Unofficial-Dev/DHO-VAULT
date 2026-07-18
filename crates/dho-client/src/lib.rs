@@ -66,6 +66,23 @@ pub struct VerifiedCategoryPage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VerifiedAssetSearchPage {
+    pub query: String,
+    pub offset: usize,
+    pub page_size: usize,
+    pub total_count: usize,
+    pub items: Vec<VerifiedAssetSearchItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifiedAssetSearchItem {
+    pub path: Vec<String>,
+    pub thumbnail: VerifiedAssetThumbnail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VerifiedAssetThumbnail {
     pub archive: String,
     pub icon_id: u32,
@@ -129,6 +146,7 @@ impl VerifiedCategoryAsset {
 pub struct ViewerSession {
     resource_directory: Option<PathBuf>,
     archives: HashMap<String, LoadedArchive>,
+    search_assets: Option<Vec<VerifiedSearchAssetRef>>,
 }
 
 #[derive(Debug, Clone)]
@@ -139,11 +157,18 @@ struct VerifiedAssetRef {
     assembled: bool,
 }
 
+#[derive(Debug, Clone)]
+struct VerifiedSearchAssetRef {
+    path: Vec<String>,
+    asset: VerifiedAssetRef,
+}
+
 impl ViewerSession {
     pub fn set_resource_directory(&mut self, path: impl Into<PathBuf>) {
         let path = path.into();
         if self.resource_directory.as_ref() != Some(&path) {
             self.archives.clear();
+            self.search_assets = None;
             self.resource_directory = Some(path);
         }
     }
@@ -157,68 +182,64 @@ impl ViewerSession {
         let (selected, total_count) = self.verified_asset_page(path, offset, page_size)?;
         let mut items = Vec::with_capacity(selected.len());
         for asset in selected {
-            let archive = self.archive(&asset.prefix)?;
-            let thumbnail = if asset.assembled {
-                let extracted = archive
-                    .extract_verified_assembly_thumbnail(
-                        asset.canonical_block,
-                        MAX_IMAGE_DECODE_SIZE,
-                        MAX_ASSEMBLED_DECODE_SIZE,
-                        THUMBNAIL_MAX_WIDTH,
-                        THUMBNAIL_MAX_HEIGHT,
-                        MAX_THUMBNAIL_DECODE_SIZE,
-                    )
-                    .map_err(|source| ViewerSessionError::Extract {
-                        prefix: asset.prefix.clone(),
-                        block_index: asset.canonical_block,
-                        source,
-                    })?
-                    .ok_or_else(|| ViewerSessionError::AssemblyRuleMissing {
-                        prefix: asset.prefix.clone(),
-                        block_index: asset.canonical_block,
-                    })?;
-                VerifiedAssetThumbnail {
-                    archive: asset.prefix,
-                    icon_id: asset.key.icon_id,
-                    block_index: extracted.first_block,
-                    source_width: extracted.source_width,
-                    source_height: extracted.source_height,
-                    thumbnail_width: extracted.width,
-                    thumbnail_height: extracted.height,
-                    assembled: true,
-                    thumbnail_data_url: png_data_url(&extracted.png),
-                }
-            } else {
-                let extracted = archive
-                    .extract_thumbnail_png(
-                        asset.key,
-                        MAX_IMAGE_DECODE_SIZE,
-                        THUMBNAIL_MAX_WIDTH,
-                        THUMBNAIL_MAX_HEIGHT,
-                        MAX_THUMBNAIL_DECODE_SIZE,
-                    )
-                    .map_err(|source| ViewerSessionError::Extract {
-                        prefix: asset.prefix.clone(),
-                        block_index: asset.canonical_block,
-                        source,
-                    })?;
-                VerifiedAssetThumbnail {
-                    archive: asset.prefix,
-                    icon_id: asset.key.icon_id,
-                    block_index: asset.canonical_block,
-                    source_width: extracted.source_width,
-                    source_height: extracted.source_height,
-                    thumbnail_width: extracted.width,
-                    thumbnail_height: extracted.height,
-                    assembled: false,
-                    thumbnail_data_url: png_data_url(&extracted.png),
-                }
-            };
-            items.push(thumbnail);
+            items.push(self.asset_thumbnail(asset)?);
         }
 
         Ok(VerifiedCategoryPage {
             path: path.to_vec(),
+            offset,
+            page_size,
+            total_count,
+            items,
+        })
+    }
+
+    pub fn search_page(
+        &mut self,
+        query: &str,
+        offset: usize,
+        page_size: usize,
+    ) -> Result<VerifiedAssetSearchPage, ViewerSessionError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err(ViewerSessionError::EmptySearchQuery);
+        }
+        if !(1..=VIEWER_CATEGORY_PAGE_SIZE).contains(&page_size) {
+            return Err(ViewerSessionError::InvalidPageSize {
+                requested: page_size,
+                maximum: VIEWER_CATEGORY_PAGE_SIZE,
+            });
+        }
+
+        let terms = query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>();
+        let matching = self
+            .verified_search_assets()?
+            .iter()
+            .filter(|asset| search_asset_matches(asset, &terms))
+            .cloned()
+            .collect::<Vec<_>>();
+        let total_count = matching.len();
+        if offset > 0 && offset >= total_count {
+            return Err(ViewerSessionError::OffsetOutOfRange {
+                offset,
+                total_count,
+            });
+        }
+        let end = offset.saturating_add(page_size).min(total_count);
+        let selected = matching.get(offset..end).unwrap_or_default().to_vec();
+        let mut items = Vec::with_capacity(selected.len());
+        for selected in selected {
+            items.push(VerifiedAssetSearchItem {
+                path: selected.path,
+                thumbnail: self.asset_thumbnail(selected.asset)?,
+            });
+        }
+
+        Ok(VerifiedAssetSearchPage {
+            query: query.to_owned(),
             offset,
             page_size,
             total_count,
@@ -379,6 +400,69 @@ impl ViewerSession {
         }
     }
 
+    fn asset_thumbnail(
+        &mut self,
+        asset: VerifiedAssetRef,
+    ) -> Result<VerifiedAssetThumbnail, ViewerSessionError> {
+        let archive = self.archive(&asset.prefix)?;
+        if asset.assembled {
+            let extracted = archive
+                .extract_verified_assembly_thumbnail(
+                    asset.canonical_block,
+                    MAX_IMAGE_DECODE_SIZE,
+                    MAX_ASSEMBLED_DECODE_SIZE,
+                    THUMBNAIL_MAX_WIDTH,
+                    THUMBNAIL_MAX_HEIGHT,
+                    MAX_THUMBNAIL_DECODE_SIZE,
+                )
+                .map_err(|source| ViewerSessionError::Extract {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                    source,
+                })?
+                .ok_or_else(|| ViewerSessionError::AssemblyRuleMissing {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                })?;
+            Ok(VerifiedAssetThumbnail {
+                archive: asset.prefix,
+                icon_id: asset.key.icon_id,
+                block_index: extracted.first_block,
+                source_width: extracted.source_width,
+                source_height: extracted.source_height,
+                thumbnail_width: extracted.width,
+                thumbnail_height: extracted.height,
+                assembled: true,
+                thumbnail_data_url: png_data_url(&extracted.png),
+            })
+        } else {
+            let extracted = archive
+                .extract_thumbnail_png(
+                    asset.key,
+                    MAX_IMAGE_DECODE_SIZE,
+                    THUMBNAIL_MAX_WIDTH,
+                    THUMBNAIL_MAX_HEIGHT,
+                    MAX_THUMBNAIL_DECODE_SIZE,
+                )
+                .map_err(|source| ViewerSessionError::Extract {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                    source,
+                })?;
+            Ok(VerifiedAssetThumbnail {
+                archive: asset.prefix,
+                icon_id: asset.key.icon_id,
+                block_index: asset.canonical_block,
+                source_width: extracted.source_width,
+                source_height: extracted.source_height,
+                thumbnail_width: extracted.width,
+                thumbnail_height: extracted.height,
+                assembled: false,
+                thumbnail_data_url: png_data_url(&extracted.png),
+            })
+        }
+    }
+
     fn verified_asset_page(
         &mut self,
         path: &[String],
@@ -490,6 +574,77 @@ impl ViewerSession {
         Ok(assets)
     }
 
+    fn verified_search_assets(&mut self) -> Result<&[VerifiedSearchAssetRef], ViewerSessionError> {
+        if self.search_assets.is_none() {
+            let resource_directory = self
+                .resource_directory
+                .clone()
+                .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
+            let mut assets = Vec::new();
+
+            for prefix in SUPPORTED_ARCHIVE_PREFIXES {
+                if !resource_directory
+                    .join(format!("{prefix}000000.bin"))
+                    .is_file()
+                {
+                    continue;
+                }
+                let archive = self.archive(prefix)?;
+                let mut unique = BTreeMap::<(Vec<String>, u32), ResourceKey>::new();
+                for record in archive.records() {
+                    let classification = classify_record(CatalogRecordKey {
+                        archive: prefix,
+                        group_code: record.group_code,
+                        icon_id: record.icon_id,
+                        block_index: record.block_index,
+                    });
+                    if classification.boundary_status != VerificationStatus::HumanVerified
+                        || classification.meaning_status != VerificationStatus::HumanVerified
+                    {
+                        continue;
+                    }
+                    let Some(category) = classification.category else {
+                        continue;
+                    };
+                    let canonical_block = assembly_plan(prefix, record.block_index)
+                        .map_or(record.block_index, |plan| plan.first_block);
+                    let path = category
+                        .segments()
+                        .iter()
+                        .map(|segment| (*segment).to_owned())
+                        .collect();
+                    unique
+                        .entry((path, canonical_block))
+                        .or_insert(ResourceKey {
+                            group_code: record.group_code,
+                            icon_id: record.icon_id,
+                            block_index: record.block_index,
+                        });
+                }
+                assets.extend(unique.into_iter().map(|((path, canonical_block), key)| {
+                    VerifiedSearchAssetRef {
+                        path,
+                        asset: VerifiedAssetRef {
+                            prefix: prefix.to_owned(),
+                            key,
+                            canonical_block,
+                            assembled: assembly_plan(prefix, canonical_block).is_some(),
+                        },
+                    }
+                }));
+            }
+            assets.sort_by(|left, right| {
+                left.path
+                    .cmp(&right.path)
+                    .then_with(|| left.asset.prefix.cmp(&right.asset.prefix))
+                    .then_with(|| left.asset.canonical_block.cmp(&right.asset.canonical_block))
+            });
+
+            self.search_assets = Some(assets);
+        }
+        Ok(self.search_assets.as_deref().unwrap_or_default())
+    }
+
     fn archive(&mut self, prefix: &str) -> Result<&LoadedArchive, ViewerSessionError> {
         let resource_directory = self
             .resource_directory
@@ -517,6 +672,19 @@ fn category_matches(segments: &[&str], path: &[String]) -> bool {
             .iter()
             .zip(path)
             .all(|(segment, expected)| *segment == expected)
+}
+
+fn search_asset_matches(asset: &VerifiedSearchAssetRef, terms: &[String]) -> bool {
+    let text = format!("{} {}", asset.path.join(" "), asset.asset.prefix).to_lowercase();
+    let icon_id = asset.asset.key.icon_id.to_string();
+    let block_index = asset.asset.canonical_block.to_string();
+    terms.iter().all(|term| {
+        if term.chars().all(|character| character.is_ascii_digit()) {
+            term == &icon_id || term == &block_index
+        } else {
+            text.contains(term)
+        }
+    })
 }
 
 fn png_data_url(png: &[u8]) -> String {
@@ -619,6 +787,7 @@ pub fn inspect_game_directory(
 pub enum ViewerSessionError {
     ResourceDirectoryNotSelected,
     EmptyCategoryPath,
+    EmptySearchQuery,
     InvalidPageSize {
         requested: usize,
         maximum: usize,
@@ -657,6 +826,7 @@ impl fmt::Display for ViewerSessionError {
                 write!(formatter, "먼저 게임 폴더를 선택해 주세요.")
             }
             Self::EmptyCategoryPath => write!(formatter, "카테고리 경로가 비어 있습니다."),
+            Self::EmptySearchQuery => write!(formatter, "검색어를 입력해 주세요."),
             Self::InvalidPageSize { requested, maximum } => write!(
                 formatter,
                 "한 번에 불러올 이미지 수는 1개부터 {maximum}개까지입니다: {requested}"
@@ -715,6 +885,7 @@ impl Error for ViewerSessionError {
             Self::OpenArchive { source, .. } | Self::Extract { source, .. } => Some(source),
             Self::ResourceDirectoryNotSelected
             | Self::EmptyCategoryPath
+            | Self::EmptySearchQuery
             | Self::InvalidPageSize { .. }
             | Self::CategoryNotFound { .. }
             | Self::AssetNotFound { .. }
@@ -1074,6 +1245,71 @@ mod tests {
                 total_count: 2,
             }
         ));
+    }
+
+    #[test]
+    fn searches_only_verified_assets_and_pages_thumbnails() {
+        let directory = TestDirectory::new();
+        let resources = directory.prepare_game();
+        write_index_records(
+            &resources.join("sb000000.bin"),
+            &[
+                [100_100, 0, 1, 1, 1],
+                [100_101, 1, 1, 1, 1],
+                [1_200_002, 2, 1, 1, 1],
+            ],
+            3,
+        );
+        write_data_file(
+            &resources.join("sb000001.bin"),
+            &[
+                vec![0, 0, 255, 255],
+                vec![255, 0, 0, 255],
+                vec![0, 255, 0, 255],
+            ],
+        );
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(&resources);
+
+        let category_page = session
+            .search_page("SB 방어구 머리", 0, 1)
+            .expect("search verified category");
+        assert_eq!(category_page.total_count, 2);
+        assert_eq!(category_page.items.len(), 1);
+        assert_eq!(category_page.items[0].path, ["장비", "방어구", "머리"]);
+        assert_eq!(category_page.items[0].thumbnail.icon_id, 100_100);
+        assert!(session.search_assets.is_some());
+
+        let second_page = session
+            .search_page("머리", 1, 1)
+            .expect("reuse the search index for the next page");
+        assert_eq!(second_page.items[0].thumbnail.icon_id, 100_101);
+
+        let id_page = session
+            .search_page("100100", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("search exact icon ID");
+        assert_eq!(id_page.total_count, 1);
+        assert_eq!(id_page.items[0].thumbnail.block_index, 0);
+
+        let empty_page = session
+            .search_page("없는 검색어", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("return an empty search page");
+        assert_eq!(empty_page.total_count, 0);
+        assert!(empty_page.items.is_empty());
+
+        let empty_query = session.search_page("  ", 0, 1).unwrap_err();
+        assert!(matches!(empty_query, ViewerSessionError::EmptySearchQuery));
+        let offset_error = session.search_page("머리", 2, 1).unwrap_err();
+        assert!(matches!(
+            offset_error,
+            ViewerSessionError::OffsetOutOfRange {
+                offset: 2,
+                total_count: 2,
+            }
+        ));
+
+        session.set_resource_directory(resources.join("other"));
+        assert!(session.search_assets.is_none());
     }
 
     #[test]
