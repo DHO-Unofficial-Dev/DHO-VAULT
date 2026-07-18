@@ -44,9 +44,11 @@ jobs:
           rustup update stable
           rustup default stable
 
-      - name: Tauri 번들러 설치
-        shell: pwsh
-        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Node.js 24 준비
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
 
       - name: 전체 테스트
         shell: pwsh
@@ -55,7 +57,7 @@ jobs:
       - name: Viewer 빌드
         shell: pwsh
         working-directory: apps/viewer/src-tauri
-        run: cargo tauri build
+        run: npx --yes @tauri-apps/cli@2.11.4 build
 
       - name: 배포 파일 정리
         shell: pwsh
