@@ -59,6 +59,22 @@
         <p class="section-description">
           실제 게임 이미지와 경계를 확인한 카테고리만 표시합니다. 카테고리를 선택하면 한 번에 32개씩 이미지를 불러옵니다.
         </p>
+        <form id="asset-search" class="asset-search" role="search">
+          <label for="asset-search-query">확인된 이미지 검색</label>
+          <div class="asset-search-controls">
+            <input
+              id="asset-search-query"
+              name="query"
+              type="search"
+              placeholder="카테고리, 이미지 ID 또는 블록 번호"
+              autocomplete="off"
+            />
+            <button id="asset-search-submit" type="submit">검색</button>
+          </div>
+          <p>
+            카테고리 경로, SB·SC·SD·IS, 이미지 ID, 블록 번호를 검색합니다. 아이템 명칭 검색은 아직 지원하지 않습니다.
+          </p>
+        </form>
         <div id="category-groups" class="category-groups"></div>
       </section>
 

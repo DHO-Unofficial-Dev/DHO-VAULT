@@ -4,7 +4,8 @@
 
 use dho_client::{
     GameDirectorySummary, VIEWER_CATEGORY_PAGE_SIZE, VerifiedAssetDetail, VerifiedAssetPng,
-    VerifiedCategoryAsset, VerifiedCategoryPage, ViewerSession, inspect_game_directory,
+    VerifiedAssetSearchPage, VerifiedCategoryAsset, VerifiedCategoryPage, ViewerSession,
+    inspect_game_directory,
 };
 use serde::Serialize;
 use std::collections::HashSet;
@@ -239,6 +240,24 @@ async fn load_verified_category_page(
     })
     .await
     .map_err(|error| format!("썸네일을 불러오는 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn load_verified_asset_search_page(
+    query: String,
+    offset: usize,
+    session: State<'_, SharedViewerSession>,
+) -> Result<VerifiedAssetSearchPage, String> {
+    let session = session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .lock()
+            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?
+            .search_page(&query, offset, VIEWER_CATEGORY_PAGE_SIZE)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("검색 결과를 불러오는 작업이 중단되었습니다: {error}"))?
 }
 
 #[tauri::command]
@@ -645,6 +664,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             pick_game_directory,
             load_verified_category_page,
+            load_verified_asset_search_page,
             load_verified_asset_detail,
             save_verified_asset_png,
             save_verified_category_page,
