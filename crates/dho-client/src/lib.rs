@@ -93,6 +93,17 @@ pub struct VerifiedAssetDetail {
     pub preview_data_url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedAssetPng {
+    pub archive: String,
+    pub icon_id: u32,
+    pub block_index: u32,
+    pub width: u32,
+    pub height: u32,
+    pub assembled: bool,
+    pub png: Vec<u8>,
+}
+
 #[derive(Debug, Default)]
 pub struct ViewerSession {
     resource_directory: Option<PathBuf>,
@@ -224,19 +235,7 @@ impl ViewerSession {
         prefix: &str,
         block_index: u32,
     ) -> Result<VerifiedAssetDetail, ViewerSessionError> {
-        if path.is_empty() {
-            return Err(ViewerSessionError::EmptyCategoryPath);
-        }
-        let normalized_prefix = prefix.to_ascii_lowercase();
-        let asset = self
-            .verified_assets(path)?
-            .into_iter()
-            .find(|asset| asset.prefix == normalized_prefix && asset.canonical_block == block_index)
-            .ok_or_else(|| ViewerSessionError::AssetNotFound {
-                path: path.to_vec(),
-                prefix: normalized_prefix.clone(),
-                block_index,
-            })?;
+        let asset = self.verified_asset(path, prefix, block_index)?;
         let archive = self.archive(&asset.prefix)?;
 
         if asset.assembled {
@@ -297,6 +296,80 @@ impl ViewerSession {
                 preview_data_url: png_data_url(&extracted.png),
             })
         }
+    }
+
+    pub fn asset_png(
+        &mut self,
+        path: &[String],
+        prefix: &str,
+        block_index: u32,
+    ) -> Result<VerifiedAssetPng, ViewerSessionError> {
+        let asset = self.verified_asset(path, prefix, block_index)?;
+        let archive = self.archive(&asset.prefix)?;
+
+        if asset.assembled {
+            let extracted = archive
+                .extract_verified_assembly(
+                    asset.canonical_block,
+                    MAX_IMAGE_DECODE_SIZE,
+                    MAX_ASSEMBLED_DECODE_SIZE,
+                )
+                .map_err(|source| ViewerSessionError::Extract {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                    source,
+                })?
+                .ok_or_else(|| ViewerSessionError::AssemblyRuleMissing {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                })?;
+            Ok(VerifiedAssetPng {
+                archive: asset.prefix,
+                icon_id: asset.key.icon_id,
+                block_index: extracted.first_block,
+                width: extracted.width,
+                height: extracted.height,
+                assembled: true,
+                png: extracted.png,
+            })
+        } else {
+            let extracted = archive
+                .extract_png(asset.key, MAX_IMAGE_DECODE_SIZE)
+                .map_err(|source| ViewerSessionError::Extract {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                    source,
+                })?;
+            Ok(VerifiedAssetPng {
+                archive: asset.prefix,
+                icon_id: asset.key.icon_id,
+                block_index: asset.canonical_block,
+                width: extracted.width,
+                height: extracted.height,
+                assembled: false,
+                png: extracted.png,
+            })
+        }
+    }
+
+    fn verified_asset(
+        &mut self,
+        path: &[String],
+        prefix: &str,
+        block_index: u32,
+    ) -> Result<VerifiedAssetRef, ViewerSessionError> {
+        if path.is_empty() {
+            return Err(ViewerSessionError::EmptyCategoryPath);
+        }
+        let normalized_prefix = prefix.to_ascii_lowercase();
+        self.verified_assets(path)?
+            .into_iter()
+            .find(|asset| asset.prefix == normalized_prefix && asset.canonical_block == block_index)
+            .ok_or_else(|| ViewerSessionError::AssetNotFound {
+                path: path.to_vec(),
+                prefix: normalized_prefix,
+                block_index,
+            })
     }
 
     fn verified_assets(
@@ -562,7 +635,7 @@ impl fmt::Display for ViewerSessionError {
                 source,
             } => write!(
                 formatter,
-                "{prefix} 이미지 {block_index}의 썸네일을 만들지 못했습니다: {source}"
+                "{prefix} 이미지 {block_index}를 만들지 못했습니다: {source}"
             ),
             Self::AssemblyRuleMissing {
                 prefix,
@@ -894,6 +967,14 @@ mod tests {
                 .starts_with("data:image/png;base64,")
         );
 
+        let png = session
+            .asset_png(&category, "SB", 0)
+            .expect("extract verified asset PNG");
+        assert_eq!((png.width, png.height), (2, 1));
+        assert_eq!(png.block_index, 0);
+        assert!(!png.assembled);
+        assert_eq!(&png.png[..8], b"\x89PNG\r\n\x1a\n");
+
         let detail_error = session.asset_detail(&category, "sb", 2).unwrap_err();
         assert!(matches!(
             detail_error,
@@ -904,6 +985,12 @@ mod tests {
             } if path == &category && prefix == "sb"
         ));
 
+        let png_error = session.asset_png(&category, "sb", 2).unwrap_err();
+        assert!(matches!(
+            png_error,
+            ViewerSessionError::AssetNotFound { block_index: 2, .. }
+        ));
+
         let error = session.category_page(&category, 2, 1).unwrap_err();
         assert!(matches!(
             error,
@@ -912,6 +999,40 @@ mod tests {
                 total_count: 2,
             }
         ));
+    }
+
+    #[test]
+    fn exports_a_verified_assembly_as_one_png() {
+        let directory = TestDirectory::new();
+        let resources = directory.prepare_game();
+        let records = (0..28)
+            .map(|offset| {
+                let width = if offset % 7 == 6 { 14 } else { 128 };
+                let height = if offset / 7 == 3 { 20 } else { 128 };
+                [offset + 1, 10_368 + offset, width, height, 33]
+            })
+            .collect::<Vec<_>>();
+        write_index_records(&resources.join("sd000000.bin"), &records, 10_396);
+        let mut blocks = vec![Vec::new(); 10_368];
+        blocks.extend(
+            records
+                .iter()
+                .map(|record| [16, 32, 64, 255].repeat((record[2] * record[3]) as usize)),
+        );
+        write_data_file(&resources.join("sd000001.bin"), &blocks);
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(&resources);
+        let category = ["UI 이미지", "예지의 서", "표지"].map(str::to_owned);
+
+        let png = session
+            .asset_png(&category, "sd", 10_368)
+            .expect("extract verified assembly PNG");
+
+        assert_eq!(png.archive, "sd");
+        assert_eq!(png.block_index, 10_368);
+        assert_eq!((png.width, png.height), (782, 404));
+        assert!(png.assembled);
+        assert_eq!(&png.png[..8], b"\x89PNG\r\n\x1a\n");
     }
 
     #[test]

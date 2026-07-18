@@ -607,6 +607,7 @@ name = "dho-viewer"
 version = "0.1.0"
 dependencies = [
  "dho-client",
+ "serde",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

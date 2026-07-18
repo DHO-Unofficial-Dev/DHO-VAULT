@@ -10,6 +10,7 @@ tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
 dho-client = { path = "../../../crates/dho-client" }
+serde = { version = "=1.0.228", features = ["derive"] }
 tauri = { version = "=2.11.5", features = [] }
 tauri-plugin-dialog = { version = "=2.7.1", default-features = false }
 
