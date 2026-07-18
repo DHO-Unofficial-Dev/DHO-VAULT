@@ -608,6 +608,7 @@ version = "0.1.0"
 dependencies = [
  "dho-client",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

@@ -7,18 +7,32 @@ use dho_client::{
     VerifiedAssetSearchPage, VerifiedCategoryAsset, VerifiedCategoryPage, ViewerSession,
     inspect_game_directory,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::State;
+use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 type SharedViewerSession = Arc<Mutex<ViewerSession>>;
 type SharedCategoryExportManager = Arc<CategoryExportManager>;
+
+const VIEWER_PREFERENCES_FILE_NAME: &str = "viewer-preferences.json";
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ViewerPreferences {
+    game_directory: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenedGameDirectory {
+    summary: GameDirectorySummary,
+    warning: Option<String>,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,11 +212,83 @@ enum BatchSaveOutcome {
     Cancelled,
 }
 
+fn viewer_preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join(VIEWER_PREFERENCES_FILE_NAME))
+        .map_err(|error| format!("앱 설정 폴더를 확인하지 못했습니다: {error}"))
+}
+
+fn read_saved_game_directory(preferences_path: &Path) -> Result<Option<PathBuf>, String> {
+    let contents = match fs::read(preferences_path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!("마지막 게임 폴더 설정을 읽지 못했습니다: {error}"));
+        }
+    };
+    let preferences: ViewerPreferences = serde_json::from_slice(&contents)
+        .map_err(|error| format!("마지막 게임 폴더 설정이 올바르지 않습니다: {error}"))?;
+    Ok(Some(preferences.game_directory))
+}
+
+fn write_saved_game_directory(
+    preferences_path: &Path,
+    game_directory: &Path,
+) -> Result<(), String> {
+    let parent = preferences_path
+        .parent()
+        .ok_or_else(|| "앱 설정 파일의 상위 폴더를 확인하지 못했습니다".to_owned())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("앱 설정 폴더를 만들지 못했습니다: {error}"))?;
+    let contents = serde_json::to_vec_pretty(&ViewerPreferences {
+        game_directory: game_directory.to_path_buf(),
+    })
+    .map_err(|error| format!("마지막 게임 폴더 설정을 만들지 못했습니다: {error}"))?;
+    fs::write(preferences_path, contents)
+        .map_err(|error| format!("마지막 게임 폴더 설정을 저장하지 못했습니다: {error}"))
+}
+
+async fn inspect_directory(path: PathBuf) -> Result<GameDirectorySummary, String> {
+    tauri::async_runtime::spawn_blocking(move || inspect_game_directory(path))
+        .await
+        .map_err(|error| format!("게임 폴더 확인 작업을 마치지 못했습니다: {error}"))?
+        .map_err(|error| error.to_string())
+}
+
+fn open_viewer_session(
+    session: &State<'_, SharedViewerSession>,
+    summary: &GameDirectorySummary,
+) -> Result<(), String> {
+    session
+        .lock()
+        .map_err(|_| "이미지 탐색 세션을 열지 못했습니다".to_owned())?
+        .set_resource_directory(PathBuf::from(&summary.resource_directory));
+    Ok(())
+}
+
+#[tauri::command]
+async fn load_saved_game_directory(
+    app: tauri::AppHandle,
+    session: State<'_, SharedViewerSession>,
+) -> Result<Option<OpenedGameDirectory>, String> {
+    let preferences_path = viewer_preferences_path(&app)?;
+    let Some(path) = read_saved_game_directory(&preferences_path)? else {
+        return Ok(None);
+    };
+    let summary = inspect_directory(path).await?;
+    open_viewer_session(&session, &summary)?;
+    Ok(Some(OpenedGameDirectory {
+        summary,
+        warning: None,
+    }))
+}
+
 #[tauri::command]
 async fn pick_game_directory(
     app: tauri::AppHandle,
     session: State<'_, SharedViewerSession>,
-) -> Result<Option<GameDirectorySummary>, String> {
+) -> Result<Option<OpenedGameDirectory>, String> {
     let selection = app
         .dialog()
         .file()
@@ -215,13 +301,14 @@ async fn pick_game_directory(
         .into_path()
         .map_err(|error| format!("선택한 폴더 경로를 처리하지 못했습니다: {error}"))?;
 
-    let summary = inspect_game_directory(path).map_err(|error| error.to_string())?;
-    session
-        .lock()
-        .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?
-        .set_resource_directory(PathBuf::from(&summary.resource_directory));
+    let summary = inspect_directory(path.clone()).await?;
+    open_viewer_session(&session, &summary)?;
 
-    Ok(Some(summary))
+    let warning = viewer_preferences_path(&app)
+        .and_then(|preferences_path| write_saved_game_directory(&preferences_path, &path))
+        .err();
+
+    Ok(Some(OpenedGameDirectory { summary, warning }))
 }
 
 #[tauri::command]
@@ -662,6 +749,7 @@ fn main() {
         .manage(Arc::new(CategoryExportManager::default()))
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            load_saved_game_directory,
             pick_game_directory,
             load_verified_category_page,
             load_verified_asset_search_page,
@@ -711,6 +799,63 @@ mod tests {
             assembled: false,
             png: b"test-png".to_vec(),
         }
+    }
+
+    #[test]
+    fn missing_viewer_preferences_have_no_saved_directory() {
+        let directory = test_directory("missing-preferences");
+        let preferences_path = directory.join(VIEWER_PREFERENCES_FILE_NAME);
+
+        assert_eq!(
+            read_saved_game_directory(&preferences_path).expect("read missing preferences"),
+            None
+        );
+    }
+
+    #[test]
+    fn saves_and_reads_the_last_game_directory() {
+        let directory = test_directory("preferences-roundtrip");
+        let preferences_path = directory.join(VIEWER_PREFERENCES_FILE_NAME);
+        let game_directory = PathBuf::from(r"G:\Games\GV Online KR");
+
+        write_saved_game_directory(&preferences_path, &game_directory)
+            .expect("write viewer preferences");
+        assert_eq!(
+            read_saved_game_directory(&preferences_path).expect("read viewer preferences"),
+            Some(game_directory)
+        );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn overwrites_the_previous_game_directory() {
+        let directory = test_directory("preferences-overwrite");
+        let preferences_path = directory.join(VIEWER_PREFERENCES_FILE_NAME);
+        let replacement = PathBuf::from(r"G:\Games\Replacement");
+
+        write_saved_game_directory(&preferences_path, Path::new(r"G:\Games\Original"))
+            .expect("write original preferences");
+        write_saved_game_directory(&preferences_path, &replacement)
+            .expect("overwrite viewer preferences");
+        assert_eq!(
+            read_saved_game_directory(&preferences_path).expect("read overwritten preferences"),
+            Some(replacement)
+        );
+
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn rejects_malformed_viewer_preferences() {
+        let directory = test_directory("malformed-preferences");
+        fs::create_dir(&directory).expect("create test directory");
+        let preferences_path = directory.join(VIEWER_PREFERENCES_FILE_NAME);
+        fs::write(&preferences_path, b"not-json").expect("write malformed preferences");
+
+        assert!(read_saved_game_directory(&preferences_path).is_err());
+
+        fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
