@@ -1,0 +1,82 @@
+# SPDX-License-Identifier: MPL-2.0
+
+name: Viewer Windows 패키지
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/viewer-windows-package.yml"
+      - "apps/viewer/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 소스 받기
+        uses: actions/checkout@v7
+
+      - name: Rust 안정 버전 준비
+        shell: pwsh
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Tauri 번들러 설치
+        shell: pwsh
+        run: cargo install tauri-cli --version 2.11.4 --locked
+
+      - name: 전체 테스트
+        shell: pwsh
+        run: cargo test --workspace --locked
+
+      - name: Viewer 빌드
+        shell: pwsh
+        working-directory: apps/viewer/src-tauri
+        run: cargo tauri build
+
+      - name: 배포 파일 정리
+        shell: pwsh
+        run: |
+          $config = Get-Content apps/viewer/src-tauri/tauri.conf.json | ConvertFrom-Json
+          $version = $config.version
+          $dist = Join-Path $PWD "dist"
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+
+          $portableName = "DHO-Vault_${version}_x64-portable.exe"
+          Copy-Item target/release/dho-viewer.exe (Join-Path $dist $portableName)
+
+          $installers = @(Get-ChildItem target/release/bundle/nsis -File -Filter "*_x64-setup.exe")
+          if ($installers.Count -ne 1) {
+            throw "NSIS 설치 파일이 정확히 한 개여야 합니다: $($installers.Count)개"
+          }
+          $setupName = "DHO-Vault_${version}_x64-setup.exe"
+          Copy-Item $installers[0].FullName (Join-Path $dist $setupName)
+
+          $hashes = Get-ChildItem $dist -File -Filter "*.exe" |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+          Set-Content -Path (Join-Path $dist "SHA256SUMS.txt") -Value $hashes -Encoding utf8
+
+      - name: 패키지 보관
+        uses: actions/upload-artifact@v7
+        with:
+          name: DHO-Vault-windows-x64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
