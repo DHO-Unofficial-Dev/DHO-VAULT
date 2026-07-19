@@ -15,8 +15,8 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use dho_catalog::{CatalogRecordKey, VerificationStatus, assembly_plan, classify_record};
 use dho_core::{IndexParseError, IndexedArchive};
 use dho_extract::{
-    ExtractError, LoadedArchive, LoadedRawImageArchive, RawImageSpec, RawPixelFormat,
-    RawResourceKey, ResourceKey,
+    ExtractError, LoadedArchive, LoadedRawImageArchive, RawArchiveLayout, RawImageSpec,
+    RawImageVariant, RawPixelFormat, RawResourceKey, ResourceKey,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -29,27 +29,62 @@ use std::path::{Path, PathBuf};
 pub const INDEXED_ARCHIVE_PREFIXES: [&str; 13] = [
     "im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sw", "sx", "sy", "sz", "is",
 ];
-pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 14] = [
-    "im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sh", "sw", "sx", "sy", "sz", "is",
+pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 15] = [
+    "im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sh", "tm", "sw", "sx", "sy", "sz", "is",
 ];
 pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 32;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RawArchiveDefinition {
     pub prefix: &'static str,
-    pub archive_count: u32,
+    pub file_numbers: &'static [u32],
+    pub layout: RawArchiveLayout,
     pub spec: RawImageSpec,
 }
 
-pub(crate) const RAW_IMAGE_ARCHIVES: [RawArchiveDefinition; 1] = [RawArchiveDefinition {
-    prefix: "sh",
-    archive_count: 1,
-    spec: RawImageSpec {
-        width: 256,
-        height: 256,
-        pixel_format: RawPixelFormat::Gray8,
-    },
+const SH_IMAGE_VARIANTS: &[RawImageVariant] = &[RawImageVariant {
+    decoded_size: 65_536,
+    width: 256,
+    height: 256,
 }];
+const TM_IMAGE_VARIANTS: &[RawImageVariant] = &[
+    RawImageVariant {
+        decoded_size: 100_800,
+        width: 180,
+        height: 140,
+    },
+    RawImageVariant {
+        decoded_size: 101_520,
+        width: 180,
+        height: 141,
+    },
+    RawImageVariant {
+        decoded_size: 100_080,
+        width: 180,
+        height: 139,
+    },
+];
+
+pub(crate) const RAW_IMAGE_ARCHIVES: [RawArchiveDefinition; 2] = [
+    RawArchiveDefinition {
+        prefix: "sh",
+        file_numbers: &[1],
+        layout: RawArchiveLayout::BlocksOnly,
+        spec: RawImageSpec {
+            pixel_format: RawPixelFormat::Gray8,
+            variants: SH_IMAGE_VARIANTS,
+        },
+    },
+    RawArchiveDefinition {
+        prefix: "tm",
+        file_numbers: &[0],
+        layout: RawArchiveLayout::InlineBlockTable,
+        spec: RawImageSpec {
+            pixel_format: RawPixelFormat::Bgra8,
+            variants: TM_IMAGE_VARIANTS,
+        },
+    },
+];
 
 /// Resolves the physical subdirectory for an archive while preserving callers that already pass
 /// a concrete archive directory.
@@ -61,15 +96,20 @@ pub fn resolve_archive_directory(resource_root: impl AsRef<Path>, prefix: &str) 
         return resource_root.to_owned();
     }
 
-    let subdirectory = if matches!(
-        prefix.to_ascii_lowercase().as_str(),
-        "sw" | "sx" | "sy" | "sz"
-    ) {
-        "0002"
-    } else {
-        "0001"
+    let subdirectory = match prefix.to_ascii_lowercase().as_str() {
+        "tm" => "0000",
+        "sw" | "sx" | "sy" | "sz" => "0002",
+        _ => "0001",
     };
     resource_root.join(subdirectory)
+}
+
+fn raw_archive_path(resource_root: &Path, definition: RawArchiveDefinition) -> Option<PathBuf> {
+    let file_number = *definition.file_numbers.first()?;
+    Some(
+        resolve_archive_directory(resource_root, definition.prefix)
+            .join(format!("{}{file_number:06}.bin", definition.prefix)),
+    )
 }
 
 const THUMBNAIL_MAX_WIDTH: u32 = 160;
@@ -973,9 +1013,7 @@ impl ViewerSession {
         }
 
         for definition in RAW_IMAGE_ARCHIVES {
-            if !resolve_archive_directory(&resource_directory, definition.prefix)
-                .join(format!("{}000001.bin", definition.prefix))
-                .is_file()
+            if !raw_archive_path(&resource_directory, definition).is_some_and(|path| path.is_file())
             {
                 continue;
             }
@@ -1095,9 +1133,8 @@ impl ViewerSession {
                 }));
             }
             for definition in RAW_IMAGE_ARCHIVES {
-                if !resolve_archive_directory(&resource_directory, definition.prefix)
-                    .join(format!("{}000001.bin", definition.prefix))
-                    .is_file()
+                if !raw_archive_path(&resource_directory, definition)
+                    .is_some_and(|path| path.is_file())
                 {
                     continue;
                 }
@@ -1188,10 +1225,11 @@ impl ViewerSession {
             })?;
         if !self.raw_archives.contains_key(&normalized) {
             let archive_directory = resolve_archive_directory(&resource_directory, &normalized);
-            let archive = LoadedRawImageArchive::open(
+            let archive = LoadedRawImageArchive::open_files(
                 archive_directory,
                 &normalized,
-                definition.archive_count,
+                definition.file_numbers,
+                definition.layout,
                 definition.spec,
             )
             .map_err(|source| ViewerSessionError::OpenArchive {
@@ -1308,16 +1346,14 @@ pub fn inspect_game_directory(
 
     for definition in RAW_IMAGE_ARCHIVES {
         let directory = resolve_archive_directory(&resource_directory, definition.prefix);
-        if !directory
-            .join(format!("{}000001.bin", definition.prefix))
-            .is_file()
-        {
+        if !raw_archive_path(&resource_directory, definition).is_some_and(|path| path.is_file()) {
             continue;
         }
-        let archive = LoadedRawImageArchive::open(
+        let archive = LoadedRawImageArchive::open_files(
             directory,
             definition.prefix,
-            definition.archive_count,
+            definition.file_numbers,
+            definition.layout,
             definition.spec,
         )
         .map_err(|source| GameDirectoryError::OpenArchive {
@@ -1569,7 +1605,7 @@ impl fmt::Display for GameDirectoryError {
             ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 이미지 리소스(im, sa, sb, sc, sd, se, sf, sg, sh, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
+                "지원하는 이미지 리소스(im, sa, sb, sc, sd, se, sf, sg, sh, tm, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -1678,6 +1714,25 @@ mod tests {
             .flat_map(|raw| zlib_block(raw))
             .collect::<Vec<_>>();
         fs::write(path, data).expect("write test data file");
+    }
+
+    fn write_inline_data_file(path: &Path, raw_blocks: &[Vec<u8>]) {
+        let blocks = raw_blocks
+            .iter()
+            .map(|raw| zlib_block(raw))
+            .collect::<Vec<_>>();
+        let mut offset = 4 + blocks.len() * 8;
+        let mut data = Vec::new();
+        push_u32(&mut data, blocks.len() as u32);
+        for block in &blocks {
+            push_u32(&mut data, offset as u32);
+            push_u32(&mut data, block.len() as u32);
+            offset += block.len();
+        }
+        for block in blocks {
+            data.extend_from_slice(&block);
+        }
+        fs::write(path, data).expect("write inline test data file");
     }
 
     fn test_thumbnail(icon_id: u32, data_url_bytes: usize) -> VerifiedAssetThumbnail {
@@ -2250,6 +2305,82 @@ mod tests {
             summary.verified_categories[0].path,
             ["UI 이미지", "별자리 조사", "별자리 선화 (256×256)"]
         );
+        assert_eq!(summary.verified_categories[0].asset_count, 2);
+    }
+
+    #[test]
+    fn displays_extracts_and_summarizes_tm_inline_minimaps() {
+        let directory = TestDirectory::new();
+        let primary = directory.prepare_game();
+        let resource_root = primary.parent().expect("resource root");
+        let inline_directory = resource_root.join("0000");
+        fs::create_dir(&inline_directory).expect("create inline resource directory");
+        write_inline_data_file(
+            &inline_directory.join("tm000000.bin"),
+            &[vec![0x11; 180 * 140 * 4], vec![0xcc; 180 * 141 * 4]],
+        );
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(resource_root);
+        let category = ["지도", "도시·항구 미니맵 (180×139~141)"].map(str::to_owned);
+
+        let page = session
+            .category_page(&category, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("load TM minimap page");
+        assert_eq!(page.total_count, 2);
+        assert_eq!(page.items[0].archive, "tm");
+        assert_eq!(page.items[0].icon_id, None);
+        assert_eq!(
+            (page.items[0].source_width, page.items[0].source_height),
+            (180, 140)
+        );
+        assert_eq!(
+            (page.items[1].source_width, page.items[1].source_height),
+            (180, 141)
+        );
+
+        let detail = session
+            .asset_detail(&category, "TM", 1)
+            .expect("load TM minimap detail");
+        assert_eq!(detail.icon_id, None);
+        assert_eq!((detail.source_width, detail.source_height), (180, 141));
+        let png = session
+            .asset_png(&category, "tm", 0)
+            .expect("extract TM minimap PNG");
+        assert_eq!((png.width, png.height), (180, 140));
+        assert_eq!(&png.png[..8], b"\x89PNG\r\n\x1a\n");
+
+        let search = session
+            .search_page("TM 미니맵 1", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("search TM minimap");
+        assert_eq!(search.total_count, 1);
+        assert_eq!(search.items[0].thumbnail.block_index, 1);
+
+        let added = AssetSnapshotEntry::new_raw(
+            "tm",
+            RawResourceKey {
+                block_index: 1,
+                file_number: 0,
+                file_block_index: 1,
+            },
+            180,
+            141,
+        );
+        let update = session
+            .update_page(&[added], 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("show added TM minimap");
+        assert_eq!(update.total_count, 1);
+        assert_eq!(update.review_required_count, 0);
+
+        let summary = inspect_game_directory(&directory.0).expect("inspect TM-only game fixture");
+        assert_eq!(summary.archives.len(), 1);
+        assert_eq!(summary.archives[0].prefix, "tm");
+        assert!(!summary.archives[0].has_index);
+        assert_eq!(summary.archives[0].record_count, 2);
+        assert_eq!(summary.archives[0].group_count, 0);
+        assert_eq!(summary.archives[0].image_block_count, 2);
+        assert_eq!(summary.archives[0].archive_count, 1);
+        assert_eq!(summary.verified_categories.len(), 1);
+        assert_eq!(summary.verified_categories[0].path, category);
         assert_eq!(summary.verified_categories[0].asset_count, 2);
     }
 

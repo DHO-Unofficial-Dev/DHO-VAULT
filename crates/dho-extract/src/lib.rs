@@ -5,7 +5,8 @@
 use dho_catalog::{AssemblyPlan, VerificationStatus, assembly_candidate_plan, assembly_plan};
 use dho_core::{
     ArchiveBlockDecodeError, ArchiveDiagnostic, ArchiveLayout, BlockDecodeError, BlockScanError,
-    IndexParseError, IndexRecord, IndexedArchive, MwcBlock, build_archive_layout, scan_data_file,
+    IndexParseError, IndexRecord, IndexedArchive, InlineBlockTable, InlineBlockTableError,
+    MwcBlock, ScannedDataFile, build_archive_layout, scan_data_file,
 };
 use dho_image::{ImageAssemblyError, PixelDecodeError, PngEncodeError, RgbaImage, ThumbnailError};
 use std::error::Error;
@@ -53,14 +54,29 @@ pub struct RawResourceKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawPixelFormat {
     Gray8,
+    Bgra8,
+}
+
+/// One human-reviewed decoded size and its corresponding image dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawImageVariant {
+    pub decoded_size: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Human-reviewed dimensions and pixel interpretation for raw image blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawImageSpec {
-    pub width: u32,
-    pub height: u32,
     pub pixel_format: RawPixelFormat,
+    pub variants: &'static [RawImageVariant],
+}
+
+/// How non-block bytes in one raw archive file are interpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawArchiveLayout {
+    BlocksOnly,
+    InlineBlockTable,
 }
 
 /// Stable metadata for one physical block in a raw image archive.
@@ -131,24 +147,43 @@ struct RawImageBlock {
 pub struct LoadedRawImageArchive {
     prefix: ArchivePrefix,
     spec: RawImageSpec,
-    archive_count: u32,
+    file_count: u32,
     blocks: Vec<RawImageBlock>,
 }
 
 impl LoadedRawImageArchive {
+    /// Opens consecutive block-only files numbered from one.
     pub fn open(
         directory: impl AsRef<Path>,
         prefix: &str,
         archive_count: u32,
         spec: RawImageSpec,
     ) -> Result<Self, ExtractError> {
+        let file_numbers = (1..=archive_count).collect::<Vec<_>>();
+        Self::open_files(
+            directory,
+            prefix,
+            &file_numbers,
+            RawArchiveLayout::BlocksOnly,
+            spec,
+        )
+    }
+
+    /// Opens explicitly numbered files using one reviewed physical layout and image specification.
+    pub fn open_files(
+        directory: impl AsRef<Path>,
+        prefix: &str,
+        file_numbers: &[u32],
+        layout: RawArchiveLayout,
+        spec: RawImageSpec,
+    ) -> Result<Self, ExtractError> {
         let directory = directory.as_ref();
         let prefix = ArchivePrefix::parse(prefix).map_err(ExtractError::InvalidPrefix)?;
-        let expected_size = raw_image_byte_len(spec)?;
+        validate_raw_image_spec(spec)?;
         let mut blocks = Vec::new();
         let mut block_index = 0_u32;
 
-        for file_number in 1..=archive_count {
+        for &file_number in file_numbers {
             let path = directory.join(format!("{}{file_number:06}.bin", prefix.as_str()));
             let bytes = read_file("read raw image archive", &path)?;
             let scanned =
@@ -156,23 +191,23 @@ impl LoadedRawImageArchive {
                     file_number,
                     source,
                 })?;
-            if let Some(gap) = scanned.unresolved_gaps().next() {
-                return Err(ExtractError::RawUnresolvedGap {
-                    file_number,
-                    offset: gap.location.offset,
-                    len: gap.len,
-                });
-            }
+            validate_raw_archive_layout(layout, &bytes, &scanned)?;
 
             for (file_block_index, block) in scanned.zlib_blocks().copied().enumerate() {
-                if usize::try_from(block.uncompressed_size).ok() != Some(expected_size) {
-                    return Err(ExtractError::RawImageSizeMismatch {
+                let variant = spec
+                    .variants
+                    .iter()
+                    .find(|variant| variant.decoded_size == block.uncompressed_size)
+                    .ok_or_else(|| ExtractError::RawImageSizeUnsupported {
                         file_number,
                         file_block_index: u32::try_from(file_block_index).unwrap_or(u32::MAX),
-                        expected_size,
                         actual_size: block.uncompressed_size,
-                    });
-                }
+                        supported_sizes: spec
+                            .variants
+                            .iter()
+                            .map(|variant| variant.decoded_size)
+                            .collect(),
+                    })?;
                 let file_block_index = u32::try_from(file_block_index)
                     .map_err(|_| ExtractError::RawBlockIndexOverflow { file_number })?;
                 let record = RawImageRecord {
@@ -181,8 +216,8 @@ impl LoadedRawImageArchive {
                         file_number,
                         file_block_index,
                     },
-                    width: spec.width,
-                    height: spec.height,
+                    width: variant.width,
+                    height: variant.height,
                 };
                 blocks.push(RawImageBlock {
                     record,
@@ -198,7 +233,8 @@ impl LoadedRawImageArchive {
         Ok(Self {
             prefix,
             spec,
-            archive_count,
+            file_count: u32::try_from(file_numbers.len())
+                .map_err(|_| ExtractError::RawArchiveFileCountOverflow)?,
             blocks,
         })
     }
@@ -208,7 +244,7 @@ impl LoadedRawImageArchive {
     }
 
     pub fn archive_count(&self) -> u32 {
-        self.archive_count
+        self.file_count
     }
 
     pub fn records(&self) -> impl Iterator<Item = RawImageRecord> + '_ {
@@ -229,8 +265,8 @@ impl LoadedRawImageArchive {
                 icon_id: key.block_index,
                 block_index: key.block_index,
             },
-            width: self.spec.width,
-            height: self.spec.height,
+            width: block.record.width,
+            height: block.record.height,
             png,
         })
     }
@@ -255,8 +291,8 @@ impl LoadedRawImageArchive {
                 icon_id: key.block_index,
                 block_index: key.block_index,
             },
-            source_width: self.spec.width,
-            source_height: self.spec.height,
+            source_width: block.record.width,
+            source_height: block.record.height,
             width: thumbnail.width(),
             height: thumbnail.height(),
             png,
@@ -292,28 +328,133 @@ impl LoadedRawImageArchive {
             .map_err(ExtractError::RawBlockDecode)?;
         match self.spec.pixel_format {
             RawPixelFormat::Gray8 => {
-                RgbaImage::from_gray8(self.spec.width, self.spec.height, &decoded)
+                RgbaImage::from_gray8(block.record.width, block.record.height, &decoded)
+                    .map_err(ExtractError::PixelDecode)
+            }
+            RawPixelFormat::Bgra8 => {
+                RgbaImage::from_bgra(block.record.width, block.record.height, &decoded)
                     .map_err(ExtractError::PixelDecode)
             }
         }
     }
 }
 
-fn raw_image_byte_len(spec: RawImageSpec) -> Result<usize, ExtractError> {
-    let pixels = usize::try_from(spec.width)
+fn validate_raw_image_spec(spec: RawImageSpec) -> Result<(), ExtractError> {
+    if spec.variants.is_empty() {
+        return Err(ExtractError::RawImageSpecEmpty);
+    }
+    for variant in spec.variants {
+        let expected_size = raw_image_byte_len(*variant, spec.pixel_format)?;
+        if usize::try_from(variant.decoded_size).ok() != Some(expected_size) {
+            return Err(ExtractError::RawImageSpecSizeMismatch {
+                width: variant.width,
+                height: variant.height,
+                pixel_format: spec.pixel_format,
+                declared_size: variant.decoded_size,
+                expected_size,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn raw_image_byte_len(
+    variant: RawImageVariant,
+    pixel_format: RawPixelFormat,
+) -> Result<usize, ExtractError> {
+    let pixels = usize::try_from(variant.width)
         .ok()
         .and_then(|width| {
-            usize::try_from(spec.height)
+            usize::try_from(variant.height)
                 .ok()
                 .and_then(|height| width.checked_mul(height))
         })
         .ok_or(ExtractError::RawImageDimensionOverflow {
-            width: spec.width,
-            height: spec.height,
+            width: variant.width,
+            height: variant.height,
         })?;
-    match spec.pixel_format {
+    match pixel_format {
         RawPixelFormat::Gray8 => Ok(pixels),
+        RawPixelFormat::Bgra8 => {
+            pixels
+                .checked_mul(4)
+                .ok_or(ExtractError::RawImageDimensionOverflow {
+                    width: variant.width,
+                    height: variant.height,
+                })
+        }
     }
+}
+
+fn validate_raw_archive_layout(
+    layout: RawArchiveLayout,
+    bytes: &[u8],
+    scanned: &ScannedDataFile,
+) -> Result<(), ExtractError> {
+    match layout {
+        RawArchiveLayout::BlocksOnly => {
+            if let Some(gap) = scanned.unresolved_gaps().next() {
+                return Err(ExtractError::RawUnresolvedGap {
+                    file_number: scanned.file_number,
+                    offset: gap.location.offset,
+                    len: gap.len,
+                });
+            }
+        }
+        RawArchiveLayout::InlineBlockTable => {
+            let table = InlineBlockTable::parse(bytes).map_err(|source| {
+                ExtractError::InlineBlockTableParse {
+                    file_number: scanned.file_number,
+                    source,
+                }
+            })?;
+            let gaps = scanned.unresolved_gaps().collect::<Vec<_>>();
+            if gaps.len() != 1 || gaps[0].location.offset != 0 || gaps[0].len != table.byte_len {
+                return Err(ExtractError::InlineBlockTableGapMismatch {
+                    file_number: scanned.file_number,
+                    table_size: table.byte_len,
+                    gaps: gaps
+                        .into_iter()
+                        .map(|gap| (gap.location.offset, gap.len))
+                        .collect(),
+                });
+            }
+            let blocks = scanned.zlib_blocks().collect::<Vec<_>>();
+            if table.entries.len() != blocks.len() {
+                return Err(ExtractError::InlineBlockCountMismatch {
+                    file_number: scanned.file_number,
+                    table_count: table.entries.len(),
+                    block_count: blocks.len(),
+                });
+            }
+            for (index, (entry, block)) in table.entries.iter().zip(blocks).enumerate() {
+                let actual_stored_size = usize::try_from(block.compressed_size)
+                    .ok()
+                    .and_then(|size| size.checked_add(12))
+                    .ok_or(ExtractError::RawCompressedSizeOverflow {
+                        key: RawResourceKey {
+                            block_index: u32::try_from(index).unwrap_or(u32::MAX),
+                            file_number: scanned.file_number,
+                            file_block_index: u32::try_from(index).unwrap_or(u32::MAX),
+                        },
+                        compressed_size: block.compressed_size,
+                    })?;
+                if usize::try_from(entry.offset).ok() != Some(block.location.offset)
+                    || usize::try_from(entry.stored_size).ok() != Some(actual_stored_size)
+                {
+                    return Err(ExtractError::InlineBlockEntryMismatch {
+                        file_number: scanned.file_number,
+                        file_block_index: u32::try_from(index).unwrap_or(u32::MAX),
+                        table_offset: entry.offset,
+                        table_stored_size: entry.stored_size,
+                        block_offset: block.location.offset,
+                        block_stored_size: actual_stored_size,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A single archive family loaded once, with images decoded only when requested.
@@ -745,21 +886,52 @@ pub enum ExtractError {
         width: u32,
         height: u32,
     },
+    RawImageSpecEmpty,
+    RawImageSpecSizeMismatch {
+        width: u32,
+        height: u32,
+        pixel_format: RawPixelFormat,
+        declared_size: u32,
+        expected_size: usize,
+    },
     RawUnresolvedGap {
         file_number: u32,
         offset: usize,
         len: usize,
     },
-    RawImageSizeMismatch {
+    RawImageSizeUnsupported {
         file_number: u32,
         file_block_index: u32,
-        expected_size: usize,
         actual_size: u32,
+        supported_sizes: Vec<u32>,
     },
     RawBlockIndexOverflow {
         file_number: u32,
     },
     RawArchiveBlockCountOverflow,
+    RawArchiveFileCountOverflow,
+    InlineBlockTableParse {
+        file_number: u32,
+        source: InlineBlockTableError,
+    },
+    InlineBlockTableGapMismatch {
+        file_number: u32,
+        table_size: usize,
+        gaps: Vec<(usize, usize)>,
+    },
+    InlineBlockCountMismatch {
+        file_number: u32,
+        table_count: usize,
+        block_count: usize,
+    },
+    InlineBlockEntryMismatch {
+        file_number: u32,
+        file_block_index: u32,
+        table_offset: u32,
+        table_stored_size: u32,
+        block_offset: usize,
+        block_stored_size: usize,
+    },
     RawResourceNotFound {
         key: RawResourceKey,
     },
@@ -833,6 +1005,17 @@ impl fmt::Display for ExtractError {
                 formatter,
                 "raw image dimensions overflow this platform: {width}x{height}"
             ),
+            Self::RawImageSpecEmpty => write!(formatter, "raw image specification has no sizes"),
+            Self::RawImageSpecSizeMismatch {
+                width,
+                height,
+                pixel_format,
+                declared_size,
+                expected_size,
+            } => write!(
+                formatter,
+                "raw image specification disagrees with its pixel format: {width}x{height} {pixel_format:?} declares {declared_size} bytes, expected {expected_size}"
+            ),
             Self::RawUnresolvedGap {
                 file_number,
                 offset,
@@ -841,14 +1024,14 @@ impl fmt::Display for ExtractError {
                 formatter,
                 "raw image archive file {file_number} contains {len} unresolved bytes at offset {offset}"
             ),
-            Self::RawImageSizeMismatch {
+            Self::RawImageSizeUnsupported {
                 file_number,
                 file_block_index,
-                expected_size,
                 actual_size,
+                supported_sizes,
             } => write!(
                 formatter,
-                "raw image block {file_block_index} in file {file_number} declares {actual_size} bytes, expected {expected_size}"
+                "raw image block {file_block_index} in file {file_number} declares unsupported size {actual_size}; supported sizes are {supported_sizes:?}"
             ),
             Self::RawBlockIndexOverflow { file_number } => write!(
                 formatter,
@@ -857,6 +1040,43 @@ impl fmt::Display for ExtractError {
             Self::RawArchiveBlockCountOverflow => {
                 write!(formatter, "raw image archive block count exceeds u32")
             }
+            Self::RawArchiveFileCountOverflow => {
+                write!(formatter, "raw image archive file count exceeds u32")
+            }
+            Self::InlineBlockTableParse {
+                file_number,
+                source,
+            } => write!(
+                formatter,
+                "failed to parse inline block table in file {file_number}: {source}"
+            ),
+            Self::InlineBlockTableGapMismatch {
+                file_number,
+                table_size,
+                gaps,
+            } => write!(
+                formatter,
+                "inline block table in file {file_number} occupies {table_size} bytes but unresolved ranges are {gaps:?}"
+            ),
+            Self::InlineBlockCountMismatch {
+                file_number,
+                table_count,
+                block_count,
+            } => write!(
+                formatter,
+                "inline block table in file {file_number} declares {table_count} blocks but the file contains {block_count}"
+            ),
+            Self::InlineBlockEntryMismatch {
+                file_number,
+                file_block_index,
+                table_offset,
+                table_stored_size,
+                block_offset,
+                block_stored_size,
+            } => write!(
+                formatter,
+                "inline block entry {file_block_index} in file {file_number} does not match its MWC block: table=({table_offset}, {table_stored_size}), block=({block_offset}, {block_stored_size})"
+            ),
             Self::RawResourceNotFound { key } => write!(
                 formatter,
                 "raw image block was not found: archive block {}, file {}, file block {}",
@@ -943,6 +1163,7 @@ impl Error for ExtractError {
             Self::Io { source, .. } => Some(source),
             Self::IndexParse(error) => Some(error),
             Self::BlockScan { source, .. } => Some(source),
+            Self::InlineBlockTableParse { source, .. } => Some(source),
             Self::RawBlockDecode(error) => Some(error),
             Self::BlockDecode(error) => Some(error),
             Self::PixelDecode(error) => Some(error),
@@ -950,10 +1171,16 @@ impl Error for ExtractError {
             Self::Thumbnail(error) => Some(error),
             Self::PngEncode(error) => Some(error),
             Self::RawImageDimensionOverflow { .. }
+            | Self::RawImageSpecEmpty
+            | Self::RawImageSpecSizeMismatch { .. }
             | Self::RawUnresolvedGap { .. }
-            | Self::RawImageSizeMismatch { .. }
+            | Self::RawImageSizeUnsupported { .. }
             | Self::RawBlockIndexOverflow { .. }
             | Self::RawArchiveBlockCountOverflow
+            | Self::RawArchiveFileCountOverflow
+            | Self::InlineBlockTableGapMismatch { .. }
+            | Self::InlineBlockCountMismatch { .. }
+            | Self::InlineBlockEntryMismatch { .. }
             | Self::RawResourceNotFound { .. }
             | Self::RawCompressedSizeOverflow { .. }
             | Self::InvalidLayout { .. }
@@ -1046,12 +1273,53 @@ mod tests {
         }
     }
 
-    fn gray8_spec(width: u32, height: u32) -> RawImageSpec {
+    const GRAY8_2X1_VARIANTS: &[RawImageVariant] = &[RawImageVariant {
+        decoded_size: 2,
+        width: 2,
+        height: 1,
+    }];
+    const GRAY8_2X2_VARIANTS: &[RawImageVariant] = &[RawImageVariant {
+        decoded_size: 4,
+        width: 2,
+        height: 2,
+    }];
+    const BGRA8_VARIANTS: &[RawImageVariant] = &[
+        RawImageVariant {
+            decoded_size: 8,
+            width: 2,
+            height: 1,
+        },
+        RawImageVariant {
+            decoded_size: 16,
+            width: 2,
+            height: 2,
+        },
+    ];
+
+    fn gray8_spec(variants: &'static [RawImageVariant]) -> RawImageSpec {
         RawImageSpec {
-            width,
-            height,
             pixel_format: RawPixelFormat::Gray8,
+            variants,
         }
+    }
+
+    fn inline_archive(raw_blocks: &[Vec<u8>]) -> Vec<u8> {
+        let blocks = raw_blocks
+            .iter()
+            .map(|raw| zlib_block(raw))
+            .collect::<Vec<_>>();
+        let mut offset = 4 + blocks.len() * 8;
+        let mut bytes = Vec::new();
+        push_u32(&mut bytes, blocks.len() as u32);
+        for block in &blocks {
+            push_u32(&mut bytes, offset as u32);
+            push_u32(&mut bytes, block.len() as u32);
+            offset += block.len();
+        }
+        for block in blocks {
+            bytes.extend_from_slice(&block);
+        }
+        bytes
     }
 
     #[test]
@@ -1061,8 +1329,9 @@ mod tests {
         data.extend_from_slice(&zlib_block(&[0x33, 0x44]));
         fs::write(directory.0.join("sh000001.bin"), data).expect("write raw archive");
 
-        let archive = LoadedRawImageArchive::open(&directory.0, "SH", 1, gray8_spec(2, 1))
-            .expect("open raw archive");
+        let archive =
+            LoadedRawImageArchive::open(&directory.0, "SH", 1, gray8_spec(GRAY8_2X1_VARIANTS))
+                .expect("open raw archive");
         let records = archive.records().collect::<Vec<_>>();
 
         assert_eq!(archive.prefix().as_str(), "sh");
@@ -1090,16 +1359,17 @@ mod tests {
             .expect("write raw archive");
 
         let error =
-            LoadedRawImageArchive::open(&directory.0, "sh", 1, gray8_spec(2, 2)).unwrap_err();
+            LoadedRawImageArchive::open(&directory.0, "sh", 1, gray8_spec(GRAY8_2X2_VARIANTS))
+                .unwrap_err();
 
         assert!(matches!(
             error,
-            ExtractError::RawImageSizeMismatch {
+            ExtractError::RawImageSizeUnsupported {
                 file_number: 1,
                 file_block_index: 0,
-                expected_size: 4,
                 actual_size: 3,
-            }
+                ref supported_sizes,
+            } if supported_sizes == &[4]
         ));
     }
 
@@ -1111,7 +1381,8 @@ mod tests {
         fs::write(directory.0.join("sh000001.bin"), data).expect("write raw archive");
 
         let error =
-            LoadedRawImageArchive::open(&directory.0, "sh", 1, gray8_spec(2, 2)).unwrap_err();
+            LoadedRawImageArchive::open(&directory.0, "sh", 1, gray8_spec(GRAY8_2X2_VARIANTS))
+                .unwrap_err();
 
         assert!(matches!(
             error,
@@ -1119,6 +1390,71 @@ mod tests {
                 file_number: 1,
                 offset: 0,
                 len: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn opens_inline_table_bgra_blocks_with_size_based_dimensions() {
+        let directory = TestDirectory::new();
+        fs::write(
+            directory.0.join("tm000000.bin"),
+            inline_archive(&[vec![1, 2, 3, 255, 4, 5, 6, 255], vec![7; 16]]),
+        )
+        .expect("write inline archive");
+        let spec = RawImageSpec {
+            pixel_format: RawPixelFormat::Bgra8,
+            variants: BGRA8_VARIANTS,
+        };
+
+        let archive = LoadedRawImageArchive::open_files(
+            &directory.0,
+            "tm",
+            &[0],
+            RawArchiveLayout::InlineBlockTable,
+            spec,
+        )
+        .expect("open inline BGRA archive");
+        let records = archive.records().collect::<Vec<_>>();
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].key.file_number, 0);
+        assert_eq!((records[0].width, records[0].height), (2, 1));
+        assert_eq!((records[1].width, records[1].height), (2, 2));
+        let extracted = archive
+            .extract_png(records[0].key, 8)
+            .expect("extract inline BGRA PNG");
+        assert_eq!((extracted.width, extracted.height), (2, 1));
+        assert_eq!(&extracted.png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn rejects_an_inline_entry_that_disagrees_with_its_mwc_block() {
+        let directory = TestDirectory::new();
+        let mut data = inline_archive(&[vec![1, 2, 3, 255, 4, 5, 6, 255]]);
+        let stored_size = u32::from_le_bytes(data[8..12].try_into().expect("stored size bytes"));
+        data[8..12].copy_from_slice(&(stored_size - 1).to_le_bytes());
+        fs::write(directory.0.join("tm000000.bin"), data).expect("write inline archive");
+        let spec = RawImageSpec {
+            pixel_format: RawPixelFormat::Bgra8,
+            variants: BGRA8_VARIANTS,
+        };
+
+        let error = LoadedRawImageArchive::open_files(
+            &directory.0,
+            "tm",
+            &[0],
+            RawArchiveLayout::InlineBlockTable,
+            spec,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ExtractError::InlineBlockEntryMismatch {
+                file_number: 0,
+                file_block_index: 0,
+                ..
             }
         ));
     }
