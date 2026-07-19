@@ -11,6 +11,7 @@ const HELP: CategoryPath = CategoryPath::new(&["도움말"]);
 const HELP_SCREEN: CategoryPath = CategoryPath::new(&["도움말", "화면 이미지 (320×220)"]);
 const CLIENT_SPLASH_UI: CategoryPath = CategoryPath::new(&["클라이언트", "스플래시 UI"]);
 const WORLD_MAP: CategoryPath = CategoryPath::new(&["지도", "세계지도"]);
+const WORLD_MAP_ASSEMBLED: CategoryPath = CategoryPath::new(&["지도", "세계지도 (640×320)"]);
 const FIELD_MAP: CategoryPath = CategoryPath::new(&["지도", "필드 지도"]);
 const DISCOVERY_SET_2_LARGE: CategoryPath =
     CategoryPath::new(&["발견물", "2", "획득 이미지 (128×128)"]);
@@ -61,7 +62,8 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
     in_game_range(3_315, 3_507, HELP),
     custom_range(4_023, 4_026, CLIENT_SPLASH_UI),
     custom_range(7_933, 8_718, HELP_SCREEN),
-    in_game_range(8_842, 9_248, WORLD_MAP),
+    custom_range(8_842, 8_856, WORLD_MAP_ASSEMBLED),
+    in_game_range(8_857, 9_248, WORLD_MAP),
     in_game_range(9_291, 9_978, FIELD_MAP),
     custom_range(9_979, 10_011, DISCOVERY_SET_2_LARGE),
     in_game_range(10_012, 10_155, DUNGEON_MAP),
