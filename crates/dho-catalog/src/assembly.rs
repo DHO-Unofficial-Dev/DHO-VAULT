@@ -50,6 +50,26 @@ impl AssemblyRule {
         }
     }
 
+    const fn verified_is(
+        start_block: u32,
+        end_block: u32,
+        output_width: u32,
+        output_height: u32,
+    ) -> Self {
+        Self {
+            archive: "is",
+            start_block,
+            end_block,
+            tiles_per_image: 12,
+            columns: 4,
+            rows: 3,
+            output_width,
+            output_height,
+            tile_order: TileOrder::RowMajor,
+            status: VerificationStatus::HumanVerified,
+        }
+    }
+
     const fn contains(self, block_index: u32) -> bool {
         self.start_block <= block_index && block_index <= self.end_block
     }
@@ -103,18 +123,35 @@ pub(crate) const RULES: &[AssemblyRule] = &[
     AssemblyRule::verified_sd(10_406, 10_409, 2, 2, 166, 166),
     AssemblyRule::verified_sd(10_439, 10_470, 8, 4, 1_024, 512),
     AssemblyRule::verified_sd(10_617, 10_800, 2, 2, 192, 192),
+    AssemblyRule::verified_is(0, 11, 1_024, 768),
+    AssemblyRule::verified_is(12, 23, 1_024, 768),
+    AssemblyRule::verified_is(24, 35, 864, 664),
+    AssemblyRule::verified_is(36, 47, 864, 664),
+    AssemblyRule::verified_is(48, 59, 864, 664),
+    AssemblyRule::verified_is(60, 71, 864, 664),
+    AssemblyRule::verified_is(72, 83, 864, 664),
+    AssemblyRule::verified_is(84, 95, 864, 664),
+    AssemblyRule::verified_is(96, 107, 800, 600),
 ];
 
 pub(crate) fn find_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
-    archive
-        .eq_ignore_ascii_case("sd")
-        .then(|| {
-            RULES
-                .iter()
-                .copied()
-                .find_map(|rule| rule.plan_for(block_index))
-        })
-        .flatten()
+    find_plan_with_status(archive, block_index, VerificationStatus::HumanVerified)
+}
+
+pub(crate) fn find_candidate_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
+    find_plan_with_status(archive, block_index, VerificationStatus::Candidate)
+}
+
+fn find_plan_with_status(
+    archive: &str,
+    block_index: u32,
+    status: VerificationStatus,
+) -> Option<AssemblyPlan> {
+    RULES.iter().copied().find_map(|rule| {
+        (rule.archive.eq_ignore_ascii_case(archive) && rule.status == status)
+            .then(|| rule.plan_for(block_index))
+            .flatten()
+    })
 }
 
 #[cfg(test)]
@@ -135,6 +172,31 @@ mod tests {
             for next in RULES.iter().copied().skip(index + 1) {
                 assert!(rule.end_block < next.start_block || next.end_block < rule.start_block);
             }
+        }
+    }
+
+    #[test]
+    fn resolves_all_verified_is_images_without_leaving_candidates() {
+        let expected = [
+            (0, 11, 1_024, 768),
+            (12, 23, 1_024, 768),
+            (24, 35, 864, 664),
+            (36, 47, 864, 664),
+            (48, 59, 864, 664),
+            (60, 71, 864, 664),
+            (72, 83, 864, 664),
+            (84, 95, 864, 664),
+            (96, 107, 800, 600),
+        ];
+
+        for (first_block, last_block, width, height) in expected {
+            let plan = find_plan("IS", first_block).expect("verified IS plan");
+            assert_eq!(plan.first_block, first_block);
+            assert_eq!(plan.last_block, last_block);
+            assert_eq!(plan.rule.output_width, width);
+            assert_eq!(plan.rule.output_height, height);
+            assert_eq!(plan.rule.status, VerificationStatus::HumanVerified);
+            assert_eq!(find_candidate_plan("is", first_block), None);
         }
     }
 }

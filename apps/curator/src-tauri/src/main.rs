@@ -151,6 +151,24 @@ async fn preview_verified_assembly(
     .map_err(|error| format!("조립 미리보기 작업이 중단되었습니다: {error}"))?
 }
 
+#[tauri::command]
+async fn preview_candidate_assembly(
+    prefix: String,
+    block_index: u32,
+    session: State<'_, SharedCuratorSession>,
+) -> Result<AssemblyPreview, String> {
+    let session = session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .lock()
+            .map_err(|_| "검수 세션을 열지 못했습니다.".to_owned())?
+            .candidate_assembly_preview(&prefix, block_index)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("조립 후보 미리보기 작업이 중단되었습니다: {error}"))?
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(CuratorSession::default())))
@@ -162,7 +180,8 @@ fn main() {
             list_archive_groups,
             list_group_id_ranges,
             sample_archive_range,
-            preview_verified_assembly
+            preview_verified_assembly,
+            preview_candidate_assembly
         ])
         .run(tauri::generate_context!())
         .expect("failed to run DHO Vault Curator");

@@ -1455,10 +1455,18 @@ mod tests {
         assert_eq!(summary.archives[0].archive_count, 1);
         assert_eq!(
             summary.verified_categories,
-            [VerifiedCategorySummary {
-                path: ["장비", "방어구", "몸"].map(str::to_owned).to_vec(),
-                asset_count: 1,
-            }]
+            [
+                VerifiedCategorySummary {
+                    path: ["장비", "방어구", "몸"].map(str::to_owned).to_vec(),
+                    asset_count: 1,
+                },
+                VerifiedCategorySummary {
+                    path: ["클라이언트", "로딩·스플래시 이미지"]
+                        .map(str::to_owned)
+                        .to_vec(),
+                    asset_count: 1,
+                },
+            ]
         );
     }
 
