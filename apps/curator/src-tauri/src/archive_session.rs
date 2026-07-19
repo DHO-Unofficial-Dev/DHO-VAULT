@@ -4,7 +4,7 @@ use dho_catalog::{
     CatalogRecordKey, RecordClassification, VerificationStatus, assembly_candidate_plan,
     assembly_plan, classify_record,
 };
-use dho_client::SUPPORTED_ARCHIVE_PREFIXES;
+use dho_client::{SUPPORTED_ARCHIVE_PREFIXES, resolve_archive_directory};
 use dho_extract::{ExtractError, LoadedArchive, ResourceKey};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -571,7 +571,8 @@ impl CuratorSession {
             .ok_or(CuratorSessionError::ResourceDirectoryNotSelected)?;
 
         if !self.archives.contains_key(&prefix) {
-            let archive = LoadedArchive::open(resource_directory, &prefix).map_err(|source| {
+            let archive_directory = resolve_archive_directory(resource_directory, &prefix);
+            let archive = LoadedArchive::open(archive_directory, &prefix).map_err(|source| {
                 CuratorSessionError::OpenArchive {
                     prefix: prefix.clone(),
                     source,
