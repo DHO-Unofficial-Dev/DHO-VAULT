@@ -287,7 +287,7 @@ impl fmt::Display for AssetSnapshotError {
             ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, sg, sw, sx, sy, is)를 찾지 못했습니다: {}",
+                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, sg, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
