@@ -442,6 +442,7 @@ mod tests {
             &directory.0.join("sb000000.bin"),
             &[[200, 2, 32, 64, 10], [100, 1, 16, 16, 10]],
         );
+        write_index(&directory.0.join("im000000.bin"), &[[0, 0, 128, 128, 1]]);
         write_index(&directory.0.join("is000000.bin"), &[[5, 0, 128, 128, 1]]);
         fs::write(directory.0.join("other000000.bin"), []).expect("write unrelated file");
 
@@ -451,6 +452,7 @@ mod tests {
         assert_eq!(
             snapshot.assets,
             [
+                entry("im", 1, 0, 0, 128, 128),
                 entry("is", 1, 5, 0, 128, 128),
                 entry("sb", 10, 100, 1, 16, 16),
                 entry("sb", 10, 200, 2, 32, 64),
