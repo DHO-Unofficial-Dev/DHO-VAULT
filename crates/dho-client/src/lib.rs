@@ -22,7 +22,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 8] = ["im", "sa", "sb", "sc", "sd", "se", "sf", "is"];
+pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 9] =
+    ["im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "is"];
 pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 32;
 
 const THUMBNAIL_MAX_WIDTH: u32 = 160;
@@ -1233,7 +1234,7 @@ impl fmt::Display for GameDirectoryError {
             ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, is)를 찾지 못했습니다: {}",
+                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, sg, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -1445,6 +1446,11 @@ mod tests {
             &[[1, 0, 120, 24, 0], [1, 1_136, 72, 72, 1]],
             1_137,
         );
+        write_index_records(
+            &resources.join("sg000000.bin"),
+            &[[1, 0, 40, 24, 0], [2_000, 0, 40, 24, 0]],
+            1,
+        );
         write_index(&resources.join("is000000.bin"), 20);
 
         let summary = inspect_game_directory(&directory.0).expect("inspect game directory");
@@ -1455,7 +1461,7 @@ mod tests {
                 .iter()
                 .map(|archive| archive.prefix.as_str())
                 .collect::<Vec<_>>(),
-            ["im", "sa", "sb", "se", "sf", "is"]
+            ["im", "sa", "sb", "se", "sf", "sg", "is"]
         );
         assert_eq!(summary.archives[0].record_count, 1);
         assert_eq!(summary.archives[0].group_count, 1);
@@ -1470,7 +1476,7 @@ mod tests {
                 },
                 VerifiedCategorySummary {
                     path: ["UI 이미지", "버튼"].map(str::to_owned).to_vec(),
-                    asset_count: 1,
+                    asset_count: 2,
                 },
                 VerifiedCategorySummary {
                     path: ["UI 이미지", "텍스트 라벨"].map(str::to_owned).to_vec(),
