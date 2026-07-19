@@ -3,6 +3,7 @@
 //! Human-reviewed category metadata kept separate from raw archive facts.
 
 mod assembly;
+mod im;
 mod is;
 mod sb;
 mod sc;
@@ -262,7 +263,9 @@ impl<'a> Catalog<'a> {
 
 /// Resolves a category for an existing raw record.
 pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
-    if key.archive.eq_ignore_ascii_case("sb") {
+    if key.archive.eq_ignore_ascii_case("im") {
+        Catalog::new(im::RECORD_RULES, &[]).classify(key)
+    } else if key.archive.eq_ignore_ascii_case("sb") {
         Catalog::new(sb::RECORD_RULES, sb::RESERVATION_RULES).classify(key)
     } else if key.archive.eq_ignore_ascii_case("sc") {
         Catalog::new(sc::RECORD_RULES, &[]).classify(key)
@@ -336,6 +339,15 @@ mod tests {
         }
     }
 
+    fn im_key(icon_id: u32, block_index: u32) -> CatalogRecordKey<'static> {
+        CatalogRecordKey {
+            archive: "im",
+            group_code: 0,
+            icon_id,
+            block_index,
+        }
+    }
+
     fn assert_category(icon_id: u32, expected: &[&str]) {
         let classification = classify_record(key(0, icon_id));
         assert_eq!(
@@ -385,6 +397,29 @@ mod tests {
                 VerificationStatus::HumanVerified
             );
         }
+    }
+
+    #[test]
+    fn classifies_the_six_im_images_as_country_selection_maps() {
+        for key in [im_key(0, 0), im_key(5, 5)] {
+            let classification = classify_record(key);
+            assert_eq!(
+                classification.category.map(CategoryPath::segments),
+                Some(["지도", "국가 선택 지도"].as_slice())
+            );
+            assert_eq!(
+                classification.boundary_status,
+                VerificationStatus::HumanVerified
+            );
+            assert_eq!(
+                classification.meaning_status,
+                VerificationStatus::HumanVerified
+            );
+        }
+        assert_eq!(
+            classify_record(im_key(6, 6)),
+            RecordClassification::unknown()
+        );
     }
 
     fn assert_sd_category(block_index: u32, expected: &[&str]) {
