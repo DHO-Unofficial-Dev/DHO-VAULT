@@ -22,6 +22,9 @@ const createUpdateBaselineButton = document.querySelector(
 const viewUpdateAssetsButton = document.querySelector(
   "#view-update-assets",
 );
+const refreshUpdateBaselineButton = document.querySelector(
+  "#refresh-update-baseline",
+);
 const categoryPanel = document.querySelector("#category-panel");
 const categoryStatus = document.querySelector("#category-status");
 const categoryGroups = document.querySelector("#category-groups");
@@ -65,6 +68,7 @@ let categoryExportPollTimer = null;
 let categoryExportBusy = false;
 let categoryExportCancelRequested = false;
 let updateRequestId = 0;
+let currentAssetUpdateStatus = null;
 
 const CATEGORY_EXPORT_POLL_INTERVAL = 250;
 
@@ -98,6 +102,7 @@ function setCategoryExportBusy(busy) {
   selectButton.disabled = busy;
   createUpdateBaselineButton.disabled = busy;
   viewUpdateAssetsButton.disabled = busy;
+  refreshUpdateBaselineButton.disabled = busy;
   assetSearchQuery.disabled = busy;
   assetSearchSubmit.disabled = busy;
   for (const button of categoryGroups.querySelectorAll(".category-button")) {
@@ -144,6 +149,7 @@ function clearSummary() {
   resourceDirectory.textContent = "";
   archiveList.replaceChildren();
   updateRequestId += 1;
+  currentAssetUpdateStatus = null;
   updatePanel.hidden = true;
   updateStatus.textContent = "";
   updateMessage.textContent = "";
@@ -154,11 +160,15 @@ function clearSummary() {
   createUpdateBaselineButton.textContent = "현재 상태를 기준점으로 저장";
   viewUpdateAssetsButton.hidden = true;
   viewUpdateAssetsButton.disabled = false;
+  refreshUpdateBaselineButton.hidden = true;
+  refreshUpdateBaselineButton.disabled = false;
+  refreshUpdateBaselineButton.textContent = "검토 완료 후 기준점 갱신";
   savePageButton.hidden = false;
   saveAllButton.hidden = false;
 }
 
 function renderAssetUpdateStatus(status) {
+  currentAssetUpdateStatus = status;
   updatePanel.hidden = false;
   updateAddedCount.textContent = formatNumber(status.addedCount);
   updateChangedCount.textContent = formatNumber(status.changedCount);
@@ -168,13 +178,24 @@ function renderAssetUpdateStatus(status) {
     status.state === "different_directory";
   const canViewNewAssets =
     status.state === "changes_detected" && status.addedCount > 0;
+  const canRefreshBaseline =
+    status.state === "changes_detected" ||
+    status.state === "different_directory";
   updateActions.hidden =
-    status.state !== "missing_baseline" && !canViewNewAssets;
+    status.state !== "missing_baseline" &&
+    !canViewNewAssets &&
+    !canRefreshBaseline;
   createUpdateBaselineButton.hidden = status.state !== "missing_baseline";
   createUpdateBaselineButton.disabled = false;
   createUpdateBaselineButton.textContent = "현재 상태를 기준점으로 저장";
   viewUpdateAssetsButton.hidden = !canViewNewAssets;
   viewUpdateAssetsButton.disabled = false;
+  refreshUpdateBaselineButton.hidden = !canRefreshBaseline;
+  refreshUpdateBaselineButton.disabled = false;
+  refreshUpdateBaselineButton.textContent =
+    status.state === "different_directory"
+      ? "현재 폴더로 기준점 변경"
+      : "검토 완료 후 기준점 갱신";
 
   if (status.state === "missing_baseline") {
     updateStatus.textContent = `${formatNumber(status.currentCount)}개 자산 확인`;
@@ -200,6 +221,7 @@ function renderAssetUpdateStatus(status) {
 }
 
 function renderAssetUpdateError(error) {
+  currentAssetUpdateStatus = null;
   updatePanel.hidden = false;
   updateStatus.textContent = "확인하지 못함";
   updateMessage.textContent = `업데이트 상태를 확인하지 못했습니다: ${String(error)}`;
@@ -207,10 +229,12 @@ function renderAssetUpdateError(error) {
   updateActions.hidden = true;
   createUpdateBaselineButton.hidden = true;
   viewUpdateAssetsButton.hidden = true;
+  refreshUpdateBaselineButton.hidden = true;
 }
 
 async function loadAssetUpdateStatus() {
   const requestId = ++updateRequestId;
+  currentAssetUpdateStatus = null;
   updatePanel.hidden = false;
   updateStatus.textContent = "확인 중";
   updateMessage.textContent = "저장된 기준점과 현재 클라이언트를 비교하고 있습니다.";
@@ -218,6 +242,7 @@ async function loadAssetUpdateStatus() {
   updateActions.hidden = true;
   createUpdateBaselineButton.hidden = true;
   viewUpdateAssetsButton.hidden = true;
+  refreshUpdateBaselineButton.hidden = true;
 
   try {
     const status = await window.__TAURI__.core.invoke(
@@ -246,6 +271,69 @@ async function createAssetUpdateBaseline() {
       "create_asset_update_baseline",
     );
     if (requestId === updateRequestId) {
+      renderAssetUpdateStatus(status);
+    }
+  } catch (error) {
+    if (requestId === updateRequestId) {
+      renderAssetUpdateError(error);
+    }
+  } finally {
+    if (requestId === updateRequestId) {
+      selectButton.disabled = false;
+    }
+  }
+}
+
+function dismissUpdateGallery() {
+  if (currentPage?.mode !== "update") {
+    return;
+  }
+  galleryRequestId += 1;
+  closeDetail();
+  currentPage = null;
+  galleryPanel.hidden = true;
+  galleryTitle.textContent = "카테고리를 선택해 주세요";
+  galleryStatus.textContent = "";
+  galleryGrid.replaceChildren();
+  pagePosition.textContent = "";
+  previousPage.disabled = true;
+  nextPage.disabled = true;
+  savePageButton.hidden = false;
+  saveAllButton.hidden = false;
+}
+
+async function refreshAssetUpdateBaseline() {
+  const previous = currentAssetUpdateStatus;
+  if (
+    previous === null ||
+    (previous.state !== "changes_detected" &&
+      previous.state !== "different_directory")
+  ) {
+    return;
+  }
+  const confirmation =
+    previous.state === "different_directory"
+      ? "기존 게임 폴더의 기준점을 현재 선택한 폴더 기준으로 교체합니다. 계속할까요?"
+      : "현재 상태를 새 기준점으로 저장하면 지금 표시된 신규·변경·삭제 내역은 다시 볼 수 없습니다. 검토를 마쳤다면 계속하세요.";
+  if (!window.confirm(confirmation)) {
+    return;
+  }
+
+  const requestId = ++updateRequestId;
+  selectButton.disabled = true;
+  createUpdateBaselineButton.disabled = true;
+  viewUpdateAssetsButton.disabled = true;
+  refreshUpdateBaselineButton.disabled = true;
+  refreshUpdateBaselineButton.textContent = "갱신 중…";
+  updateStatus.textContent = "기준점 갱신 중";
+  updateMessage.textContent = "현재 자산 목록을 새 기준점으로 안전하게 저장하고 있습니다.";
+
+  try {
+    const status = await window.__TAURI__.core.invoke(
+      "refresh_asset_update_baseline",
+    );
+    if (requestId === updateRequestId) {
+      dismissUpdateGallery();
       renderAssetUpdateStatus(status);
     }
   } catch (error) {
@@ -1027,6 +1115,10 @@ createUpdateBaselineButton.addEventListener(
 viewUpdateAssetsButton.addEventListener("click", () => {
   loadUpdatePage(0);
 });
+refreshUpdateBaselineButton.addEventListener(
+  "click",
+  refreshAssetUpdateBaseline,
+);
 cancelCategoryExportButton.addEventListener("click", cancelCategoryExport);
 detailDialog.addEventListener("close", () => {
   detailRequestId += 1;

@@ -422,6 +422,20 @@ async fn create_asset_update_baseline(
 }
 
 #[tauri::command]
+async fn refresh_asset_update_baseline(
+    app: tauri::AppHandle,
+    session: State<'_, SharedViewerSession>,
+) -> Result<AssetUpdateStatus, String> {
+    let baseline_path = viewer_asset_baseline_path(&app)?;
+    let resource_directory = selected_resource_directory(&session)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        asset_baseline::refresh(&baseline_path, &resource_directory)
+    })
+    .await
+    .map_err(|error| format!("업데이트 기준점 갱신 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
 async fn load_verified_update_page(
     app: tauri::AppHandle,
     offset: usize,
@@ -1016,6 +1030,7 @@ fn main() {
             pick_game_directory,
             load_asset_update_status,
             create_asset_update_baseline,
+            refresh_asset_update_baseline,
             load_verified_update_page,
             load_verified_category_page,
             load_verified_asset_search_page,
