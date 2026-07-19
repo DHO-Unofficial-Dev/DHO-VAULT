@@ -466,9 +466,9 @@ function renderGallery(page) {
       const identity = document.createElement("span");
       const size = document.createElement("span");
       category.textContent = path.join(" > ");
-      identity.textContent =
-        `${item.archive.toUpperCase()} · ID ${formatNumber(item.iconId)}` +
-        ` · 블록 ${formatNumber(item.blockIndex)}`;
+      identity.textContent = `${item.archive.toUpperCase()}${
+        item.iconId === null ? "" : ` · ID ${formatNumber(item.iconId)}`
+      } · 블록 ${formatNumber(item.blockIndex)}`;
       size.textContent = `${formatNumber(item.sourceWidth)} × ${formatNumber(item.sourceHeight)}`;
       caption.append(category, identity, size);
     } else {
@@ -991,7 +991,9 @@ function renderSummary(summary) {
     const prefix = document.createElement("strong");
     const detail = document.createElement("span");
     prefix.textContent = archive.prefix.toUpperCase();
-    detail.textContent = `레코드 ${formatNumber(archive.recordCount)} · 그룹 ${formatNumber(archive.groupCount)} · 이미지 블록 ${formatNumber(archive.imageBlockCount)} · 데이터 파일 ${formatNumber(archive.archiveCount)}`;
+    detail.textContent = archive.hasIndex
+      ? `레코드 ${formatNumber(archive.recordCount)} · 그룹 ${formatNumber(archive.groupCount)} · 이미지 블록 ${formatNumber(archive.imageBlockCount)} · 데이터 파일 ${formatNumber(archive.archiveCount)}`
+      : `원시 이미지 블록 ${formatNumber(archive.imageBlockCount)} · 데이터 파일 ${formatNumber(archive.archiveCount)}`;
     item.append(prefix, detail);
     archiveList.append(item);
   }
@@ -1001,7 +1003,7 @@ function renderSummary(summary) {
   setStatus(
     "success",
     "게임 리소스를 확인했습니다",
-    `지원하는 MWC 인덱스 ${summary.archives.length}개와 확인된 카테고리 ${summary.verifiedCategories.length}개를 찾았습니다.`,
+    `지원하는 리소스 묶음 ${summary.archives.length}개와 확인된 카테고리 ${summary.verifiedCategories.length}개를 찾았습니다.`,
   );
 }
 
@@ -1017,7 +1019,7 @@ function renderOpenedGameDirectory(opened, automatic) {
     setStatus(
       "success",
       "마지막 게임 폴더를 자동으로 열었습니다",
-      `지원하는 MWC 인덱스 ${opened.summary.archives.length}개와 확인된 카테고리 ${opened.summary.verifiedCategories.length}개를 찾았습니다.`,
+      `지원하는 리소스 묶음 ${opened.summary.archives.length}개와 확인된 카테고리 ${opened.summary.verifiedCategories.length}개를 찾았습니다.`,
     );
   }
 }

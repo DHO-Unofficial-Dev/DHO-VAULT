@@ -6,14 +6,18 @@ mod snapshot;
 
 pub use snapshot::{
     ASSET_SNAPSHOT_FORMAT_VERSION, AssetSnapshot, AssetSnapshotChange, AssetSnapshotCompareError,
-    AssetSnapshotDiff, AssetSnapshotEntry, AssetSnapshotError, inspect_asset_snapshot,
+    AssetSnapshotDiff, AssetSnapshotEntry, AssetSnapshotError, AssetSourceKind,
+    inspect_asset_snapshot,
 };
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use dho_catalog::{CatalogRecordKey, VerificationStatus, assembly_plan, classify_record};
 use dho_core::{IndexParseError, IndexedArchive};
-use dho_extract::{ExtractError, LoadedArchive, ResourceKey};
+use dho_extract::{
+    ExtractError, LoadedArchive, LoadedRawImageArchive, RawImageSpec, RawPixelFormat,
+    RawResourceKey, ResourceKey,
+};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::error::Error;
@@ -22,16 +26,38 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 13] = [
+pub const INDEXED_ARCHIVE_PREFIXES: [&str; 13] = [
     "im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sw", "sx", "sy", "sz", "is",
 ];
+pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 14] = [
+    "im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sh", "sw", "sx", "sy", "sz", "is",
+];
 pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 32;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RawArchiveDefinition {
+    pub prefix: &'static str,
+    pub archive_count: u32,
+    pub spec: RawImageSpec,
+}
+
+pub(crate) const RAW_IMAGE_ARCHIVES: [RawArchiveDefinition; 1] = [RawArchiveDefinition {
+    prefix: "sh",
+    archive_count: 1,
+    spec: RawImageSpec {
+        width: 256,
+        height: 256,
+        pixel_format: RawPixelFormat::Gray8,
+    },
+}];
 
 /// Resolves the physical subdirectory for an archive while preserving callers that already pass
 /// a concrete archive directory.
 pub fn resolve_archive_directory(resource_root: impl AsRef<Path>, prefix: &str) -> PathBuf {
     let resource_root = resource_root.as_ref();
-    if resource_root.join(format!("{prefix}000000.bin")).is_file() {
+    if resource_root.join(format!("{prefix}000000.bin")).is_file()
+        || resource_root.join(format!("{prefix}000001.bin")).is_file()
+    {
         return resource_root.to_owned();
     }
 
@@ -60,8 +86,9 @@ const THUMBNAIL_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ArchiveIndexSummary {
+pub struct ArchiveSummary {
     pub prefix: String,
+    pub has_index: bool,
     pub record_count: u32,
     pub group_count: u32,
     pub image_block_count: u32,
@@ -73,7 +100,7 @@ pub struct ArchiveIndexSummary {
 pub struct GameDirectorySummary {
     pub game_directory: String,
     pub resource_directory: String,
-    pub archives: Vec<ArchiveIndexSummary>,
+    pub archives: Vec<ArchiveSummary>,
     pub verified_categories: Vec<VerifiedCategorySummary>,
 }
 
@@ -126,7 +153,7 @@ pub struct VerifiedAssetSearchItem {
 #[serde(rename_all = "camelCase")]
 pub struct VerifiedAssetThumbnail {
     pub archive: String,
-    pub icon_id: u32,
+    pub icon_id: Option<u32>,
     pub block_index: u32,
     pub source_width: u32,
     pub source_height: u32,
@@ -141,7 +168,7 @@ pub struct VerifiedAssetThumbnail {
 pub struct VerifiedAssetDetail {
     pub path: Vec<String>,
     pub archive: String,
-    pub icon_id: u32,
+    pub icon_id: Option<u32>,
     pub block_index: u32,
     pub source_width: u32,
     pub source_height: u32,
@@ -154,7 +181,7 @@ pub struct VerifiedAssetDetail {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedAssetPng {
     pub archive: String,
-    pub icon_id: u32,
+    pub icon_id: Option<u32>,
     pub block_index: u32,
     pub width: u32,
     pub height: u32,
@@ -170,8 +197,8 @@ impl VerifiedCategoryAsset {
         &self.0.prefix
     }
 
-    pub fn icon_id(&self) -> u32 {
-        self.0.key.icon_id
+    pub fn icon_id(&self) -> Option<u32> {
+        self.0.icon_id()
     }
 
     pub fn block_index(&self) -> u32 {
@@ -195,8 +222,8 @@ impl VerifiedSearchAsset {
         &self.0.asset.prefix
     }
 
-    pub fn icon_id(&self) -> u32 {
-        self.0.asset.key.icon_id
+    pub fn icon_id(&self) -> Option<u32> {
+        self.0.asset.icon_id()
     }
 
     pub fn block_index(&self) -> u32 {
@@ -212,6 +239,7 @@ impl VerifiedSearchAsset {
 pub struct ViewerSession {
     resource_directory: Option<PathBuf>,
     archives: HashMap<String, LoadedArchive>,
+    raw_archives: HashMap<String, LoadedRawImageArchive>,
     search_assets: Option<Vec<VerifiedSearchAssetRef>>,
     thumbnail_cache: ThumbnailCache,
 }
@@ -220,8 +248,15 @@ pub struct ViewerSession {
 struct VerifiedAssetRef {
     prefix: String,
     key: ResourceKey,
+    raw_key: Option<RawResourceKey>,
     canonical_block: u32,
     assembled: bool,
+}
+
+impl VerifiedAssetRef {
+    fn icon_id(&self) -> Option<u32> {
+        self.raw_key.is_none().then_some(self.key.icon_id)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +380,7 @@ impl ViewerSession {
         let path = path.into();
         if self.resource_directory.as_ref() != Some(&path) {
             self.archives.clear();
+            self.raw_archives.clear();
             self.search_assets = None;
             self.thumbnail_cache.clear();
             self.resource_directory = Some(path);
@@ -426,8 +462,14 @@ impl ViewerSession {
         }
 
         let mut review_required_count = 0;
-        let mut unique = BTreeMap::<(Vec<String>, String, u32), ResourceKey>::new();
+        let mut unique =
+            BTreeMap::<(Vec<String>, String, u32), (ResourceKey, Option<RawResourceKey>)>::new();
         for asset in added_assets {
+            let raw_key = asset.raw_resource_key();
+            if asset.source_kind == AssetSourceKind::RawBlock && raw_key.is_none() {
+                review_required_count += 1;
+                continue;
+            }
             let classification = classify_record(CatalogRecordKey {
                 archive: &asset.archive,
                 group_code: asset.group_code,
@@ -453,22 +495,26 @@ impl ViewerSession {
                 .collect::<Vec<_>>();
             unique
                 .entry((path, asset.archive.to_ascii_lowercase(), canonical_block))
-                .or_insert(ResourceKey {
-                    group_code: asset.group_code,
-                    icon_id: asset.icon_id,
-                    block_index: asset.block_index,
-                });
+                .or_insert((
+                    ResourceKey {
+                        group_code: asset.group_code,
+                        icon_id: asset.icon_id,
+                        block_index: asset.block_index,
+                    },
+                    raw_key,
+                ));
         }
 
         let assets = unique
             .into_iter()
-            .map(|((path, prefix, canonical_block), key)| {
+            .map(|((path, prefix, canonical_block), (key, raw_key))| {
                 let assembled = assembly_plan(&prefix, canonical_block).is_some();
                 VerifiedSearchAssetRef {
                     path,
                     asset: VerifiedAssetRef {
                         prefix,
                         key,
+                        raw_key,
                         canonical_block,
                         assembled,
                     },
@@ -547,6 +593,34 @@ impl ViewerSession {
         block_index: u32,
     ) -> Result<VerifiedAssetDetail, ViewerSessionError> {
         let asset = self.verified_asset(path, prefix, block_index)?;
+        if let Some(raw_key) = asset.raw_key {
+            let extracted = self
+                .raw_archive(&asset.prefix)?
+                .extract_thumbnail_png(
+                    raw_key,
+                    MAX_IMAGE_DECODE_SIZE,
+                    DETAIL_MAX_WIDTH,
+                    DETAIL_MAX_HEIGHT,
+                    MAX_DETAIL_DECODE_SIZE,
+                )
+                .map_err(|source| ViewerSessionError::Extract {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                    source,
+                })?;
+            return Ok(VerifiedAssetDetail {
+                path: path.to_vec(),
+                archive: asset.prefix,
+                icon_id: None,
+                block_index: asset.canonical_block,
+                source_width: extracted.source_width,
+                source_height: extracted.source_height,
+                preview_width: extracted.width,
+                preview_height: extracted.height,
+                assembled: false,
+                preview_data_url: png_data_url(&extracted.png),
+            });
+        }
         let archive = self.archive(&asset.prefix)?;
 
         if asset.assembled {
@@ -571,7 +645,7 @@ impl ViewerSession {
             Ok(VerifiedAssetDetail {
                 path: path.to_vec(),
                 archive: asset.prefix,
-                icon_id: asset.key.icon_id,
+                icon_id: asset.raw_key.is_none().then_some(asset.key.icon_id),
                 block_index: extracted.first_block,
                 source_width: extracted.source_width,
                 source_height: extracted.source_height,
@@ -597,7 +671,7 @@ impl ViewerSession {
             Ok(VerifiedAssetDetail {
                 path: path.to_vec(),
                 archive: asset.prefix,
-                icon_id: asset.key.icon_id,
+                icon_id: asset.raw_key.is_none().then_some(asset.key.icon_id),
                 block_index: asset.canonical_block,
                 source_width: extracted.source_width,
                 source_height: extracted.source_height,
@@ -623,6 +697,25 @@ impl ViewerSession {
         &mut self,
         asset: VerifiedAssetRef,
     ) -> Result<VerifiedAssetPng, ViewerSessionError> {
+        if let Some(raw_key) = asset.raw_key {
+            let extracted = self
+                .raw_archive(&asset.prefix)?
+                .extract_png(raw_key, MAX_IMAGE_DECODE_SIZE)
+                .map_err(|source| ViewerSessionError::Extract {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                    source,
+                })?;
+            return Ok(VerifiedAssetPng {
+                archive: asset.prefix,
+                icon_id: None,
+                block_index: asset.canonical_block,
+                width: extracted.width,
+                height: extracted.height,
+                assembled: false,
+                png: extracted.png,
+            });
+        }
         let archive = self.archive(&asset.prefix)?;
 
         if asset.assembled {
@@ -643,7 +736,7 @@ impl ViewerSession {
                 })?;
             Ok(VerifiedAssetPng {
                 archive: asset.prefix,
-                icon_id: asset.key.icon_id,
+                icon_id: asset.raw_key.is_none().then_some(asset.key.icon_id),
                 block_index: extracted.first_block,
                 width: extracted.width,
                 height: extracted.height,
@@ -660,7 +753,7 @@ impl ViewerSession {
                 })?;
             Ok(VerifiedAssetPng {
                 archive: asset.prefix,
-                icon_id: asset.key.icon_id,
+                icon_id: asset.raw_key.is_none().then_some(asset.key.icon_id),
                 block_index: asset.canonical_block,
                 width: extracted.width,
                 height: extracted.height,
@@ -676,6 +769,36 @@ impl ViewerSession {
     ) -> Result<VerifiedAssetThumbnail, ViewerSessionError> {
         let cache_key = ThumbnailCacheKey::from(&asset);
         if let Some(thumbnail) = self.thumbnail_cache.get(&cache_key) {
+            return Ok(thumbnail);
+        }
+
+        if let Some(raw_key) = asset.raw_key {
+            let extracted = self
+                .raw_archive(&asset.prefix)?
+                .extract_thumbnail_png(
+                    raw_key,
+                    MAX_IMAGE_DECODE_SIZE,
+                    THUMBNAIL_MAX_WIDTH,
+                    THUMBNAIL_MAX_HEIGHT,
+                    MAX_THUMBNAIL_DECODE_SIZE,
+                )
+                .map_err(|source| ViewerSessionError::Extract {
+                    prefix: asset.prefix.clone(),
+                    block_index: asset.canonical_block,
+                    source,
+                })?;
+            let thumbnail = VerifiedAssetThumbnail {
+                archive: asset.prefix,
+                icon_id: None,
+                block_index: asset.canonical_block,
+                source_width: extracted.source_width,
+                source_height: extracted.source_height,
+                thumbnail_width: extracted.width,
+                thumbnail_height: extracted.height,
+                assembled: false,
+                thumbnail_data_url: png_data_url(&extracted.png),
+            };
+            self.thumbnail_cache.insert(cache_key, thumbnail.clone());
             return Ok(thumbnail);
         }
 
@@ -701,7 +824,7 @@ impl ViewerSession {
                 })?;
             VerifiedAssetThumbnail {
                 archive: asset.prefix,
-                icon_id: asset.key.icon_id,
+                icon_id: asset.raw_key.is_none().then_some(asset.key.icon_id),
                 block_index: extracted.first_block,
                 source_width: extracted.source_width,
                 source_height: extracted.source_height,
@@ -726,7 +849,7 @@ impl ViewerSession {
                 })?;
             VerifiedAssetThumbnail {
                 archive: asset.prefix,
-                icon_id: asset.key.icon_id,
+                icon_id: asset.raw_key.is_none().then_some(asset.key.icon_id),
                 block_index: asset.canonical_block,
                 source_width: extracted.source_width,
                 source_height: extracted.source_height,
@@ -804,7 +927,7 @@ impl ViewerSession {
             .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
         let mut assets = Vec::new();
 
-        for prefix in SUPPORTED_ARCHIVE_PREFIXES {
+        for prefix in INDEXED_ARCHIVE_PREFIXES {
             if !resolve_archive_directory(&resource_directory, prefix)
                 .join(format!("{prefix}000000.bin"))
                 .is_file()
@@ -842,10 +965,49 @@ impl ViewerSession {
                     .map(|(canonical_block, key)| VerifiedAssetRef {
                         prefix: prefix.to_owned(),
                         key,
+                        raw_key: None,
                         canonical_block,
                         assembled: assembly_plan(prefix, canonical_block).is_some(),
                     }),
             );
+        }
+
+        for definition in RAW_IMAGE_ARCHIVES {
+            if !resolve_archive_directory(&resource_directory, definition.prefix)
+                .join(format!("{}000001.bin", definition.prefix))
+                .is_file()
+            {
+                continue;
+            }
+            let archive = self.raw_archive(definition.prefix)?;
+            let matching = archive
+                .records()
+                .filter_map(|record| {
+                    let classification = classify_record(CatalogRecordKey {
+                        archive: definition.prefix,
+                        group_code: 0,
+                        icon_id: record.key.block_index,
+                        block_index: record.key.block_index,
+                    });
+                    (classification.boundary_status == VerificationStatus::HumanVerified
+                        && classification.meaning_status == VerificationStatus::HumanVerified
+                        && classification
+                            .category
+                            .is_some_and(|category| category_matches(category.segments(), path)))
+                    .then_some(VerifiedAssetRef {
+                        prefix: definition.prefix.to_owned(),
+                        key: ResourceKey {
+                            group_code: 0,
+                            icon_id: record.key.block_index,
+                            block_index: record.key.block_index,
+                        },
+                        raw_key: Some(record.key),
+                        canonical_block: record.key.block_index,
+                        assembled: false,
+                    })
+                })
+                .collect::<Vec<_>>();
+            assets.extend(matching);
         }
 
         Ok(assets)
@@ -880,7 +1042,7 @@ impl ViewerSession {
                 .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
             let mut assets = Vec::new();
 
-            for prefix in SUPPORTED_ARCHIVE_PREFIXES {
+            for prefix in INDEXED_ARCHIVE_PREFIXES {
                 if !resolve_archive_directory(&resource_directory, prefix)
                     .join(format!("{prefix}000000.bin"))
                     .is_file()
@@ -925,11 +1087,58 @@ impl ViewerSession {
                         asset: VerifiedAssetRef {
                             prefix: prefix.to_owned(),
                             key,
+                            raw_key: None,
                             canonical_block,
                             assembled: assembly_plan(prefix, canonical_block).is_some(),
                         },
                     }
                 }));
+            }
+            for definition in RAW_IMAGE_ARCHIVES {
+                if !resolve_archive_directory(&resource_directory, definition.prefix)
+                    .join(format!("{}000001.bin", definition.prefix))
+                    .is_file()
+                {
+                    continue;
+                }
+                let archive = self.raw_archive(definition.prefix)?;
+                let raw_assets = archive
+                    .records()
+                    .filter_map(|record| {
+                        let classification = classify_record(CatalogRecordKey {
+                            archive: definition.prefix,
+                            group_code: 0,
+                            icon_id: record.key.block_index,
+                            block_index: record.key.block_index,
+                        });
+                        if classification.boundary_status != VerificationStatus::HumanVerified
+                            || classification.meaning_status != VerificationStatus::HumanVerified
+                        {
+                            return None;
+                        }
+                        let path = classification
+                            .category?
+                            .segments()
+                            .iter()
+                            .map(|segment| (*segment).to_owned())
+                            .collect();
+                        Some(VerifiedSearchAssetRef {
+                            path,
+                            asset: VerifiedAssetRef {
+                                prefix: definition.prefix.to_owned(),
+                                key: ResourceKey {
+                                    group_code: 0,
+                                    icon_id: record.key.block_index,
+                                    block_index: record.key.block_index,
+                                },
+                                raw_key: Some(record.key),
+                                canonical_block: record.key.block_index,
+                                assembled: false,
+                            },
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assets.extend(raw_assets);
             }
             assets.sort_by(|left, right| {
                 left.path
@@ -962,6 +1171,39 @@ impl ViewerSession {
             .archives
             .get(prefix)
             .expect("archive was inserted before lookup"))
+    }
+
+    fn raw_archive(&mut self, prefix: &str) -> Result<&LoadedRawImageArchive, ViewerSessionError> {
+        let resource_directory = self
+            .resource_directory
+            .clone()
+            .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
+        let normalized = prefix.to_ascii_lowercase();
+        let definition = RAW_IMAGE_ARCHIVES
+            .iter()
+            .find(|definition| definition.prefix == normalized)
+            .copied()
+            .ok_or_else(|| ViewerSessionError::RawArchiveDefinitionMissing {
+                prefix: normalized.clone(),
+            })?;
+        if !self.raw_archives.contains_key(&normalized) {
+            let archive_directory = resolve_archive_directory(&resource_directory, &normalized);
+            let archive = LoadedRawImageArchive::open(
+                archive_directory,
+                &normalized,
+                definition.archive_count,
+                definition.spec,
+            )
+            .map_err(|source| ViewerSessionError::OpenArchive {
+                prefix: normalized.clone(),
+                source,
+            })?;
+            self.raw_archives.insert(normalized.clone(), archive);
+        }
+        Ok(self
+            .raw_archives
+            .get(&normalized)
+            .expect("raw archive was inserted before lookup"))
     }
 }
 
@@ -1014,7 +1256,7 @@ pub fn inspect_game_directory(
 
     let mut archives = Vec::new();
     let mut verified_assets = BTreeMap::<Vec<&'static str>, BTreeSet<(String, u32)>>::new();
-    for prefix in SUPPORTED_ARCHIVE_PREFIXES {
+    for prefix in INDEXED_ARCHIVE_PREFIXES {
         let path = resolve_archive_directory(&resource_directory, prefix)
             .join(format!("{prefix}000000.bin"));
         if !path.is_file() {
@@ -1054,14 +1296,69 @@ pub fn inspect_game_directory(
                 .or_default()
                 .insert((prefix.to_owned(), canonical_block));
         }
-        archives.push(ArchiveIndexSummary {
+        archives.push(ArchiveSummary {
             prefix: prefix.to_owned(),
+            has_index: true,
             record_count: header.record_count,
             group_count: header.group_count,
             image_block_count: header.image_block_count,
             archive_count: header.archive_count,
         });
     }
+
+    for definition in RAW_IMAGE_ARCHIVES {
+        let directory = resolve_archive_directory(&resource_directory, definition.prefix);
+        if !directory
+            .join(format!("{}000001.bin", definition.prefix))
+            .is_file()
+        {
+            continue;
+        }
+        let archive = LoadedRawImageArchive::open(
+            directory,
+            definition.prefix,
+            definition.archive_count,
+            definition.spec,
+        )
+        .map_err(|source| GameDirectoryError::OpenArchive {
+            prefix: definition.prefix.to_owned(),
+            source,
+        })?;
+        let records = archive.records().collect::<Vec<_>>();
+        for record in &records {
+            let classification = classify_record(CatalogRecordKey {
+                archive: definition.prefix,
+                group_code: 0,
+                icon_id: record.key.block_index,
+                block_index: record.key.block_index,
+            });
+            if classification.boundary_status != VerificationStatus::HumanVerified
+                || classification.meaning_status != VerificationStatus::HumanVerified
+            {
+                continue;
+            }
+            if let Some(category) = classification.category {
+                verified_assets
+                    .entry(category.segments().to_vec())
+                    .or_default()
+                    .insert((definition.prefix.to_owned(), record.key.block_index));
+            }
+        }
+        archives.push(ArchiveSummary {
+            prefix: definition.prefix.to_owned(),
+            has_index: false,
+            record_count: u32::try_from(records.len()).unwrap_or(u32::MAX),
+            group_count: 0,
+            image_block_count: u32::try_from(records.len()).unwrap_or(u32::MAX),
+            archive_count: archive.archive_count(),
+        });
+    }
+    archives.sort_by_key(|archive| {
+        SUPPORTED_ARCHIVE_PREFIXES
+            .iter()
+            .position(|prefix| *prefix == archive.prefix)
+            .unwrap_or(usize::MAX)
+    });
 
     if archives.is_empty() {
         return Err(GameDirectoryError::NoSupportedArchives {
@@ -1107,6 +1404,9 @@ pub enum ViewerSessionError {
     OpenArchive {
         prefix: String,
         source: ExtractError,
+    },
+    RawArchiveDefinitionMissing {
+        prefix: String,
     },
     Extract {
         prefix: String,
@@ -1160,6 +1460,10 @@ impl fmt::Display for ViewerSessionError {
                     "{prefix} 이미지 묶음을 열지 못했습니다: {source}"
                 )
             }
+            Self::RawArchiveDefinitionMissing { prefix } => write!(
+                formatter,
+                "{prefix} 원시 이미지 아카이브 명세를 찾지 못했습니다."
+            ),
             Self::Extract {
                 prefix,
                 block_index,
@@ -1187,6 +1491,7 @@ impl Error for ViewerSessionError {
             | Self::EmptyCategoryPath
             | Self::EmptySearchQuery
             | Self::InvalidPageSize { .. }
+            | Self::RawArchiveDefinitionMissing { .. }
             | Self::CategoryNotFound { .. }
             | Self::AssetNotFound { .. }
             | Self::OffsetOutOfRange { .. }
@@ -1214,6 +1519,10 @@ pub enum GameDirectoryError {
         prefix: String,
         path: PathBuf,
         source: IndexParseError,
+    },
+    OpenArchive {
+        prefix: String,
+        source: ExtractError,
     },
     NoSupportedArchives {
         path: PathBuf,
@@ -1254,9 +1563,13 @@ impl fmt::Display for GameDirectoryError {
                 "{prefix} MWC 인덱스를 해석하지 못했습니다 ({}): {source}",
                 path.display()
             ),
+            Self::OpenArchive { prefix, source } => write!(
+                formatter,
+                "{prefix} 원시 이미지 묶음을 열지 못했습니다: {source}"
+            ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, sg, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
+                "지원하는 이미지 리소스(im, sa, sb, sc, sd, se, sf, sg, sh, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -1268,6 +1581,7 @@ impl Error for GameDirectoryError {
         match self {
             Self::ReadIndex { source, .. } => Some(source),
             Self::ParseIndex { source, .. } => Some(source),
+            Self::OpenArchive { source, .. } => Some(source),
             Self::NotDirectory { .. }
             | Self::MissingExecutable { .. }
             | Self::MissingResourceDirectory { .. }
@@ -1369,7 +1683,7 @@ mod tests {
     fn test_thumbnail(icon_id: u32, data_url_bytes: usize) -> VerifiedAssetThumbnail {
         VerifiedAssetThumbnail {
             archive: "sb".to_owned(),
-            icon_id,
+            icon_id: Some(icon_id),
             block_index: icon_id,
             source_width: 1,
             source_height: 1,
@@ -1398,7 +1712,7 @@ mod tests {
         cache.insert(first.clone(), test_thumbnail(1, 1));
         cache.insert(second.clone(), test_thumbnail(2, 1));
 
-        assert_eq!(cache.get(&first).expect("first thumbnail").icon_id, 1);
+        assert_eq!(cache.get(&first).expect("first thumbnail").icon_id, Some(1));
         cache.insert(third.clone(), test_thumbnail(3, 1));
 
         assert!(cache.get(&second).is_none());
@@ -1719,7 +2033,7 @@ mod tests {
             .expect("load verified category assets");
         assert_eq!(category_assets.len(), 2);
         assert_eq!(category_assets[0].archive(), "sb");
-        assert_eq!(category_assets[0].icon_id(), 100_100);
+        assert_eq!(category_assets[0].icon_id(), Some(100_100));
         assert_eq!(category_assets[0].block_index(), 0);
         assert!(!category_assets[0].assembled());
         let category_png = session
@@ -1784,13 +2098,13 @@ mod tests {
         assert_eq!(category_page.total_count, 2);
         assert_eq!(category_page.items.len(), 1);
         assert_eq!(category_page.items[0].path, ["장비", "방어구", "머리"]);
-        assert_eq!(category_page.items[0].thumbnail.icon_id, 100_100);
+        assert_eq!(category_page.items[0].thumbnail.icon_id, Some(100_100));
         assert!(session.search_assets.is_some());
 
         let second_page = session
             .search_page("머리", 1, 1)
             .expect("reuse the search index for the next page");
-        assert_eq!(second_page.items[0].thumbnail.icon_id, 100_101);
+        assert_eq!(second_page.items[0].thumbnail.icon_id, Some(100_101));
 
         let id_page = session
             .search_page("100100", 0, VIEWER_CATEGORY_PAGE_SIZE)
@@ -1803,7 +2117,7 @@ mod tests {
             .expect("list matching search assets without thumbnails");
         assert_eq!(search_assets.len(), 2);
         assert_eq!(search_assets[0].path(), ["장비", "방어구", "머리"]);
-        assert_eq!(search_assets[1].icon_id(), 100_101);
+        assert_eq!(search_assets[1].icon_id(), Some(100_101));
         let search_png = session
             .search_asset_png(&search_assets[1])
             .expect("extract search asset PNG");
@@ -1824,11 +2138,11 @@ mod tests {
         assert_eq!(update_page.total_count, 2);
         assert_eq!(update_page.items.len(), 1);
         assert_eq!(update_page.items[0].path, ["장비", "방어구", "머리"]);
-        assert_eq!(update_page.items[0].thumbnail.icon_id, 100_100);
+        assert_eq!(update_page.items[0].thumbnail.icon_id, Some(100_100));
         let second_update_page = session
             .update_page(&added_assets, 1, 1)
             .expect("page the next newly added asset");
-        assert_eq!(second_update_page.items[0].thumbnail.icon_id, 100_101);
+        assert_eq!(second_update_page.items[0].thumbnail.icon_id, Some(100_101));
 
         let empty_page = session
             .search_page("없는 검색어", 0, VIEWER_CATEGORY_PAGE_SIZE)
@@ -1849,6 +2163,94 @@ mod tests {
 
         session.set_resource_directory(resources.join("other"));
         assert!(session.search_assets.is_none());
+    }
+
+    #[test]
+    fn displays_and_extracts_verified_sh_raw_blocks_without_an_icon_id() {
+        let directory = TestDirectory::new();
+        let resources = directory.prepare_game();
+        write_data_file(
+            &resources.join("sh000001.bin"),
+            &[vec![0x11; 256 * 256], vec![0xcc; 256 * 256]],
+        );
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(&resources);
+        let category = ["UI 이미지", "별자리 조사", "별자리 선화 (256×256)"].map(str::to_owned);
+
+        let page = session
+            .category_page(&category, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("load SH raw image page");
+        assert_eq!(page.total_count, 2);
+        assert_eq!(page.items[0].archive, "sh");
+        assert_eq!(page.items[0].icon_id, None);
+        assert_eq!(page.items[0].block_index, 0);
+        assert_eq!(
+            (page.items[0].source_width, page.items[0].source_height),
+            (256, 256)
+        );
+
+        let detail = session
+            .asset_detail(&category, "SH", 1)
+            .expect("load SH raw image detail");
+        assert_eq!(detail.icon_id, None);
+        assert_eq!(detail.block_index, 1);
+        assert_eq!((detail.preview_width, detail.preview_height), (256, 256));
+
+        let png = session
+            .asset_png(&category, "sh", 1)
+            .expect("extract SH raw image PNG");
+        assert_eq!(png.icon_id, None);
+        assert_eq!((png.width, png.height), (256, 256));
+        assert_eq!(&png.png[..8], b"\x89PNG\r\n\x1a\n");
+
+        let search = session
+            .search_page("SH 별자리 1", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("search SH raw block");
+        assert_eq!(search.total_count, 1);
+        assert_eq!(search.items[0].thumbnail.block_index, 1);
+
+        let added = AssetSnapshotEntry::new_raw(
+            "sh",
+            RawResourceKey {
+                block_index: 1,
+                file_number: 1,
+                file_block_index: 1,
+            },
+            256,
+            256,
+        );
+        let update = session
+            .update_page(&[added], 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("show added SH raw block");
+        assert_eq!(update.total_count, 1);
+        assert_eq!(update.review_required_count, 0);
+        assert_eq!(update.items[0].thumbnail.icon_id, None);
+    }
+
+    #[test]
+    fn summarizes_sh_without_claiming_an_index_group() {
+        let directory = TestDirectory::new();
+        let resources = directory.prepare_game();
+        write_data_file(
+            &resources.join("sh000001.bin"),
+            &[vec![0x11; 256 * 256], vec![0xcc; 256 * 256]],
+        );
+
+        let summary = inspect_game_directory(&directory.0).expect("inspect SH-only game fixture");
+
+        assert_eq!(summary.archives.len(), 1);
+        assert_eq!(summary.archives[0].prefix, "sh");
+        assert!(!summary.archives[0].has_index);
+        assert_eq!(summary.archives[0].record_count, 2);
+        assert_eq!(summary.archives[0].group_count, 0);
+        assert_eq!(summary.archives[0].image_block_count, 2);
+        assert_eq!(summary.archives[0].archive_count, 1);
+        assert_eq!(summary.verified_categories.len(), 1);
+        assert_eq!(
+            summary.verified_categories[0].path,
+            ["UI 이미지", "별자리 조사", "별자리 선화 (256×256)"]
+        );
+        assert_eq!(summary.verified_categories[0].asset_count, 2);
     }
 
     #[test]

@@ -12,6 +12,7 @@ mod sd;
 mod se;
 mod sf;
 mod sg;
+mod sh;
 mod sw;
 mod sx;
 mod sy;
@@ -287,6 +288,8 @@ pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
         Catalog::new(sf::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("sg") {
         Catalog::new(sg::RECORD_RULES, &[]).classify(key)
+    } else if key.archive.eq_ignore_ascii_case("sh") {
+        Catalog::new(sh::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("sw") {
         Catalog::new(sw::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("sx") {
@@ -334,6 +337,40 @@ mod tests {
             icon_id,
             block_index: 0,
         }
+    }
+
+    #[test]
+    fn classifies_only_the_reviewed_sh_constellation_blocks() {
+        for block_index in [0, 42, 87] {
+            let classification = classify_record(CatalogRecordKey {
+                archive: "sh",
+                group_code: 0,
+                icon_id: block_index,
+                block_index,
+            });
+            assert_eq!(
+                classification.category.map(CategoryPath::segments),
+                Some(&["UI 이미지", "별자리 조사", "별자리 선화 (256×256)"][..])
+            );
+            assert_eq!(
+                classification.boundary_status,
+                VerificationStatus::HumanVerified
+            );
+            assert_eq!(
+                classification.meaning_status,
+                VerificationStatus::HumanVerified
+            );
+        }
+
+        assert_eq!(
+            classify_record(CatalogRecordKey {
+                archive: "sh",
+                group_code: 0,
+                icon_id: 88,
+                block_index: 88,
+            }),
+            RecordClassification::unknown()
+        );
     }
 
     fn sc_key(group_code: u32, icon_id: u32, block_index: u32) -> CatalogRecordKey<'static> {
