@@ -15,6 +15,7 @@ mod sg;
 mod sw;
 mod sx;
 mod sy;
+mod sz;
 
 pub use assembly::{AssemblyPlan, AssemblyRule, TileOrder};
 use serde::Serialize;
@@ -292,6 +293,8 @@ pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
         Catalog::new(sx::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("sy") {
         Catalog::new(sy::RECORD_RULES, &[]).classify(key)
+    } else if key.archive.eq_ignore_ascii_case("sz") {
+        Catalog::new(sz::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("is") {
         Catalog::new(is::RECORD_RULES, &[]).classify(key)
     } else {
@@ -426,6 +429,15 @@ mod tests {
     fn sy_key(group_code: u32, icon_id: u32, block_index: u32) -> CatalogRecordKey<'static> {
         CatalogRecordKey {
             archive: "sy",
+            group_code,
+            icon_id,
+            block_index,
+        }
+    }
+
+    fn sz_key(group_code: u32, icon_id: u32, block_index: u32) -> CatalogRecordKey<'static> {
+        CatalogRecordKey {
+            archive: "sz",
             group_code,
             icon_id,
             block_index,
@@ -684,6 +696,30 @@ mod tests {
 
         assert_eq!(
             classify_record(sy_key(0, 82, 82)),
+            RecordClassification::unknown()
+        );
+    }
+
+    #[test]
+    fn classifies_reviewed_sz_event_portraits() {
+        for key in [sz_key(0, 0, 0), sz_key(0, 33, 33)] {
+            let classification = classify_record(key);
+            assert_eq!(
+                classification.category.map(CategoryPath::segments),
+                Some(["이벤트", "포트레잇"].as_slice())
+            );
+            assert_eq!(
+                classification.boundary_status,
+                VerificationStatus::HumanVerified
+            );
+            assert_eq!(
+                classification.meaning_status,
+                VerificationStatus::HumanVerified
+            );
+        }
+
+        assert_eq!(
+            classify_record(sz_key(0, 34, 34)),
             RecordClassification::unknown()
         );
     }
