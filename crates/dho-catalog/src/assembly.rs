@@ -146,6 +146,7 @@ impl LayeredAssemblyRule {
 pub(crate) const RULES: &[AssemblyRule] = &[
     AssemblyRule::verified_sd(7_933, 8_718, 3, 2, 320, 220),
     AssemblyRule::verified_sd(8_842, 8_856, 5, 3, 640, 320),
+    AssemblyRule::verified_sd(9_291, 9_774, 2, 2, 192, 192),
     AssemblyRule::verified_sd(10_156, 10_175, 2, 2, 155, 256),
     AssemblyRule::verified_sd(10_203, 10_242, 2, 2, 248, 156),
     AssemblyRule::verified_sd(10_368, 10_395, 7, 4, 782, 404),
