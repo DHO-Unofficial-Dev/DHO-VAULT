@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::{SUPPORTED_ARCHIVE_PREFIXES, resolve_archive_directory};
+use crate::{INDEXED_ARCHIVE_PREFIXES, RAW_IMAGE_ARCHIVES, resolve_archive_directory};
 use dho_core::{IndexParseError, IndexedArchive};
+use dho_extract::{ExtractError, LoadedRawImageArchive, RawResourceKey};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -49,11 +50,25 @@ impl AssetSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct AssetSnapshotEntry {
     pub archive: String,
+    #[serde(default)]
+    pub source_kind: AssetSourceKind,
     pub group_code: u32,
     pub icon_id: u32,
     pub block_index: u32,
     pub width: u32,
     pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_file_number: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_block_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetSourceKind {
+    #[default]
+    Indexed,
+    RawBlock,
 }
 
 impl AssetSnapshotEntry {
@@ -67,20 +82,56 @@ impl AssetSnapshotEntry {
     ) -> Self {
         Self {
             archive: archive.into().to_ascii_lowercase(),
+            source_kind: AssetSourceKind::Indexed,
             group_code,
             icon_id,
             block_index,
             width,
             height,
+            data_file_number: None,
+            file_block_index: None,
         }
+    }
+
+    pub fn new_raw(
+        archive: impl Into<String>,
+        key: RawResourceKey,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self {
+            archive: archive.into().to_ascii_lowercase(),
+            source_kind: AssetSourceKind::RawBlock,
+            group_code: 0,
+            icon_id: key.block_index,
+            block_index: key.block_index,
+            width,
+            height,
+            data_file_number: Some(key.file_number),
+            file_block_index: Some(key.file_block_index),
+        }
+    }
+
+    pub fn raw_resource_key(&self) -> Option<RawResourceKey> {
+        if self.source_kind != AssetSourceKind::RawBlock {
+            return None;
+        }
+        Some(RawResourceKey {
+            block_index: self.block_index,
+            file_number: self.data_file_number?,
+            file_block_index: self.file_block_index?,
+        })
     }
 
     fn identity(&self) -> AssetIdentity {
         AssetIdentity {
             archive: self.archive.clone(),
+            source_kind: self.source_kind,
             group_code: self.group_code,
             icon_id: self.icon_id,
             block_index: self.block_index,
+            data_file_number: self.data_file_number,
+            file_block_index: self.file_block_index,
         }
     }
 }
@@ -104,9 +155,12 @@ pub struct AssetSnapshotDiff {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct AssetIdentity {
     archive: String,
+    source_kind: AssetSourceKind,
     group_code: u32,
     icon_id: u32,
     block_index: u32,
+    data_file_number: Option<u32>,
+    file_block_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,7 +194,7 @@ pub fn inspect_asset_snapshot(
 
     let mut assets = Vec::new();
     let mut archives = 0;
-    for prefix in SUPPORTED_ARCHIVE_PREFIXES {
+    for prefix in INDEXED_ARCHIVE_PREFIXES {
         let path = resolve_archive_directory(resource_directory, prefix)
             .join(format!("{prefix}000000.bin"));
         if !path.is_file() {
@@ -166,6 +220,30 @@ pub fn inspect_asset_snapshot(
                 record.width,
                 record.height,
             )
+        }));
+    }
+
+    for definition in RAW_IMAGE_ARCHIVES {
+        let directory = resolve_archive_directory(resource_directory, definition.prefix);
+        if !directory
+            .join(format!("{}000001.bin", definition.prefix))
+            .is_file()
+        {
+            continue;
+        }
+        archives += 1;
+        let archive = LoadedRawImageArchive::open(
+            directory,
+            definition.prefix,
+            definition.archive_count,
+            definition.spec,
+        )
+        .map_err(|source| AssetSnapshotError::OpenRawArchive {
+            archive: definition.prefix.to_owned(),
+            source,
+        })?;
+        assets.extend(archive.records().map(|record| {
+            AssetSnapshotEntry::new_raw(definition.prefix, record.key, record.width, record.height)
         }));
     }
 
@@ -256,6 +334,10 @@ pub enum AssetSnapshotError {
         path: PathBuf,
         source: IndexParseError,
     },
+    OpenRawArchive {
+        archive: String,
+        source: ExtractError,
+    },
     NoSupportedArchives {
         path: PathBuf,
     },
@@ -285,9 +367,13 @@ impl fmt::Display for AssetSnapshotError {
                 "{archive} 자산 스냅샷 인덱스를 해석하지 못했습니다 ({}): {source}",
                 path.display()
             ),
+            Self::OpenRawArchive { archive, source } => write!(
+                formatter,
+                "{archive} 원시 이미지 묶음을 열지 못했습니다: {source}"
+            ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, sg, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
+                "지원하는 이미지 리소스(im, sa, sb, sc, sd, se, sf, sg, sh, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -299,6 +385,7 @@ impl Error for AssetSnapshotError {
         match self {
             Self::ReadIndex { source, .. } => Some(source),
             Self::ParseIndex { source, .. } => Some(source),
+            Self::OpenRawArchive { source, .. } => Some(source),
             Self::NotDirectory { .. } | Self::NoSupportedArchives { .. } => None,
         }
     }
@@ -307,6 +394,9 @@ impl Error for AssetSnapshotError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
@@ -353,6 +443,17 @@ mod tests {
             }
         }
         fs::write(path, bytes).expect("write test index");
+    }
+
+    fn zlib_block(raw: &[u8]) -> Vec<u8> {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(raw).expect("write zlib input");
+        let compressed = encoder.finish().expect("finish zlib stream");
+        let mut block = b"MWC\x1a".to_vec();
+        block.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        block.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        block.extend_from_slice(&compressed);
+        block
     }
 
     #[test]
@@ -419,6 +520,16 @@ mod tests {
     }
 
     #[test]
+    fn reads_old_indexed_entries_without_source_fields() {
+        let json = r#"{"formatVersion":1,"assets":[{"archive":"sb","groupCode":1,"iconId":2,"blockIndex":3,"width":4,"height":5}]}"#;
+
+        let restored: AssetSnapshot =
+            serde_json::from_str(json).expect("deserialize legacy indexed snapshot");
+
+        assert_eq!(restored.assets, [entry("sb", 1, 2, 3, 4, 5)]);
+    }
+
+    #[test]
     fn rejects_an_unsupported_snapshot_format_before_comparison() {
         let previous = AssetSnapshot {
             format_version: ASSET_SNAPSHOT_FORMAT_VERSION + 1,
@@ -480,6 +591,25 @@ mod tests {
                 entry("sw", 0, 0, 0, 80, 80),
             ]
         );
+    }
+
+    #[test]
+    fn reads_raw_sh_blocks_with_physical_file_identity() {
+        let directory = TestDirectory::new();
+        let primary = directory.0.join("0001");
+        fs::create_dir(&primary).expect("create primary resource directory");
+        let mut data = zlib_block(&vec![0x11; 256 * 256]);
+        data.extend_from_slice(&zlib_block(&vec![0xcc; 256 * 256]));
+        fs::write(primary.join("sh000001.bin"), data).expect("write SH raw archive");
+
+        let snapshot = inspect_asset_snapshot(&directory.0).expect("inspect SH raw snapshot");
+
+        assert_eq!(snapshot.assets.len(), 2);
+        assert_eq!(snapshot.assets[0].source_kind, AssetSourceKind::RawBlock);
+        assert_eq!(snapshot.assets[0].data_file_number, Some(1));
+        assert_eq!(snapshot.assets[0].file_block_index, Some(0));
+        assert_eq!(snapshot.assets[1].block_index, 1);
+        assert_eq!(snapshot.assets[1].file_block_index, Some(1));
     }
 
     #[test]

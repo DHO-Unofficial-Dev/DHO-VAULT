@@ -94,7 +94,7 @@ struct SavedVerifiedPage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PageAssetPlan {
     archive: String,
-    icon_id: u32,
+    icon_id: Option<u32>,
     block_index: u32,
     assembled: bool,
 }
@@ -903,12 +903,18 @@ fn default_asset_file_name(archive: &str, block_index: u32) -> String {
 
 fn page_asset_file_name(asset: &PageAssetPlan) -> String {
     let suffix = if asset.assembled { "-assembled" } else { "" };
-    format!(
-        "dho-vault-{}-icon-{}-block-{:06}{suffix}.png",
-        asset.archive.to_ascii_lowercase(),
-        asset.icon_id,
-        asset.block_index
-    )
+    match asset.icon_id {
+        Some(icon_id) => format!(
+            "dho-vault-{}-icon-{icon_id}-block-{:06}{suffix}.png",
+            asset.archive.to_ascii_lowercase(),
+            asset.block_index
+        ),
+        None => format!(
+            "dho-vault-{}-block-{:06}{suffix}.png",
+            asset.archive.to_ascii_lowercase(),
+            asset.block_index
+        ),
+    }
 }
 
 fn preflight_asset_batch(
@@ -1148,7 +1154,7 @@ mod tests {
     fn test_plan(block_index: u32) -> PageAssetPlan {
         PageAssetPlan {
             archive: "sb".to_owned(),
-            icon_id: 100_100 + block_index,
+            icon_id: Some(100_100 + block_index),
             block_index,
             assembled: false,
         }
@@ -1171,7 +1177,7 @@ mod tests {
             path: path.iter().map(|segment| (*segment).to_owned()).collect(),
             thumbnail: dho_client::VerifiedAssetThumbnail {
                 archive: "sb".to_owned(),
-                icon_id: 100_100 + block_index,
+                icon_id: Some(100_100 + block_index),
                 block_index,
                 source_width: 1,
                 source_height: 1,
@@ -1293,6 +1299,15 @@ mod tests {
         assert_eq!(
             default_asset_file_name("../unsafe", 7),
             "dho-vault-unsafe-000007.png"
+        );
+        assert_eq!(
+            page_asset_file_name(&PageAssetPlan {
+                archive: "sh".to_owned(),
+                icon_id: None,
+                block_index: 7,
+                assembled: false,
+            }),
+            "dho-vault-sh-block-000007.png"
         );
     }
 

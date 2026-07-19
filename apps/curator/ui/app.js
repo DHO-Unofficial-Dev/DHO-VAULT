@@ -197,14 +197,17 @@ function renderSummary(summary) {
     const detail = document.createElement("span");
     const state = document.createElement("small");
     prefix.textContent = archive.prefix.toUpperCase();
-    detail.textContent = `레코드 ${formatNumber(archive.recordCount)} · 원시 그룹 ${formatNumber(archive.groupCount)} · 이미지 블록 ${formatNumber(archive.imageBlockCount)} · 데이터 파일 ${formatNumber(archive.archiveCount)}`;
-    state.textContent = "분류 미확정";
+    detail.textContent = archive.hasIndex
+      ? `레코드 ${formatNumber(archive.recordCount)} · 원시 그룹 ${formatNumber(archive.groupCount)} · 이미지 블록 ${formatNumber(archive.imageBlockCount)} · 데이터 파일 ${formatNumber(archive.archiveCount)}`
+      : `원시 이미지 블록 ${formatNumber(archive.imageBlockCount)} · 데이터 파일 ${formatNumber(archive.archiveCount)}`;
+    state.textContent = archive.hasIndex ? "분류 미확정" : "인덱스 없는 원시 이미지 묶음";
     content.append(detail, state);
-    item.append(
-      prefix,
-      content,
-      createActionButton("ID 대역 보기", () => openArchiveBands(archive.prefix)),
-    );
+    item.append(prefix, content);
+    if (archive.hasIndex) {
+      item.append(
+        createActionButton("ID 대역 보기", () => openArchiveBands(archive.prefix)),
+      );
+    }
     archiveList.append(item);
   }
 

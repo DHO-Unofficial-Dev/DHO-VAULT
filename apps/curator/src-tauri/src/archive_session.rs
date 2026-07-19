@@ -4,7 +4,7 @@ use dho_catalog::{
     CatalogRecordKey, RecordClassification, VerificationStatus, assembly_candidate_plan,
     assembly_plan, classify_record,
 };
-use dho_client::{SUPPORTED_ARCHIVE_PREFIXES, resolve_archive_directory};
+use dho_client::{INDEXED_ARCHIVE_PREFIXES, resolve_archive_directory};
 use dho_extract::{ExtractError, LoadedArchive, ResourceKey};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -675,7 +675,7 @@ impl GroupAccumulator {
 
 fn normalize_prefix(prefix: &str) -> Result<String, CuratorSessionError> {
     let prefix = prefix.to_ascii_lowercase();
-    if SUPPORTED_ARCHIVE_PREFIXES.contains(&prefix.as_str()) {
+    if INDEXED_ARCHIVE_PREFIXES.contains(&prefix.as_str()) {
         Ok(prefix)
     } else {
         Err(CuratorSessionError::UnsupportedPrefix { prefix })
