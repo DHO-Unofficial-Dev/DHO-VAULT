@@ -19,6 +19,9 @@ const updateActions = document.querySelector("#update-actions");
 const createUpdateBaselineButton = document.querySelector(
   "#create-update-baseline",
 );
+const viewUpdateAssetsButton = document.querySelector(
+  "#view-update-assets",
+);
 const categoryPanel = document.querySelector("#category-panel");
 const categoryStatus = document.querySelector("#category-status");
 const categoryGroups = document.querySelector("#category-groups");
@@ -93,6 +96,8 @@ function hideCategoryExport() {
 function setCategoryExportBusy(busy) {
   categoryExportBusy = busy;
   selectButton.disabled = busy;
+  createUpdateBaselineButton.disabled = busy;
+  viewUpdateAssetsButton.disabled = busy;
   assetSearchQuery.disabled = busy;
   assetSearchSubmit.disabled = busy;
   for (const button of categoryGroups.querySelectorAll(".category-button")) {
@@ -147,6 +152,10 @@ function clearSummary() {
   createUpdateBaselineButton.hidden = true;
   createUpdateBaselineButton.disabled = false;
   createUpdateBaselineButton.textContent = "현재 상태를 기준점으로 저장";
+  viewUpdateAssetsButton.hidden = true;
+  viewUpdateAssetsButton.disabled = false;
+  savePageButton.hidden = false;
+  saveAllButton.hidden = false;
 }
 
 function renderAssetUpdateStatus(status) {
@@ -157,10 +166,15 @@ function renderAssetUpdateStatus(status) {
   updateCounts.hidden =
     status.state === "missing_baseline" ||
     status.state === "different_directory";
-  updateActions.hidden = status.state !== "missing_baseline";
+  const canViewNewAssets =
+    status.state === "changes_detected" && status.addedCount > 0;
+  updateActions.hidden =
+    status.state !== "missing_baseline" && !canViewNewAssets;
   createUpdateBaselineButton.hidden = status.state !== "missing_baseline";
   createUpdateBaselineButton.disabled = false;
   createUpdateBaselineButton.textContent = "현재 상태를 기준점으로 저장";
+  viewUpdateAssetsButton.hidden = !canViewNewAssets;
+  viewUpdateAssetsButton.disabled = false;
 
   if (status.state === "missing_baseline") {
     updateStatus.textContent = `${formatNumber(status.currentCount)}개 자산 확인`;
@@ -192,6 +206,7 @@ function renderAssetUpdateError(error) {
   updateCounts.hidden = true;
   updateActions.hidden = true;
   createUpdateBaselineButton.hidden = true;
+  viewUpdateAssetsButton.hidden = true;
 }
 
 async function loadAssetUpdateStatus() {
@@ -202,6 +217,7 @@ async function loadAssetUpdateStatus() {
   updateCounts.hidden = true;
   updateActions.hidden = true;
   createUpdateBaselineButton.hidden = true;
+  viewUpdateAssetsButton.hidden = true;
 
   try {
     const status = await window.__TAURI__.core.invoke(
@@ -326,13 +342,17 @@ function renderGallery(page) {
   galleryGrid.replaceChildren();
   galleryGrid.dataset.status = "ready";
   const searchMode = page.mode === "search";
-  galleryTitle.textContent = searchMode
-    ? `검색: ${page.query}`
-    : page.path.join(" > ");
+  const updateMode = page.mode === "update";
+  const pathItemMode = searchMode || updateMode;
+  galleryTitle.textContent = updateMode
+    ? "이번 업데이트 신규"
+    : searchMode
+      ? `검색: ${page.query}`
+      : page.path.join(" > ");
 
   for (const [index, entry] of page.items.entries()) {
-    const path = searchMode ? entry.path : page.path;
-    const item = searchMode ? entry.thumbnail : entry;
+    const path = pathItemMode ? entry.path : page.path;
+    const item = pathItemMode ? entry.thumbnail : entry;
     const button = document.createElement("button");
     const frame = document.createElement("div");
     const image = document.createElement("img");
@@ -353,7 +373,7 @@ function renderGallery(page) {
     image.height = item.thumbnailHeight;
     image.loading = "lazy";
     image.decoding = "async";
-    if (searchMode) {
+    if (pathItemMode) {
       const category = document.createElement("strong");
       const identity = document.createElement("span");
       const size = document.createElement("span");
@@ -380,8 +400,12 @@ function renderGallery(page) {
   const pageCount = Math.ceil(page.totalCount / page.pageSize);
   galleryStatus.textContent = galleryPageStatus(page);
   pagePosition.textContent = `${formatNumber(currentNumber)} / ${formatNumber(pageCount)} 페이지`;
-  savePageButton.disabled = categoryExportBusy || page.items.length === 0;
-  saveAllButton.disabled = categoryExportBusy || page.items.length === 0;
+  savePageButton.hidden = updateMode;
+  saveAllButton.hidden = updateMode;
+  savePageButton.disabled =
+    updateMode || categoryExportBusy || page.items.length === 0;
+  saveAllButton.disabled =
+    updateMode || categoryExportBusy || page.items.length === 0;
   saveAllButton.textContent = searchMode
     ? "검색 결과 전체 저장"
     : "카테고리 전체 저장";
@@ -391,15 +415,24 @@ function renderGallery(page) {
 
 function galleryPageStatus(page) {
   if (page.totalCount === 0) {
-    return "검색 결과가 없습니다";
+    return page.mode === "update" && page.reviewRequiredCount > 0
+      ? `Viewer에 표시할 검증 이미지가 없습니다 · 분류 검토 필요 ${formatNumber(page.reviewRequiredCount)}개`
+      : "표시할 이미지가 없습니다";
   }
   const first = page.offset + 1;
   const last = page.offset + page.items.length;
-  return `${formatNumber(first)}–${formatNumber(last)} / ${formatNumber(page.totalCount)}개`;
+  const range = `${formatNumber(first)}–${formatNumber(last)} / ${formatNumber(page.totalCount)}개`;
+  return page.mode === "update" && page.reviewRequiredCount > 0
+    ? `${range} · 분류 검토 필요 ${formatNumber(page.reviewRequiredCount)}개`
+    : range;
 }
 
 async function saveCurrentPage() {
-  if (currentPage === null || currentPage.items.length === 0) {
+  if (
+    currentPage === null ||
+    currentPage.mode === "update" ||
+    currentPage.items.length === 0
+  ) {
     return;
   }
   const requestedPage = currentPage;
@@ -505,6 +538,7 @@ async function pollCategoryExport() {
 async function startAssetExport() {
   if (
     currentPage === null ||
+    currentPage.mode === "update" ||
     currentPage.items.length === 0 ||
     categoryExportBusy
   ) {
@@ -781,8 +815,63 @@ async function loadSearchPage(query, offset) {
   }
 }
 
+async function loadUpdatePage(offset) {
+  const requestId = ++galleryRequestId;
+  if (!categoryExportBusy) {
+    hideCategoryExport();
+  }
+  currentPage = null;
+  for (const button of categoryGroups.querySelectorAll(".category-button")) {
+    button.disabled = true;
+    button.setAttribute("aria-pressed", "false");
+  }
+  assetSearchQuery.disabled = true;
+  assetSearchSubmit.disabled = true;
+  galleryPanel.hidden = false;
+  galleryTitle.textContent = "이번 업데이트 신규";
+  galleryStatus.textContent = "신규 이미지를 불러오는 중입니다";
+  savePageButton.hidden = true;
+  saveAllButton.hidden = true;
+  savePageButton.disabled = true;
+  saveAllButton.disabled = true;
+  galleryGrid.dataset.status = "loading";
+  galleryGrid.replaceChildren();
+  pagePosition.textContent = "불러오는 중";
+  previousPage.disabled = true;
+  nextPage.disabled = true;
+
+  try {
+    const page = await window.__TAURI__.core.invoke(
+      "load_verified_update_page",
+      { offset },
+    );
+    if (requestId === galleryRequestId) {
+      renderGallery({ ...page, mode: "update" });
+    }
+  } catch (error) {
+    if (requestId === galleryRequestId) {
+      currentPage = null;
+      galleryGrid.dataset.status = "error";
+      galleryStatus.textContent = "신규 이미지를 불러오지 못했습니다";
+      pagePosition.textContent = String(error);
+    }
+  } finally {
+    if (requestId === galleryRequestId) {
+      for (const button of categoryGroups.querySelectorAll(
+        ".category-button",
+      )) {
+        button.disabled = categoryExportBusy;
+      }
+      assetSearchQuery.disabled = categoryExportBusy;
+      assetSearchSubmit.disabled = categoryExportBusy;
+    }
+  }
+}
+
 function loadPage(page, offset) {
-  if (page.mode === "search") {
+  if (page.mode === "update") {
+    loadUpdatePage(offset);
+  } else if (page.mode === "search") {
     loadSearchPage(page.query, offset);
   } else {
     loadCategoryPage(page.path, offset);
@@ -935,6 +1024,9 @@ createUpdateBaselineButton.addEventListener(
   "click",
   createAssetUpdateBaseline,
 );
+viewUpdateAssetsButton.addEventListener("click", () => {
+  loadUpdatePage(0);
+});
 cancelCategoryExportButton.addEventListener("click", cancelCategoryExport);
 detailDialog.addEventListener("close", () => {
   detailRequestId += 1;

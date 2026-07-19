@@ -42,11 +42,21 @@ pub struct AssetUpdateStatus {
     unchanged_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetUpdateReport {
+    pub status: AssetUpdateStatus,
+    pub added_assets: Vec<dho_client::AssetSnapshotEntry>,
+}
+
 pub fn load(path: &Path, resource_directory: &Path) -> Result<AssetUpdateStatus, String> {
+    load_report(path, resource_directory).map(|report| report.status)
+}
+
+pub fn load_report(path: &Path, resource_directory: &Path) -> Result<AssetUpdateReport, String> {
     let current = inspect_asset_snapshot(resource_directory)
         .map_err(|error| format!("현재 자산 목록을 확인하지 못했습니다: {error}"))?;
     let baseline = read(path)?;
-    compare(baseline.as_ref(), resource_directory, &current)
+    compare_report(baseline.as_ref(), resource_directory, &current)
 }
 
 pub fn create(path: &Path, resource_directory: &Path) -> Result<AssetUpdateStatus, String> {
@@ -58,7 +68,8 @@ pub fn create(path: &Path, resource_directory: &Path) -> Result<AssetUpdateStatu
         snapshot: current,
     };
     create_file(path, &baseline)?;
-    compare(Some(&baseline), resource_directory, &baseline.snapshot)
+    compare_report(Some(&baseline), resource_directory, &baseline.snapshot)
+        .map(|report| report.status)
 }
 
 fn read(path: &Path) -> Result<Option<AssetBaseline>, String> {
@@ -123,35 +134,41 @@ fn current_unix_seconds() -> Result<u64, String> {
         .map_err(|error| format!("현재 시간을 확인하지 못했습니다: {error}"))
 }
 
-fn compare(
+fn compare_report(
     baseline: Option<&AssetBaseline>,
     resource_directory: &Path,
     current: &AssetSnapshot,
-) -> Result<AssetUpdateStatus, String> {
+) -> Result<AssetUpdateReport, String> {
     let current_count = current.assets.len();
     let Some(baseline) = baseline else {
-        return Ok(AssetUpdateStatus {
-            state: AssetUpdateState::MissingBaseline,
-            baseline_created_at_unix_seconds: None,
-            current_count,
-            baseline_count: 0,
-            added_count: 0,
-            removed_count: 0,
-            changed_count: 0,
-            unchanged_count: 0,
+        return Ok(AssetUpdateReport {
+            status: AssetUpdateStatus {
+                state: AssetUpdateState::MissingBaseline,
+                baseline_created_at_unix_seconds: None,
+                current_count,
+                baseline_count: 0,
+                added_count: 0,
+                removed_count: 0,
+                changed_count: 0,
+                unchanged_count: 0,
+            },
+            added_assets: Vec::new(),
         });
     };
     let baseline_count = baseline.snapshot.assets.len();
     if baseline.resource_directory != resource_directory {
-        return Ok(AssetUpdateStatus {
-            state: AssetUpdateState::DifferentDirectory,
-            baseline_created_at_unix_seconds: Some(baseline.created_at_unix_seconds),
-            current_count,
-            baseline_count,
-            added_count: 0,
-            removed_count: 0,
-            changed_count: 0,
-            unchanged_count: 0,
+        return Ok(AssetUpdateReport {
+            status: AssetUpdateStatus {
+                state: AssetUpdateState::DifferentDirectory,
+                baseline_created_at_unix_seconds: Some(baseline.created_at_unix_seconds),
+                current_count,
+                baseline_count,
+                added_count: 0,
+                removed_count: 0,
+                changed_count: 0,
+                unchanged_count: 0,
+            },
+            added_assets: Vec::new(),
         });
     }
 
@@ -164,15 +181,18 @@ fn compare(
     } else {
         AssetUpdateState::ChangesDetected
     };
-    Ok(AssetUpdateStatus {
-        state,
-        baseline_created_at_unix_seconds: Some(baseline.created_at_unix_seconds),
-        current_count,
-        baseline_count,
-        added_count: diff.added.len(),
-        removed_count: diff.removed.len(),
-        changed_count: diff.changed.len(),
-        unchanged_count: diff.unchanged_count,
+    Ok(AssetUpdateReport {
+        status: AssetUpdateStatus {
+            state,
+            baseline_created_at_unix_seconds: Some(baseline.created_at_unix_seconds),
+            current_count,
+            baseline_count,
+            added_count: diff.added.len(),
+            removed_count: diff.removed.len(),
+            changed_count: diff.changed.len(),
+            unchanged_count: diff.unchanged_count,
+        },
+        added_assets: diff.added,
     })
 }
 
@@ -262,9 +282,10 @@ mod tests {
             (10, 103, 3, 32, 32),
         ]);
 
+        let report = compare_report(Some(&baseline), &resource_directory, &current)
+            .expect("compare asset baseline");
         assert_eq!(
-            compare(Some(&baseline), &resource_directory, &current)
-                .expect("compare asset baseline"),
+            report.status,
             AssetUpdateStatus {
                 state: AssetUpdateState::ChangesDetected,
                 baseline_created_at_unix_seconds: Some(1_720_000_000),
@@ -276,13 +297,17 @@ mod tests {
                 unchanged_count: 1,
             }
         );
+        assert_eq!(report.added_assets.len(), 1);
+        assert_eq!(report.added_assets[0].icon_id, 103);
     }
 
     #[test]
     fn distinguishes_missing_unchanged_and_different_directory_baselines() {
         let resource_directory = PathBuf::from(r"G:\Games\GV Online KR\0010\0001");
         let current = snapshot(&[(10, 100, 0, 32, 32)]);
-        let missing = compare(None, &resource_directory, &current).expect("missing baseline");
+        let missing = compare_report(None, &resource_directory, &current)
+            .expect("missing baseline")
+            .status;
         assert_eq!(missing.state, AssetUpdateState::MissingBaseline);
         assert_eq!(missing.current_count, 1);
 
@@ -291,8 +316,9 @@ mod tests {
             created_at_unix_seconds: 1_720_000_000,
             snapshot: current.clone(),
         };
-        let unchanged =
-            compare(Some(&matching), &resource_directory, &current).expect("unchanged baseline");
+        let unchanged = compare_report(Some(&matching), &resource_directory, &current)
+            .expect("unchanged baseline")
+            .status;
         assert_eq!(unchanged.state, AssetUpdateState::Unchanged);
         assert_eq!(unchanged.unchanged_count, 1);
 
@@ -301,8 +327,9 @@ mod tests {
             created_at_unix_seconds: 1_710_000_000,
             snapshot: current.clone(),
         };
-        let different =
-            compare(Some(&different), &resource_directory, &current).expect("different directory");
+        let different = compare_report(Some(&different), &resource_directory, &current)
+            .expect("different directory")
+            .status;
         assert_eq!(different.state, AssetUpdateState::DifferentDirectory);
         assert_eq!(different.added_count, 0);
     }
