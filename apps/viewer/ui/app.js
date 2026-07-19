@@ -8,6 +8,17 @@ const directoryDetails = document.querySelector("#directory-details");
 const gameDirectory = document.querySelector("#game-directory");
 const resourceDirectory = document.querySelector("#resource-directory");
 const archiveList = document.querySelector("#archive-list");
+const updatePanel = document.querySelector("#update-panel");
+const updateStatus = document.querySelector("#update-status");
+const updateMessage = document.querySelector("#update-message");
+const updateCounts = document.querySelector("#update-counts");
+const updateAddedCount = document.querySelector("#update-added-count");
+const updateChangedCount = document.querySelector("#update-changed-count");
+const updateRemovedCount = document.querySelector("#update-removed-count");
+const updateActions = document.querySelector("#update-actions");
+const createUpdateBaselineButton = document.querySelector(
+  "#create-update-baseline",
+);
 const categoryPanel = document.querySelector("#category-panel");
 const categoryStatus = document.querySelector("#category-status");
 const categoryGroups = document.querySelector("#category-groups");
@@ -50,6 +61,7 @@ let currentCategoryExport = null;
 let categoryExportPollTimer = null;
 let categoryExportBusy = false;
 let categoryExportCancelRequested = false;
+let updateRequestId = 0;
 
 const CATEGORY_EXPORT_POLL_INTERVAL = 250;
 
@@ -126,6 +138,109 @@ function clearSummary() {
   gameDirectory.textContent = "";
   resourceDirectory.textContent = "";
   archiveList.replaceChildren();
+  updateRequestId += 1;
+  updatePanel.hidden = true;
+  updateStatus.textContent = "";
+  updateMessage.textContent = "";
+  updateCounts.hidden = true;
+  updateActions.hidden = true;
+  createUpdateBaselineButton.hidden = true;
+  createUpdateBaselineButton.disabled = false;
+  createUpdateBaselineButton.textContent = "현재 상태를 기준점으로 저장";
+}
+
+function renderAssetUpdateStatus(status) {
+  updatePanel.hidden = false;
+  updateAddedCount.textContent = formatNumber(status.addedCount);
+  updateChangedCount.textContent = formatNumber(status.changedCount);
+  updateRemovedCount.textContent = formatNumber(status.removedCount);
+  updateCounts.hidden =
+    status.state === "missing_baseline" ||
+    status.state === "different_directory";
+  updateActions.hidden = status.state !== "missing_baseline";
+  createUpdateBaselineButton.hidden = status.state !== "missing_baseline";
+  createUpdateBaselineButton.disabled = false;
+  createUpdateBaselineButton.textContent = "현재 상태를 기준점으로 저장";
+
+  if (status.state === "missing_baseline") {
+    updateStatus.textContent = `${formatNumber(status.currentCount)}개 자산 확인`;
+    updateMessage.textContent =
+      "아직 비교 기준점이 없습니다. 현재 상태를 저장하면 다음 클라이언트 업데이트부터 새로 추가된 자산을 찾을 수 있습니다.";
+    return;
+  }
+  if (status.state === "unchanged") {
+    updateStatus.textContent = `${formatBaselineDate(status.baselineCreatedAtUnixSeconds)} 기준`;
+    updateMessage.textContent = `저장된 기준점과 현재 ${formatNumber(status.currentCount)}개 자산이 같습니다.`;
+    return;
+  }
+  if (status.state === "changes_detected") {
+    updateStatus.textContent = `${formatBaselineDate(status.baselineCreatedAtUnixSeconds)} 이후 변경`;
+    updateMessage.textContent =
+      "업데이트 변경을 감지했습니다. 신규 항목을 검토하기 전에는 저장된 기준점을 바꾸지 않습니다.";
+    return;
+  }
+
+  updateStatus.textContent = `${formatBaselineDate(status.baselineCreatedAtUnixSeconds)} 기준`;
+  updateMessage.textContent =
+    "저장된 기준점이 현재 게임 폴더와 달라 비교하지 않았습니다. 기존 기준점은 변경하지 않았습니다.";
+}
+
+function renderAssetUpdateError(error) {
+  updatePanel.hidden = false;
+  updateStatus.textContent = "확인하지 못함";
+  updateMessage.textContent = `업데이트 상태를 확인하지 못했습니다: ${String(error)}`;
+  updateCounts.hidden = true;
+  updateActions.hidden = true;
+  createUpdateBaselineButton.hidden = true;
+}
+
+async function loadAssetUpdateStatus() {
+  const requestId = ++updateRequestId;
+  updatePanel.hidden = false;
+  updateStatus.textContent = "확인 중";
+  updateMessage.textContent = "저장된 기준점과 현재 클라이언트를 비교하고 있습니다.";
+  updateCounts.hidden = true;
+  updateActions.hidden = true;
+  createUpdateBaselineButton.hidden = true;
+
+  try {
+    const status = await window.__TAURI__.core.invoke(
+      "load_asset_update_status",
+    );
+    if (requestId === updateRequestId) {
+      renderAssetUpdateStatus(status);
+    }
+  } catch (error) {
+    if (requestId === updateRequestId) {
+      renderAssetUpdateError(error);
+    }
+  }
+}
+
+async function createAssetUpdateBaseline() {
+  const requestId = ++updateRequestId;
+  selectButton.disabled = true;
+  createUpdateBaselineButton.disabled = true;
+  createUpdateBaselineButton.textContent = "저장 중…";
+  updateStatus.textContent = "기준점 저장 중";
+  updateMessage.textContent = "현재 자산 목록을 안전하게 저장하고 있습니다.";
+
+  try {
+    const status = await window.__TAURI__.core.invoke(
+      "create_asset_update_baseline",
+    );
+    if (requestId === updateRequestId) {
+      renderAssetUpdateStatus(status);
+    }
+  } catch (error) {
+    if (requestId === updateRequestId) {
+      renderAssetUpdateError(error);
+    }
+  } finally {
+    if (requestId === updateRequestId) {
+      selectButton.disabled = false;
+    }
+  }
 }
 
 function renderCategories(categories) {
@@ -678,6 +793,16 @@ function formatNumber(value) {
   return new Intl.NumberFormat("ko-KR").format(value);
 }
 
+function formatBaselineDate(unixSeconds) {
+  if (unixSeconds === null) {
+    return "저장 시각 없음";
+  }
+  return new Intl.DateTimeFormat("ko-KR", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(unixSeconds * 1000));
+}
+
 function renderSummary(summary) {
   gameDirectory.textContent = summary.gameDirectory;
   resourceDirectory.textContent = summary.resourceDirectory;
@@ -742,6 +867,7 @@ async function loadSavedGameDirectory() {
       return;
     }
     renderOpenedGameDirectory(opened, true);
+    await loadAssetUpdateStatus();
   } catch (error) {
     setStatus(
       "error",
@@ -765,6 +891,7 @@ selectButton.addEventListener("click", async () => {
       return;
     }
     renderOpenedGameDirectory(opened, false);
+    await loadAssetUpdateStatus();
   } catch (error) {
     setStatus("error", "게임 폴더를 확인하지 못했습니다", String(error));
   } finally {
@@ -804,6 +931,10 @@ closeDetailButton.addEventListener("click", closeDetail);
 downloadDetailButton.addEventListener("click", saveCurrentDetail);
 savePageButton.addEventListener("click", saveCurrentPage);
 saveAllButton.addEventListener("click", startAssetExport);
+createUpdateBaselineButton.addEventListener(
+  "click",
+  createAssetUpdateBaseline,
+);
 cancelCategoryExportButton.addEventListener("click", cancelCategoryExport);
 detailDialog.addEventListener("close", () => {
   detailRequestId += 1;
