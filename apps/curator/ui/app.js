@@ -18,8 +18,10 @@ const sampleStatus = document.querySelector("#sample-status");
 const boundaryGrid = document.querySelector("#boundary-grid");
 const sampleGrid = document.querySelector("#sample-grid");
 const assemblyPanel = document.querySelector("#assembly-panel");
+const assemblyLabel = document.querySelector("#assembly-label");
 const assemblyTitle = document.querySelector("#assembly-title");
 const assemblyStatus = document.querySelector("#assembly-status");
+const assemblyDescription = document.querySelector("#assembly-description");
 const assemblyGridLabel = document.querySelector("#assembly-grid-label");
 const assemblyTileGrid = document.querySelector("#assembly-tile-grid");
 const assemblyResult = document.querySelector("#assembly-result");
@@ -85,8 +87,11 @@ function createPngUrl(png, urls) {
 function clearAssembly() {
   revokeAssemblyUrls();
   assemblyPanel.hidden = true;
+  assemblyLabel.textContent = "VERIFIED ASSEMBLY";
   assemblyTitle.textContent = "검증된 조립 결과";
   assemblyStatus.textContent = "";
+  assemblyDescription.textContent =
+    "사람이 확인한 행·열 순서로 원본 타일을 배치한 결과입니다. 이 화면은 검수용이며 미검증 조립은 표시하지 않습니다.";
   assemblyGridLabel.textContent = "";
   assemblyTileGrid.style.removeProperty("--assembly-columns");
   assemblyTileGrid.replaceChildren();
@@ -279,7 +284,17 @@ function createSampleCard(sample, boundaryLabel = null) {
     actions.className = "sample-card-actions";
     actions.append(
       createActionButton("조립 결과 보기", () =>
-        openAssembly(sample.prefix, sample.blockIndex),
+        openAssembly(sample.prefix, sample.blockIndex, false),
+      ),
+    );
+    card.append(actions);
+  }
+  if (sample.hasCandidateAssembly) {
+    const actions = document.createElement("div");
+    actions.className = "sample-card-actions";
+    actions.append(
+      createActionButton("조립 후보 검토", () =>
+        openAssembly(sample.prefix, sample.blockIndex, true),
       ),
     );
     card.append(actions);
@@ -321,20 +336,32 @@ function renderAssembly(result) {
   assemblyResult.append(imageStage, caption);
 }
 
-async function openAssembly(prefix, blockIndex) {
+async function openAssembly(prefix, blockIndex, candidate) {
   clearAssembly();
   assemblyPanel.hidden = false;
-  assemblyTitle.textContent = `${prefix.toUpperCase()} · 블록 ${formatNumber(blockIndex)} 조립 결과`;
-  assemblyStatus.textContent = "검증된 원본 타일을 조립하는 중…";
+  assemblyLabel.textContent = candidate
+    ? "CANDIDATE ASSEMBLY"
+    : "VERIFIED ASSEMBLY";
+  assemblyTitle.textContent = `${prefix.toUpperCase()} · 블록 ${formatNumber(blockIndex)} ${candidate ? "조립 후보" : "조립 결과"}`;
+  assemblyStatus.textContent = candidate
+    ? "확정되지 않은 후보를 검토용으로 조립하는 중…"
+    : "검증된 원본 타일을 조립하는 중…";
+  assemblyDescription.textContent = candidate
+    ? "인덱스 구조에서 얻은 행·열 후보입니다. 완성 이미지가 자연스러운지 사람이 확인하기 전에는 Viewer에 노출되지 않습니다."
+    : "사람이 확인한 행·열 순서로 원본 타일을 배치한 결과입니다.";
   setBusy(true);
 
   try {
-    const result = await window.__TAURI__.core.invoke("preview_verified_assembly", {
+    const command = candidate
+      ? "preview_candidate_assembly"
+      : "preview_verified_assembly";
+    const result = await window.__TAURI__.core.invoke(command, {
       prefix,
       blockIndex,
     });
     renderAssembly(result);
-    assemblyStatus.textContent = `블록 ${formatIdRange(result.firstBlock, result.lastBlock)} · ${result.columns}열 × ${result.rows}행 · ${result.width}×${result.height}`;
+    const status = verificationLabel(result.verificationStatus);
+    assemblyStatus.textContent = `${status} · 블록 ${formatIdRange(result.firstBlock, result.lastBlock)} · ${result.columns}열 × ${result.rows}행 · ${result.width}×${result.height}`;
     assemblyPanel.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (error) {
     assemblyStatus.textContent = "조립하지 못함";

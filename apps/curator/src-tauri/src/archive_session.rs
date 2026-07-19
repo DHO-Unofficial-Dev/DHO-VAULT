@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use dho_catalog::{CatalogRecordKey, RecordClassification, assembly_plan, classify_record};
+use dho_catalog::{
+    CatalogRecordKey, RecordClassification, VerificationStatus, assembly_candidate_plan,
+    assembly_plan, classify_record,
+};
 use dho_client::SUPPORTED_ARCHIVE_PREFIXES;
 use dho_extract::{ExtractError, LoadedArchive, ResourceKey};
 use serde::Serialize;
@@ -36,6 +39,7 @@ pub struct ResourceSample {
     pub height: u32,
     pub classification: RecordClassification,
     pub has_verified_assembly: bool,
+    pub has_candidate_assembly: bool,
     pub png: Vec<u8>,
 }
 
@@ -50,6 +54,7 @@ pub struct AssemblyPreview {
     pub rows: u32,
     pub width: u32,
     pub height: u32,
+    pub verification_status: VerificationStatus,
     pub tiles: Vec<ResourceSample>,
     pub png: Vec<u8>,
 }
@@ -487,6 +492,72 @@ impl CuratorSession {
             rows: plan.rule.rows,
             width: assembled.width,
             height: assembled.height,
+            verification_status: VerificationStatus::HumanVerified,
+            tiles,
+            png: assembled.png,
+        })
+    }
+
+    pub fn candidate_assembly_preview(
+        &mut self,
+        prefix: &str,
+        block_index: u32,
+    ) -> Result<AssemblyPreview, CuratorSessionError> {
+        let normalized_prefix = normalize_prefix(prefix)?;
+        let plan = assembly_candidate_plan(&normalized_prefix, block_index).ok_or_else(|| {
+            CuratorSessionError::CandidateAssemblyNotFound {
+                prefix: normalized_prefix.clone(),
+                block_index,
+            }
+        })?;
+        let archive = self.archive(&normalized_prefix)?;
+        let assembled = archive
+            .extract_candidate_assembly(
+                block_index,
+                MAX_SAMPLE_OUTPUT_SIZE,
+                MAX_ASSEMBLED_OUTPUT_SIZE,
+            )
+            .map_err(|source| CuratorSessionError::Extract {
+                prefix: normalized_prefix.clone(),
+                source,
+            })?
+            .ok_or_else(|| CuratorSessionError::CandidateAssemblyNotFound {
+                prefix: normalized_prefix.clone(),
+                block_index,
+            })?;
+
+        let mut tiles = Vec::new();
+        for tile_block_index in plan.first_block..=plan.last_block {
+            let record = archive
+                .records()
+                .iter()
+                .find(|record| record.block_index == tile_block_index)
+                .copied()
+                .ok_or_else(|| CuratorSessionError::AssemblyTileRecordNotFound {
+                    prefix: normalized_prefix.clone(),
+                    block_index: tile_block_index,
+                })?;
+            tiles.push(extract_sample(
+                archive,
+                &normalized_prefix,
+                ResourceKey {
+                    group_code: record.group_code,
+                    icon_id: record.icon_id,
+                    block_index: record.block_index,
+                },
+            )?);
+        }
+
+        Ok(AssemblyPreview {
+            prefix: normalized_prefix,
+            requested_block_index: block_index,
+            first_block: assembled.first_block,
+            last_block: assembled.last_block,
+            columns: plan.rule.columns,
+            rows: plan.rule.rows,
+            width: assembled.width,
+            height: assembled.height,
+            verification_status: VerificationStatus::Candidate,
             tiles,
             png: assembled.png,
         })
@@ -541,6 +612,7 @@ fn extract_sample(
             block_index: key.block_index,
         }),
         has_verified_assembly: assembly_plan(prefix, key.block_index).is_some(),
+        has_candidate_assembly: assembly_candidate_plan(prefix, key.block_index).is_some(),
         png: extracted.png,
     })
 }
@@ -658,6 +730,10 @@ pub enum CuratorSessionError {
         prefix: String,
         block_index: u32,
     },
+    CandidateAssemblyNotFound {
+        prefix: String,
+        block_index: u32,
+    },
     AssemblyTileRecordNotFound {
         prefix: String,
         block_index: u32,
@@ -720,6 +796,13 @@ impl fmt::Display for CuratorSessionError {
                 formatter,
                 "{prefix} 블록 {block_index}에는 사람이 검증한 조립 규칙이 없습니다."
             ),
+            Self::CandidateAssemblyNotFound {
+                prefix,
+                block_index,
+            } => write!(
+                formatter,
+                "{prefix} 블록 {block_index}에는 검토할 조립 후보가 없습니다."
+            ),
             Self::AssemblyTileRecordNotFound {
                 prefix,
                 block_index,
@@ -748,6 +831,7 @@ impl Error for CuratorSessionError {
             | Self::IdRangeNotFound { .. }
             | Self::ArchiveRangeNotFound { .. }
             | Self::VerifiedAssemblyNotFound { .. }
+            | Self::CandidateAssemblyNotFound { .. }
             | Self::AssemblyTileRecordNotFound { .. } => None,
         }
     }

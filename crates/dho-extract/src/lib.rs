@@ -2,7 +2,7 @@
 
 //! Read-only loading and on-demand extraction of indexed DHO image resources.
 
-use dho_catalog::{AssemblyPlan, VerificationStatus, assembly_plan};
+use dho_catalog::{AssemblyPlan, VerificationStatus, assembly_candidate_plan, assembly_plan};
 use dho_core::{
     ArchiveBlockDecodeError, ArchiveDiagnostic, ArchiveLayout, BlockScanError, IndexParseError,
     IndexRecord, IndexedArchive, build_archive_layout, scan_data_file,
@@ -211,6 +211,26 @@ impl LoadedArchive {
             .map(Some)
     }
 
+    /// Joins an unverified candidate for Curator review without exposing it to Viewer flows.
+    pub fn extract_candidate_assembly(
+        &self,
+        block_index: u32,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+    ) -> Result<Option<ExtractedAssembly>, ExtractError> {
+        let Some(plan) = assembly_candidate_plan(self.prefix.as_str(), block_index) else {
+            return Ok(None);
+        };
+
+        self.extract_assembly_with_status(
+            plan,
+            VerificationStatus::Candidate,
+            max_tile_output_size,
+            max_assembled_output_size,
+        )
+        .map(Some)
+    }
+
     /// Joins a verified image and returns only a bounded PNG thumbnail.
     pub fn extract_verified_assembly_thumbnail(
         &self,
@@ -244,7 +264,12 @@ impl LoadedArchive {
         max_height: u32,
         max_thumbnail_output_size: usize,
     ) -> Result<ExtractedAssemblyThumbnail, ExtractError> {
-        let image = self.decode_assembly(plan, max_tile_output_size, max_assembled_output_size)?;
+        let image = self.decode_assembly(
+            plan,
+            VerificationStatus::HumanVerified,
+            max_tile_output_size,
+            max_assembled_output_size,
+        )?;
         let thumbnail = image
             .thumbnail(max_width, max_height, max_thumbnail_output_size)
             .map_err(ExtractError::Thumbnail)?;
@@ -267,7 +292,27 @@ impl LoadedArchive {
         max_tile_output_size: usize,
         max_assembled_output_size: usize,
     ) -> Result<ExtractedAssembly, ExtractError> {
-        let image = self.decode_assembly(plan, max_tile_output_size, max_assembled_output_size)?;
+        self.extract_assembly_with_status(
+            plan,
+            VerificationStatus::HumanVerified,
+            max_tile_output_size,
+            max_assembled_output_size,
+        )
+    }
+
+    fn extract_assembly_with_status(
+        &self,
+        plan: AssemblyPlan,
+        expected_status: VerificationStatus,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+    ) -> Result<ExtractedAssembly, ExtractError> {
+        let image = self.decode_assembly(
+            plan,
+            expected_status,
+            max_tile_output_size,
+            max_assembled_output_size,
+        )?;
         let png = image.encode_png().map_err(ExtractError::PngEncode)?;
 
         Ok(ExtractedAssembly {
@@ -282,6 +327,7 @@ impl LoadedArchive {
     fn decode_assembly(
         &self,
         plan: AssemblyPlan,
+        expected_status: VerificationStatus,
         max_tile_output_size: usize,
         max_assembled_output_size: usize,
     ) -> Result<RgbaImage, ExtractError> {
@@ -291,7 +337,7 @@ impl LoadedArchive {
                 actual: self.prefix.as_str().to_owned(),
             });
         }
-        if plan.rule.status != VerificationStatus::HumanVerified {
+        if plan.rule.status != expected_status {
             return Err(ExtractError::AssemblyRuleNotVerified {
                 first_block: plan.first_block,
                 last_block: plan.last_block,

@@ -3,6 +3,7 @@
 //! Human-reviewed category metadata kept separate from raw archive facts.
 
 mod assembly;
+mod is;
 mod sb;
 mod sc;
 mod sd;
@@ -267,6 +268,8 @@ pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
         Catalog::new(sc::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("sd") {
         Catalog::new(sd::RECORD_RULES, &[]).classify(key)
+    } else if key.archive.eq_ignore_ascii_case("is") {
+        Catalog::new(is::RECORD_RULES, &[]).classify(key)
     } else {
         RecordClassification::unknown()
     }
@@ -283,6 +286,14 @@ pub fn reservation_candidate(archive: &str, icon_id: u32) -> Option<ReservationS
 /// Returns the verified completed-image range and tile position for one physical block.
 pub fn assembly_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
     assembly::find_plan(archive, block_index)
+}
+
+/// Returns an unverified assembly candidate for Curator review only.
+///
+/// Candidate plans must never be displayed by the general-user Viewer until
+/// a person has reviewed the completed image and promoted the rule.
+pub fn assembly_candidate_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
+    assembly::find_candidate_plan(archive, block_index)
 }
 
 #[cfg(test)]
@@ -312,6 +323,15 @@ mod tests {
             archive: "sd",
             group_code: 0,
             icon_id: 0,
+            block_index,
+        }
+    }
+
+    fn is_key(icon_id: u32, block_index: u32) -> CatalogRecordKey<'static> {
+        CatalogRecordKey {
+            archive: "is",
+            group_code: 0,
+            icon_id,
             block_index,
         }
     }
@@ -346,6 +366,25 @@ mod tests {
             classification.meaning_status,
             VerificationStatus::HumanVerified
         );
+    }
+
+    #[test]
+    fn classifies_all_is_tiles_as_client_loading_splash_images() {
+        for key in [is_key(0, 0), is_key(171, 107)] {
+            let classification = classify_record(key);
+            assert_eq!(
+                classification.category.map(CategoryPath::segments),
+                Some(["클라이언트", "로딩·스플래시 이미지"].as_slice())
+            );
+            assert_eq!(
+                classification.boundary_status,
+                VerificationStatus::HumanVerified
+            );
+            assert_eq!(
+                classification.meaning_status,
+                VerificationStatus::HumanVerified
+            );
+        }
     }
 
     fn assert_sd_category(block_index: u32, expected: &[&str]) {
