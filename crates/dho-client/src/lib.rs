@@ -22,8 +22,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 10] =
-    ["im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sw", "is"];
+pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 11] = [
+    "im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sw", "sx", "is",
+];
 pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 32;
 
 /// Resolves the physical subdirectory for an archive while preserving callers that already pass
@@ -1255,7 +1256,7 @@ impl fmt::Display for GameDirectoryError {
             ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, sg, sw, is)를 찾지 못했습니다: {}",
+                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, sg, sw, sx, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -1479,6 +1480,11 @@ mod tests {
             &[[0, 0, 80, 80, 0]],
             1,
         );
+        write_index_records(
+            &secondary_resources.join("sx000000.bin"),
+            &[[0, 0, 256, 384, 0]],
+            1,
+        );
         write_index(&resources.join("is000000.bin"), 20);
 
         let summary = inspect_game_directory(&directory.0).expect("inspect game directory");
@@ -1489,7 +1495,7 @@ mod tests {
                 .iter()
                 .map(|archive| archive.prefix.as_str())
                 .collect::<Vec<_>>(),
-            ["im", "sa", "sb", "se", "sf", "sg", "sw", "is"]
+            ["im", "sa", "sb", "se", "sf", "sg", "sw", "sx", "is"]
         );
         assert_eq!(
             PathBuf::from(&summary.resource_directory),
@@ -1512,6 +1518,10 @@ mod tests {
                 },
                 VerifiedCategorySummary {
                     path: ["UI 이미지", "텍스트 라벨"].map(str::to_owned).to_vec(),
+                    asset_count: 1,
+                },
+                VerifiedCategorySummary {
+                    path: ["이벤트", "포트레잇"].map(str::to_owned).to_vec(),
                     asset_count: 1,
                 },
                 VerifiedCategorySummary {
