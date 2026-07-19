@@ -22,9 +22,28 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 9] =
-    ["im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "is"];
+pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 10] =
+    ["im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sw", "is"];
 pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 32;
+
+/// Resolves the physical subdirectory for an archive while preserving callers that already pass
+/// a concrete archive directory.
+pub fn resolve_archive_directory(resource_root: impl AsRef<Path>, prefix: &str) -> PathBuf {
+    let resource_root = resource_root.as_ref();
+    if resource_root.join(format!("{prefix}000000.bin")).is_file() {
+        return resource_root.to_owned();
+    }
+
+    let subdirectory = if matches!(
+        prefix.to_ascii_lowercase().as_str(),
+        "sw" | "sx" | "sy" | "sz"
+    ) {
+        "0002"
+    } else {
+        "0001"
+    };
+    resource_root.join(subdirectory)
+}
 
 const THUMBNAIL_MAX_WIDTH: u32 = 160;
 const THUMBNAIL_MAX_HEIGHT: u32 = 160;
@@ -785,7 +804,7 @@ impl ViewerSession {
         let mut assets = Vec::new();
 
         for prefix in SUPPORTED_ARCHIVE_PREFIXES {
-            if !resource_directory
+            if !resolve_archive_directory(&resource_directory, prefix)
                 .join(format!("{prefix}000000.bin"))
                 .is_file()
             {
@@ -861,7 +880,7 @@ impl ViewerSession {
             let mut assets = Vec::new();
 
             for prefix in SUPPORTED_ARCHIVE_PREFIXES {
-                if !resource_directory
+                if !resolve_archive_directory(&resource_directory, prefix)
                     .join(format!("{prefix}000000.bin"))
                     .is_file()
                 {
@@ -929,7 +948,8 @@ impl ViewerSession {
             .clone()
             .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
         if !self.archives.contains_key(prefix) {
-            let archive = LoadedArchive::open(&resource_directory, prefix).map_err(|source| {
+            let archive_directory = resolve_archive_directory(&resource_directory, prefix);
+            let archive = LoadedArchive::open(archive_directory, prefix).map_err(|source| {
                 ViewerSessionError::OpenArchive {
                     prefix: prefix.to_owned(),
                     source,
@@ -984,7 +1004,7 @@ pub fn inspect_game_directory(
         return Err(GameDirectoryError::MissingExecutable { path: executable });
     }
 
-    let resource_directory = game_directory.join("0010").join("0001");
+    let resource_directory = game_directory.join("0010");
     if !resource_directory.is_dir() {
         return Err(GameDirectoryError::MissingResourceDirectory {
             path: resource_directory,
@@ -994,7 +1014,8 @@ pub fn inspect_game_directory(
     let mut archives = Vec::new();
     let mut verified_assets = BTreeMap::<Vec<&'static str>, BTreeSet<(String, u32)>>::new();
     for prefix in SUPPORTED_ARCHIVE_PREFIXES {
-        let path = resource_directory.join(format!("{prefix}000000.bin"));
+        let path = resolve_archive_directory(&resource_directory, prefix)
+            .join(format!("{prefix}000000.bin"));
         if !path.is_file() {
             continue;
         }
@@ -1234,7 +1255,7 @@ impl fmt::Display for GameDirectoryError {
             ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, sg, is)를 찾지 못했습니다: {}",
+                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, sg, sw, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -1437,6 +1458,8 @@ mod tests {
     fn reports_supported_archive_headers() {
         let directory = TestDirectory::new();
         let resources = directory.prepare_game();
+        let secondary_resources = resources.parent().expect("0010 directory").join("0002");
+        fs::create_dir(&secondary_resources).expect("create secondary resource directory");
         write_index_records(&resources.join("im000000.bin"), &[[0, 0, 128, 128, 0]], 1);
         write_index_records(&resources.join("sa000000.bin"), &[[0, 0, 48, 48, 0]], 1);
         write_index(&resources.join("sb000000.bin"), 10);
@@ -1451,6 +1474,11 @@ mod tests {
             &[[1, 0, 40, 24, 0], [2_000, 0, 40, 24, 0]],
             1,
         );
+        write_index_records(
+            &secondary_resources.join("sw000000.bin"),
+            &[[0, 0, 80, 80, 0]],
+            1,
+        );
         write_index(&resources.join("is000000.bin"), 20);
 
         let summary = inspect_game_directory(&directory.0).expect("inspect game directory");
@@ -1461,7 +1489,11 @@ mod tests {
                 .iter()
                 .map(|archive| archive.prefix.as_str())
                 .collect::<Vec<_>>(),
-            ["im", "sa", "sb", "se", "sf", "sg", "is"]
+            ["im", "sa", "sb", "se", "sf", "sg", "sw", "is"]
+        );
+        assert_eq!(
+            PathBuf::from(&summary.resource_directory),
+            directory.0.join("0010")
         );
         assert_eq!(summary.archives[0].record_count, 1);
         assert_eq!(summary.archives[0].group_count, 1);
@@ -1487,6 +1519,10 @@ mod tests {
                     asset_count: 1,
                 },
                 VerifiedCategorySummary {
+                    path: ["인물", "캐릭터 얼굴"].map(str::to_owned).to_vec(),
+                    asset_count: 1,
+                },
+                VerifiedCategorySummary {
                     path: ["장비", "방어구", "몸"].map(str::to_owned).to_vec(),
                     asset_count: 1,
                 },
@@ -1501,6 +1537,43 @@ mod tests {
                     asset_count: 1,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn loads_verified_thumbnails_from_the_secondary_resource_directory() {
+        let directory = TestDirectory::new();
+        let primary_resources = directory.prepare_game();
+        let resource_root = primary_resources.parent().expect("0010 directory");
+        let secondary_resources = resource_root.join("0002");
+        fs::create_dir(&secondary_resources).expect("create secondary resource directory");
+        write_index_records(
+            &secondary_resources.join("sw000000.bin"),
+            &[[0, 0, 1, 1, 0]],
+            1,
+        );
+        write_data_file(
+            &secondary_resources.join("sw000001.bin"),
+            &[vec![0, 0, 255, 255]],
+        );
+
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(resource_root);
+        let category = ["인물", "캐릭터 얼굴"].map(str::to_owned);
+        let page = session
+            .category_page(&category, 0, 1)
+            .expect("load SW thumbnail page");
+
+        assert_eq!(page.total_count, 1);
+        assert_eq!(page.items[0].archive, "sw");
+        assert_eq!(
+            (page.items[0].source_width, page.items[0].source_height),
+            (1, 1)
+        );
+        assert!(
+            page.items[0]
+                .thumbnail_data_url
+                .starts_with("data:image/png;base64,")
         );
     }
 

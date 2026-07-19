@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::SUPPORTED_ARCHIVE_PREFIXES;
+use crate::{SUPPORTED_ARCHIVE_PREFIXES, resolve_archive_directory};
 use dho_core::{IndexParseError, IndexedArchive};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -141,7 +141,8 @@ pub fn inspect_asset_snapshot(
     let mut assets = Vec::new();
     let mut archives = 0;
     for prefix in SUPPORTED_ARCHIVE_PREFIXES {
-        let path = resource_directory.join(format!("{prefix}000000.bin"));
+        let path = resolve_archive_directory(resource_directory, prefix)
+            .join(format!("{prefix}000000.bin"));
         if !path.is_file() {
             continue;
         }
@@ -286,7 +287,7 @@ impl fmt::Display for AssetSnapshotError {
             ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, sg, is)를 찾지 못했습니다: {}",
+                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, sf, sg, sw, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -456,6 +457,27 @@ mod tests {
                 entry("is", 1, 5, 0, 128, 128),
                 entry("sb", 10, 100, 1, 16, 16),
                 entry("sb", 10, 200, 2, 32, 64),
+            ]
+        );
+    }
+
+    #[test]
+    fn reads_indexes_from_both_resource_subdirectories() {
+        let directory = TestDirectory::new();
+        let primary = directory.0.join("0001");
+        let secondary = directory.0.join("0002");
+        fs::create_dir(&primary).expect("create primary resource directory");
+        fs::create_dir(&secondary).expect("create secondary resource directory");
+        write_index(&primary.join("sb000000.bin"), &[[100, 1, 16, 16, 10]]);
+        write_index(&secondary.join("sw000000.bin"), &[[0, 0, 80, 80, 0]]);
+
+        let snapshot = inspect_asset_snapshot(&directory.0).expect("inspect split resources");
+
+        assert_eq!(
+            snapshot.assets,
+            [
+                entry("sb", 10, 100, 1, 16, 16),
+                entry("sw", 0, 0, 0, 80, 80),
             ]
         );
     }
