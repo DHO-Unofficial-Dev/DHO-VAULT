@@ -10,6 +10,7 @@ mod sb;
 mod sc;
 mod sd;
 mod se;
+mod sf;
 
 pub use assembly::{AssemblyPlan, AssemblyRule, TileOrder};
 use serde::Serialize;
@@ -277,6 +278,8 @@ pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
         Catalog::new(sd::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("se") {
         Catalog::new(se::RECORD_RULES, &[]).classify(key)
+    } else if key.archive.eq_ignore_ascii_case("sf") {
+        Catalog::new(sf::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("is") {
         Catalog::new(is::RECORD_RULES, &[]).classify(key)
     } else {
@@ -366,6 +369,15 @@ mod tests {
     fn se_key(group_code: u32, icon_id: u32, block_index: u32) -> CatalogRecordKey<'static> {
         CatalogRecordKey {
             archive: "se",
+            group_code,
+            icon_id,
+            block_index,
+        }
+    }
+
+    fn sf_key(group_code: u32, icon_id: u32, block_index: u32) -> CatalogRecordKey<'static> {
+        CatalogRecordKey {
+            archive: "sf",
             group_code,
             icon_id,
             block_index,
@@ -499,6 +511,35 @@ mod tests {
 
         assert_eq!(
             classify_record(se_key(1, 0, 0)),
+            RecordClassification::unknown()
+        );
+    }
+
+    #[test]
+    fn classifies_reviewed_sf_block_boundaries() {
+        for (key, expected) in [
+            (sf_key(0, 1, 0), &["UI 이미지", "버튼"][..]),
+            (sf_key(1, 4_094, 1_135), &["UI 이미지", "버튼"]),
+            (sf_key(1, 1, 1_136), &["UI 아이콘", "원형 아이콘"]),
+            (sf_key(1, 275, 1_410), &["UI 아이콘", "원형 아이콘"]),
+        ] {
+            let classification = classify_record(key);
+            assert_eq!(
+                classification.category.map(CategoryPath::segments),
+                Some(expected)
+            );
+            assert_eq!(
+                classification.boundary_status,
+                VerificationStatus::HumanVerified
+            );
+            assert_eq!(
+                classification.meaning_status,
+                VerificationStatus::HumanVerified
+            );
+        }
+
+        assert_eq!(
+            classify_record(sf_key(1, 276, 1_411)),
             RecordClassification::unknown()
         );
     }
