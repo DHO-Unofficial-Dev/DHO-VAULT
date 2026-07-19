@@ -48,10 +48,6 @@ pub struct AssetUpdateReport {
     pub added_assets: Vec<dho_client::AssetSnapshotEntry>,
 }
 
-pub fn load(path: &Path, resource_directory: &Path) -> Result<AssetUpdateStatus, String> {
-    load_report(path, resource_directory).map(|report| report.status)
-}
-
 pub fn load_report(path: &Path, resource_directory: &Path) -> Result<AssetUpdateReport, String> {
     let current = inspect_asset_snapshot(resource_directory)
         .map_err(|error| format!("현재 자산 목록을 확인하지 못했습니다: {error}"))?;

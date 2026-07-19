@@ -4,11 +4,12 @@
 
 mod asset_baseline;
 
-use asset_baseline::AssetUpdateStatus;
+use asset_baseline::{AssetUpdateReport, AssetUpdateStatus};
 use dho_client::{
-    GameDirectorySummary, VIEWER_CATEGORY_PAGE_SIZE, VerifiedAssetDetail, VerifiedAssetPng,
-    VerifiedAssetSearchItem, VerifiedAssetSearchPage, VerifiedCategoryAsset, VerifiedCategoryPage,
-    VerifiedSearchAsset, VerifiedUpdatePage, ViewerSession, inspect_game_directory,
+    AssetSnapshotEntry, GameDirectorySummary, VIEWER_CATEGORY_PAGE_SIZE, VerifiedAssetDetail,
+    VerifiedAssetPng, VerifiedAssetSearchItem, VerifiedAssetSearchPage, VerifiedCategoryAsset,
+    VerifiedCategoryPage, VerifiedSearchAsset, VerifiedUpdatePage, ViewerSession,
+    inspect_game_directory,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -21,9 +22,47 @@ use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
 type SharedViewerSession = Arc<Mutex<ViewerSession>>;
+type SharedAssetUpdateCache = Arc<Mutex<AssetUpdateCache>>;
 type SharedCategoryExportManager = Arc<CategoryExportManager>;
 
 const VIEWER_PREFERENCES_FILE_NAME: &str = "viewer-preferences.json";
+
+#[derive(Debug, Default)]
+struct AssetUpdateCache {
+    generation: u64,
+    resource_directory: Option<PathBuf>,
+    added_assets: Option<Arc<[AssetSnapshotEntry]>>,
+}
+
+impl AssetUpdateCache {
+    fn invalidate(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.resource_directory = None;
+        self.added_assets = None;
+        self.generation
+    }
+
+    fn lookup(&self, resource_directory: &Path) -> (u64, Option<Arc<[AssetSnapshotEntry]>>) {
+        let assets = (self.resource_directory.as_deref() == Some(resource_directory))
+            .then(|| self.added_assets.clone())
+            .flatten();
+        (self.generation, assets)
+    }
+
+    fn store_if_current(
+        &mut self,
+        generation: u64,
+        resource_directory: PathBuf,
+        added_assets: Arc<[AssetSnapshotEntry]>,
+    ) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.resource_directory = Some(resource_directory);
+        self.added_assets = Some(added_assets);
+        true
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ViewerPreferences {
@@ -342,12 +381,19 @@ fn selected_resource_directory(
         .ok_or_else(|| "먼저 게임 폴더를 선택해 주세요.".to_owned())
 }
 
-async fn calculate_asset_update_status(
+fn invalidate_asset_update_cache(cache: &State<'_, SharedAssetUpdateCache>) -> Result<u64, String> {
+    Ok(cache
+        .lock()
+        .map_err(|_| "업데이트 비교 캐시를 열지 못했습니다.".to_owned())?
+        .invalidate())
+}
+
+async fn calculate_asset_update_report(
     baseline_path: PathBuf,
     resource_directory: PathBuf,
-) -> Result<AssetUpdateStatus, String> {
+) -> Result<AssetUpdateReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        asset_baseline::load(&baseline_path, &resource_directory)
+        asset_baseline::load_report(&baseline_path, &resource_directory)
     })
     .await
     .map_err(|error| format!("업데이트 비교 작업이 중단되었습니다: {error}"))?
@@ -357,6 +403,7 @@ async fn calculate_asset_update_status(
 async fn load_saved_game_directory(
     app: tauri::AppHandle,
     session: State<'_, SharedViewerSession>,
+    update_cache: State<'_, SharedAssetUpdateCache>,
 ) -> Result<Option<OpenedGameDirectory>, String> {
     let preferences_path = viewer_preferences_path(&app)?;
     let Some(path) = read_saved_game_directory(&preferences_path)? else {
@@ -364,6 +411,7 @@ async fn load_saved_game_directory(
     };
     let summary = inspect_directory(path).await?;
     open_viewer_session(&session, &summary)?;
+    invalidate_asset_update_cache(&update_cache)?;
     Ok(Some(OpenedGameDirectory {
         summary,
         warning: None,
@@ -374,6 +422,7 @@ async fn load_saved_game_directory(
 async fn pick_game_directory(
     app: tauri::AppHandle,
     session: State<'_, SharedViewerSession>,
+    update_cache: State<'_, SharedAssetUpdateCache>,
 ) -> Result<Option<OpenedGameDirectory>, String> {
     let selection = app
         .dialog()
@@ -389,6 +438,7 @@ async fn pick_game_directory(
 
     let summary = inspect_directory(path.clone()).await?;
     open_viewer_session(&session, &summary)?;
+    invalidate_asset_update_cache(&update_cache)?;
 
     let warning = viewer_preferences_path(&app)
         .and_then(|preferences_path| write_saved_game_directory(&preferences_path, &path))
@@ -401,38 +451,52 @@ async fn pick_game_directory(
 async fn load_asset_update_status(
     app: tauri::AppHandle,
     session: State<'_, SharedViewerSession>,
+    update_cache: State<'_, SharedAssetUpdateCache>,
 ) -> Result<AssetUpdateStatus, String> {
     let baseline_path = viewer_asset_baseline_path(&app)?;
     let resource_directory = selected_resource_directory(&session)?;
-    calculate_asset_update_status(baseline_path, resource_directory).await
+    let generation = invalidate_asset_update_cache(&update_cache)?;
+    let report = calculate_asset_update_report(baseline_path, resource_directory.clone()).await?;
+    let status = report.status.clone();
+    update_cache
+        .lock()
+        .map_err(|_| "업데이트 비교 캐시를 열지 못했습니다.".to_owned())?
+        .store_if_current(generation, resource_directory, report.added_assets.into());
+    Ok(status)
 }
 
 #[tauri::command]
 async fn create_asset_update_baseline(
     app: tauri::AppHandle,
     session: State<'_, SharedViewerSession>,
+    update_cache: State<'_, SharedAssetUpdateCache>,
 ) -> Result<AssetUpdateStatus, String> {
     let baseline_path = viewer_asset_baseline_path(&app)?;
     let resource_directory = selected_resource_directory(&session)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let status = tauri::async_runtime::spawn_blocking(move || {
         asset_baseline::create(&baseline_path, &resource_directory)
     })
     .await
-    .map_err(|error| format!("업데이트 기준점 저장 작업이 중단되었습니다: {error}"))?
+    .map_err(|error| format!("업데이트 기준점 저장 작업이 중단되었습니다: {error}"))??;
+    invalidate_asset_update_cache(&update_cache)?;
+    Ok(status)
 }
 
 #[tauri::command]
 async fn refresh_asset_update_baseline(
     app: tauri::AppHandle,
     session: State<'_, SharedViewerSession>,
+    update_cache: State<'_, SharedAssetUpdateCache>,
 ) -> Result<AssetUpdateStatus, String> {
     let baseline_path = viewer_asset_baseline_path(&app)?;
     let resource_directory = selected_resource_directory(&session)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let status = tauri::async_runtime::spawn_blocking(move || {
         asset_baseline::refresh(&baseline_path, &resource_directory)
     })
     .await
-    .map_err(|error| format!("업데이트 기준점 갱신 작업이 중단되었습니다: {error}"))?
+    .map_err(|error| format!("업데이트 기준점 갱신 작업이 중단되었습니다: {error}"))??;
+    invalidate_asset_update_cache(&update_cache)?;
+    Ok(status)
 }
 
 #[tauri::command]
@@ -440,16 +504,33 @@ async fn load_verified_update_page(
     app: tauri::AppHandle,
     offset: usize,
     session: State<'_, SharedViewerSession>,
+    update_cache: State<'_, SharedAssetUpdateCache>,
 ) -> Result<VerifiedUpdatePage, String> {
     let baseline_path = viewer_asset_baseline_path(&app)?;
     let resource_directory = selected_resource_directory(&session)?;
     let session = session.inner().clone();
+    let update_cache = update_cache.inner().clone();
+    let (generation, cached_assets) = update_cache
+        .lock()
+        .map_err(|_| "업데이트 비교 캐시를 열지 못했습니다.".to_owned())?
+        .lookup(&resource_directory);
     tauri::async_runtime::spawn_blocking(move || {
-        let report = asset_baseline::load_report(&baseline_path, &resource_directory)?;
+        let added_assets = match cached_assets {
+            Some(assets) => assets,
+            None => {
+                let report = asset_baseline::load_report(&baseline_path, &resource_directory)?;
+                let assets: Arc<[AssetSnapshotEntry]> = report.added_assets.into();
+                update_cache
+                    .lock()
+                    .map_err(|_| "업데이트 비교 캐시를 열지 못했습니다.".to_owned())?
+                    .store_if_current(generation, resource_directory.clone(), assets.clone());
+                assets
+            }
+        };
         session
             .lock()
             .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?
-            .update_page(&report.added_assets, offset, VIEWER_CATEGORY_PAGE_SIZE)
+            .update_page(&added_assets, offset, VIEWER_CATEGORY_PAGE_SIZE)
             .map_err(|error| error.to_string())
     })
     .await
@@ -1023,6 +1104,7 @@ fn remove_created_files(created: &[PathBuf]) {
 fn main() {
     tauri::Builder::default()
         .manage(Arc::new(Mutex::new(ViewerSession::default())))
+        .manage(Arc::new(Mutex::new(AssetUpdateCache::default())))
         .manage(Arc::new(CategoryExportManager::default()))
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -1100,6 +1182,52 @@ mod tests {
             },
         };
         SearchPageAssetPlan::from(&item)
+    }
+
+    fn test_snapshot_entry(icon_id: u32) -> AssetSnapshotEntry {
+        AssetSnapshotEntry::new("sb", 1, icon_id, icon_id, 48, 48)
+    }
+
+    #[test]
+    fn caches_update_assets_for_one_directory_and_rejects_stale_results() {
+        let first_directory = PathBuf::from(r"G:\Games\First\0010\0001");
+        let second_directory = PathBuf::from(r"G:\Games\Second\0010\0001");
+        let first_assets: Arc<[AssetSnapshotEntry]> =
+            vec![test_snapshot_entry(100), test_snapshot_entry(101)].into();
+        let mut cache = AssetUpdateCache::default();
+
+        let (first_generation, missing) = cache.lookup(&first_directory);
+        assert!(missing.is_none());
+        assert!(cache.store_if_current(
+            first_generation,
+            first_directory.clone(),
+            first_assets.clone(),
+        ));
+        let (cached_generation, cached) = cache.lookup(&first_directory);
+        assert_eq!(cached_generation, first_generation);
+        assert!(Arc::ptr_eq(
+            &cached.expect("cached update assets"),
+            &first_assets
+        ));
+        assert!(cache.lookup(&second_directory).1.is_none());
+
+        let current_generation = cache.invalidate();
+        assert_ne!(current_generation, first_generation);
+        assert!(cache.lookup(&first_directory).1.is_none());
+        assert!(!cache.store_if_current(first_generation, first_directory, first_assets,));
+        assert!(cache.lookup(&second_directory).1.is_none());
+
+        let empty_assets: Arc<[AssetSnapshotEntry]> = Vec::new().into();
+        assert!(
+            cache.store_if_current(current_generation, second_directory.clone(), empty_assets,)
+        );
+        assert!(
+            cache
+                .lookup(&second_directory)
+                .1
+                .expect("cached empty update result")
+                .is_empty()
+        );
     }
 
     #[test]
