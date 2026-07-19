@@ -373,7 +373,7 @@ impl fmt::Display for AssetSnapshotError {
             ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 이미지 리소스(im, sa, sb, sc, sd, se, sf, sg, sh, tm, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
+                "지원하는 이미지 리소스(im, kp, sa, sb, sc, sd, se, sf, sg, sh, tm, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -656,6 +656,46 @@ mod tests {
         assert_eq!(
             (snapshot.assets[1].width, snapshot.assets[1].height),
             (180, 141)
+        );
+    }
+
+    #[test]
+    fn preserves_all_three_kp_file_identities() {
+        let directory = TestDirectory::new();
+        let inline = directory.0.join("0000");
+        fs::create_dir(&inline).expect("create inline resource directory");
+        fs::write(
+            inline.join("kp000000.bin"),
+            inline_archive(&[vec![0x11; 48 * 48 * 4], vec![0x22; 48 * 48 * 4]]),
+        )
+        .expect("write KP base layer");
+        fs::write(
+            inline.join("kp000010.bin"),
+            inline_archive(&[vec![0; 48 * 48 * 4], vec![0x33; 48 * 48 * 4]]),
+        )
+        .expect("write KP overlay layer");
+        fs::write(
+            inline.join("kp100000.bin"),
+            inline_archive(&[vec![0x44; 256 * 256 * 4]]),
+        )
+        .expect("write KP overview");
+
+        let snapshot = inspect_asset_snapshot(&directory.0).expect("inspect KP snapshot");
+
+        assert_eq!(snapshot.assets.len(), 5);
+        assert_eq!(
+            snapshot
+                .assets
+                .iter()
+                .map(|entry| entry.data_file_number)
+                .collect::<Vec<_>>(),
+            [Some(0), Some(0), Some(10), Some(10), Some(100_000)]
+        );
+        assert_eq!(snapshot.assets[4].block_index, 4);
+        assert_eq!(snapshot.assets[4].file_block_index, Some(0));
+        assert_eq!(
+            (snapshot.assets[4].width, snapshot.assets[4].height),
+            (256, 256)
         );
     }
 

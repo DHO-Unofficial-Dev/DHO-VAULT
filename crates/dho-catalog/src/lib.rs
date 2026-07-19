@@ -5,6 +5,7 @@
 mod assembly;
 mod im;
 mod is;
+mod kp;
 mod sa;
 mod sb;
 mod sc;
@@ -19,7 +20,7 @@ mod sy;
 mod sz;
 mod tm;
 
-pub use assembly::{AssemblyPlan, AssemblyRule, TileOrder};
+pub use assembly::{AssemblyPlan, AssemblyRule, LayeredAssemblyRule, TileOrder};
 use serde::Serialize;
 
 /// One raw record identity used by the category resolver.
@@ -303,6 +304,8 @@ pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
         Catalog::new(tm::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("is") {
         Catalog::new(is::RECORD_RULES, &[]).classify(key)
+    } else if key.archive.eq_ignore_ascii_case("kp") {
+        Catalog::new(kp::RECORD_RULES, &[]).classify(key)
     } else {
         RecordClassification::unknown()
     }
@@ -327,6 +330,11 @@ pub fn assembly_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
 /// a person has reviewed the completed image and promoted the rule.
 pub fn assembly_candidate_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
     assembly::find_candidate_plan(archive, block_index)
+}
+
+/// Returns a human-verified two-layer raw-image assembly rule for an archive.
+pub fn layered_assembly_rule(archive: &str) -> Option<LayeredAssemblyRule> {
+    assembly::find_layered_rule(archive)
 }
 
 #[cfg(test)]
@@ -405,6 +413,53 @@ mod tests {
                 group_code: 0,
                 icon_id: 249,
                 block_index: 249,
+            }),
+            RecordClassification::unknown()
+        );
+    }
+
+    #[test]
+    fn classifies_kp_world_map_layers_and_unclassified_overviews() {
+        for block_index in [0, 2_047, 2_048, 4_095] {
+            let classification = classify_record(CatalogRecordKey {
+                archive: "kp",
+                group_code: 0,
+                icon_id: block_index,
+                block_index,
+            });
+            assert_eq!(
+                classification.category.map(CategoryPath::segments),
+                Some(&["지도", "세계지도 (3072×1536)"][..])
+            );
+            assert_eq!(
+                classification.meaning_status,
+                VerificationStatus::HumanVerified
+            );
+        }
+
+        for block_index in [4_096, 4_100] {
+            let classification = classify_record(CatalogRecordKey {
+                archive: "KP",
+                group_code: 0,
+                icon_id: block_index,
+                block_index,
+            });
+            assert_eq!(
+                classification.category.map(CategoryPath::segments),
+                Some(&["지도", "미분류 오버뷰 (256×256)"][..])
+            );
+            assert_eq!(
+                classification.category_source,
+                Some(CategorySource::Temporary)
+            );
+        }
+
+        assert_eq!(
+            classify_record(CatalogRecordKey {
+                archive: "kp",
+                group_code: 0,
+                icon_id: 4_101,
+                block_index: 4_101,
             }),
             RecordClassification::unknown()
         );

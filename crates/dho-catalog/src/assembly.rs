@@ -114,6 +114,35 @@ pub struct AssemblyPlan {
     pub column: u32,
 }
 
+/// One human-verified logical image composed from matching tiles in two raw files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayeredAssemblyRule {
+    pub archive: &'static str,
+    pub base_file_number: u32,
+    pub overlay_file_number: u32,
+    pub first_file_block_index: u32,
+    pub tile_count: u32,
+    pub columns: u32,
+    pub rows: u32,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub canonical_block: u32,
+    pub last_block: u32,
+    pub status: VerificationStatus,
+}
+
+impl LayeredAssemblyRule {
+    /// Whether a physical raw block contributes to this completed image.
+    pub const fn contains_source(self, file_number: u32, file_block_index: u32) -> bool {
+        let source_file =
+            file_number == self.base_file_number || file_number == self.overlay_file_number;
+        source_file
+            && self.first_file_block_index <= file_block_index
+            && file_block_index < self.first_file_block_index.saturating_add(self.tile_count)
+    }
+}
+
 pub(crate) const RULES: &[AssemblyRule] = &[
     AssemblyRule::verified_sd(10_156, 10_175, 2, 2, 155, 256),
     AssemblyRule::verified_sd(10_203, 10_242, 2, 2, 248, 156),
@@ -134,12 +163,34 @@ pub(crate) const RULES: &[AssemblyRule] = &[
     AssemblyRule::verified_is(96, 107, 800, 600),
 ];
 
+pub(crate) const LAYERED_RULES: &[LayeredAssemblyRule] = &[LayeredAssemblyRule {
+    archive: "kp",
+    base_file_number: 0,
+    overlay_file_number: 10,
+    first_file_block_index: 0,
+    tile_count: 2_048,
+    columns: 64,
+    rows: 32,
+    output_width: 3_072,
+    output_height: 1_536,
+    canonical_block: 0,
+    last_block: 4_095,
+    status: VerificationStatus::HumanVerified,
+}];
+
 pub(crate) fn find_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
     find_plan_with_status(archive, block_index, VerificationStatus::HumanVerified)
 }
 
 pub(crate) fn find_candidate_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
     find_plan_with_status(archive, block_index, VerificationStatus::Candidate)
+}
+
+pub(crate) fn find_layered_rule(archive: &str) -> Option<LayeredAssemblyRule> {
+    LAYERED_RULES.iter().copied().find(|rule| {
+        rule.archive.eq_ignore_ascii_case(archive)
+            && rule.status == VerificationStatus::HumanVerified
+    })
 }
 
 fn find_plan_with_status(
@@ -198,5 +249,18 @@ mod tests {
             assert_eq!(plan.rule.status, VerificationStatus::HumanVerified);
             assert_eq!(find_candidate_plan("is", first_block), None);
         }
+    }
+
+    #[test]
+    fn resolves_the_verified_kp_layered_world_map() {
+        let rule = find_layered_rule("KP").expect("verified KP layered rule");
+
+        assert_eq!((rule.columns, rule.rows), (64, 32));
+        assert_eq!(rule.tile_count, rule.columns * rule.rows);
+        assert_eq!((rule.output_width, rule.output_height), (3_072, 1_536));
+        assert!(rule.contains_source(0, 0));
+        assert!(rule.contains_source(10, 2_047));
+        assert!(!rule.contains_source(100_000, 0));
+        assert!(!rule.contains_source(10, 2_048));
     }
 }

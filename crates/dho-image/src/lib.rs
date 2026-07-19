@@ -78,6 +78,40 @@ impl RgbaImage {
         &self.pixels
     }
 
+    /// Alpha-composites an equally sized RGBA layer over this image.
+    pub fn overlay(&mut self, layer: &Self) -> Result<(), ImageAssemblyError> {
+        if (self.width, self.height) != (layer.width, layer.height) {
+            return Err(ImageAssemblyError::LayerDimensionMismatch {
+                base: (self.width, self.height),
+                layer: (layer.width, layer.height),
+            });
+        }
+
+        for (base, layer) in self
+            .pixels
+            .chunks_exact_mut(4)
+            .zip(layer.pixels.chunks_exact(4))
+        {
+            let source_alpha = u32::from(layer[3]);
+            let base_alpha = u32::from(base[3]);
+            let inverse_source_alpha = 255 - source_alpha;
+            let output_alpha = source_alpha + (base_alpha * inverse_source_alpha + 127) / 255;
+            if output_alpha == 0 {
+                base.copy_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+
+            for channel in 0..3 {
+                let premultiplied = u32::from(layer[channel]) * source_alpha * 255
+                    + u32::from(base[channel]) * base_alpha * inverse_source_alpha;
+                let divisor = output_alpha * 255;
+                base[channel] = ((premultiplied + divisor / 2) / divisor) as u8;
+            }
+            base[3] = output_alpha as u8;
+        }
+        Ok(())
+    }
+
     /// Shrinks an image to fit within the requested bounds without enlarging it.
     pub fn thumbnail(
         &self,
@@ -395,6 +429,10 @@ impl Error for PngEncodeError {}
 /// A structural or resource-limit failure while joining decoded tiles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageAssemblyError {
+    LayerDimensionMismatch {
+        base: (u32, u32),
+        layer: (u32, u32),
+    },
     EmptyGrid {
         columns: u32,
         rows: u32,
@@ -438,6 +476,11 @@ pub enum ImageAssemblyError {
 impl fmt::Display for ImageAssemblyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::LayerDimensionMismatch { base, layer } => write!(
+                formatter,
+                "overlay dimensions are {}x{}, expected {}x{}",
+                layer.0, layer.1, base.0, base.1
+            ),
             Self::EmptyGrid { columns, rows } => {
                 write!(formatter, "image grid must not be empty: {columns}x{rows}")
             }
@@ -539,6 +582,32 @@ mod tests {
         assert_eq!(
             image.pixels(),
             &[0x11, 0x11, 0x11, 0xff, 0xcc, 0xcc, 0xcc, 0xff]
+        );
+    }
+
+    #[test]
+    fn alpha_composites_an_equally_sized_layer() {
+        let mut base =
+            RgbaImage::from_bgra(2, 1, &[30, 20, 10, 255, 0, 0, 0, 0]).expect("base pixels");
+        let layer =
+            RgbaImage::from_bgra(2, 1, &[110, 100, 90, 128, 7, 6, 5, 255]).expect("layer pixels");
+
+        base.overlay(&layer).expect("overlay images");
+
+        assert_eq!(base.pixels(), &[50, 60, 70, 255, 5, 6, 7, 255]);
+    }
+
+    #[test]
+    fn rejects_an_overlay_with_different_dimensions() {
+        let mut base = RgbaImage::from_bgra(1, 1, &[0; 4]).expect("base pixels");
+        let layer = RgbaImage::from_bgra(2, 1, &[0; 8]).expect("layer pixels");
+
+        assert_eq!(
+            base.overlay(&layer),
+            Err(ImageAssemblyError::LayerDimensionMismatch {
+                base: (1, 1),
+                layer: (2, 1),
+            })
         );
     }
 

@@ -2,7 +2,9 @@
 
 //! Read-only loading and on-demand extraction of indexed DHO image resources.
 
-use dho_catalog::{AssemblyPlan, VerificationStatus, assembly_candidate_plan, assembly_plan};
+use dho_catalog::{
+    AssemblyPlan, LayeredAssemblyRule, VerificationStatus, assembly_candidate_plan, assembly_plan,
+};
 use dho_core::{
     ArchiveBlockDecodeError, ArchiveDiagnostic, ArchiveLayout, BlockDecodeError, BlockScanError,
     IndexParseError, IndexRecord, IndexedArchive, InlineBlockTable, InlineBlockTableError,
@@ -299,11 +301,137 @@ impl LoadedRawImageArchive {
         })
     }
 
+    /// Extracts one human-verified logical image from matching base and overlay raw tiles.
+    pub fn extract_verified_layered_assembly(
+        &self,
+        rule: LayeredAssemblyRule,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+    ) -> Result<ExtractedAssembly, ExtractError> {
+        let image =
+            self.decode_layered_assembly(rule, max_tile_output_size, max_assembled_output_size)?;
+        let png = image.encode_png().map_err(ExtractError::PngEncode)?;
+        Ok(ExtractedAssembly {
+            first_block: rule.canonical_block,
+            last_block: rule.last_block,
+            width: image.width(),
+            height: image.height(),
+            png,
+        })
+    }
+
+    /// Extracts a bounded preview of one human-verified layered raw-image assembly.
+    pub fn extract_verified_layered_assembly_thumbnail(
+        &self,
+        rule: LayeredAssemblyRule,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+        max_width: u32,
+        max_height: u32,
+        max_thumbnail_output_size: usize,
+    ) -> Result<ExtractedAssemblyThumbnail, ExtractError> {
+        let image =
+            self.decode_layered_assembly(rule, max_tile_output_size, max_assembled_output_size)?;
+        let source_width = image.width();
+        let source_height = image.height();
+        let thumbnail = image
+            .thumbnail(max_width, max_height, max_thumbnail_output_size)
+            .map_err(ExtractError::Thumbnail)?;
+        let png = thumbnail.encode_png().map_err(ExtractError::PngEncode)?;
+        Ok(ExtractedAssemblyThumbnail {
+            first_block: rule.canonical_block,
+            last_block: rule.last_block,
+            source_width,
+            source_height,
+            width: thumbnail.width(),
+            height: thumbnail.height(),
+            png,
+        })
+    }
+
+    fn decode_layered_assembly(
+        &self,
+        rule: LayeredAssemblyRule,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+    ) -> Result<RgbaImage, ExtractError> {
+        if !rule.archive.eq_ignore_ascii_case(self.prefix.as_str()) {
+            return Err(ExtractError::AssemblyArchiveMismatch {
+                expected: rule.archive,
+                actual: self.prefix.as_str().to_owned(),
+            });
+        }
+        if rule.status != VerificationStatus::HumanVerified {
+            return Err(ExtractError::AssemblyRuleNotVerified {
+                first_block: rule.canonical_block,
+                last_block: rule.last_block,
+            });
+        }
+
+        let mut tiles = Vec::with_capacity(
+            usize::try_from(rule.tile_count)
+                .map_err(|_| ExtractError::RawArchiveBlockCountOverflow)?,
+        );
+        let first_index = rule.first_file_block_index;
+        let base_path = self
+            .raw_block_in_file(rule.base_file_number, first_index)?
+            .path
+            .clone();
+        let overlay_path = self
+            .raw_block_in_file(rule.overlay_file_number, first_index)?
+            .path
+            .clone();
+        let base_bytes = read_file("read raw assembly base layer", &base_path)?;
+        let overlay_bytes = read_file("read raw assembly overlay layer", &overlay_path)?;
+        for offset in 0..rule.tile_count {
+            let file_block_index = rule
+                .first_file_block_index
+                .checked_add(offset)
+                .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+            let base = self.raw_block_in_file(rule.base_file_number, file_block_index)?;
+            let layer = self.raw_block_in_file(rule.overlay_file_number, file_block_index)?;
+            let mut combined =
+                self.decode_raw_block_bytes(base, &base_bytes, max_tile_output_size)?;
+            let layer = self.decode_raw_block_bytes(layer, &overlay_bytes, max_tile_output_size)?;
+            combined
+                .overlay(&layer)
+                .map_err(ExtractError::ImageAssembly)?;
+            tiles.push(combined);
+        }
+
+        RgbaImage::assemble_grid(
+            &tiles,
+            rule.columns,
+            rule.rows,
+            rule.output_width,
+            rule.output_height,
+            max_assembled_output_size,
+        )
+        .map_err(ExtractError::ImageAssembly)
+    }
+
     fn raw_block(&self, key: RawResourceKey) -> Result<&RawImageBlock, ExtractError> {
         self.blocks
             .get(usize::try_from(key.block_index).unwrap_or(usize::MAX))
             .filter(|block| block.record.key == key)
             .ok_or(ExtractError::RawResourceNotFound { key })
+    }
+
+    fn raw_block_in_file(
+        &self,
+        file_number: u32,
+        file_block_index: u32,
+    ) -> Result<&RawImageBlock, ExtractError> {
+        self.blocks
+            .iter()
+            .find(|block| {
+                block.record.key.file_number == file_number
+                    && block.record.key.file_block_index == file_block_index
+            })
+            .ok_or(ExtractError::RawLayerBlockMissing {
+                file_number,
+                file_block_index,
+            })
     }
 
     fn decode_raw_block(
@@ -325,6 +453,28 @@ impl LoadedRawImageArchive {
         let decoded = block
             .block
             .decode_payload(&payload, max_output_size)
+            .map_err(ExtractError::RawBlockDecode)?;
+        match self.spec.pixel_format {
+            RawPixelFormat::Gray8 => {
+                RgbaImage::from_gray8(block.record.width, block.record.height, &decoded)
+                    .map_err(ExtractError::PixelDecode)
+            }
+            RawPixelFormat::Bgra8 => {
+                RgbaImage::from_bgra(block.record.width, block.record.height, &decoded)
+                    .map_err(ExtractError::PixelDecode)
+            }
+        }
+    }
+
+    fn decode_raw_block_bytes(
+        &self,
+        block: &RawImageBlock,
+        bytes: &[u8],
+        max_output_size: usize,
+    ) -> Result<RgbaImage, ExtractError> {
+        let decoded = block
+            .block
+            .decode(bytes, max_output_size)
             .map_err(ExtractError::RawBlockDecode)?;
         match self.spec.pixel_format {
             RawPixelFormat::Gray8 => {
@@ -935,6 +1085,10 @@ pub enum ExtractError {
     RawResourceNotFound {
         key: RawResourceKey,
     },
+    RawLayerBlockMissing {
+        file_number: u32,
+        file_block_index: u32,
+    },
     RawCompressedSizeOverflow {
         key: RawResourceKey,
         compressed_size: u32,
@@ -1082,6 +1236,13 @@ impl fmt::Display for ExtractError {
                 "raw image block was not found: archive block {}, file {}, file block {}",
                 key.block_index, key.file_number, key.file_block_index
             ),
+            Self::RawLayerBlockMissing {
+                file_number,
+                file_block_index,
+            } => write!(
+                formatter,
+                "raw assembly layer block was not found: file {file_number}, file block {file_block_index}"
+            ),
             Self::RawCompressedSizeOverflow {
                 key,
                 compressed_size,
@@ -1182,6 +1343,7 @@ impl Error for ExtractError {
             | Self::InlineBlockCountMismatch { .. }
             | Self::InlineBlockEntryMismatch { .. }
             | Self::RawResourceNotFound { .. }
+            | Self::RawLayerBlockMissing { .. }
             | Self::RawCompressedSizeOverflow { .. }
             | Self::InvalidLayout { .. }
             | Self::ResourceNotFound { .. }
@@ -1295,6 +1457,11 @@ mod tests {
             height: 2,
         },
     ];
+    const BGRA8_1X1_VARIANTS: &[RawImageVariant] = &[RawImageVariant {
+        decoded_size: 4,
+        width: 1,
+        height: 1,
+    }];
 
     fn gray8_spec(variants: &'static [RawImageVariant]) -> RawImageSpec {
         RawImageSpec {
@@ -1457,6 +1624,57 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn alpha_composites_and_assembles_matching_raw_file_layers() {
+        let directory = TestDirectory::new();
+        fs::write(
+            directory.0.join("kp000000.bin"),
+            inline_archive(&[vec![30, 20, 10, 255], vec![60, 50, 40, 255]]),
+        )
+        .expect("write base layer");
+        fs::write(
+            directory.0.join("kp000010.bin"),
+            inline_archive(&[vec![0, 0, 0, 0], vec![90, 80, 70, 255]]),
+        )
+        .expect("write overlay layer");
+        let archive = LoadedRawImageArchive::open_files(
+            &directory.0,
+            "kp",
+            &[0, 10],
+            RawArchiveLayout::InlineBlockTable,
+            RawImageSpec {
+                pixel_format: RawPixelFormat::Bgra8,
+                variants: BGRA8_1X1_VARIANTS,
+            },
+        )
+        .expect("open layered archive");
+        let rule = LayeredAssemblyRule {
+            archive: "kp",
+            base_file_number: 0,
+            overlay_file_number: 10,
+            first_file_block_index: 0,
+            tile_count: 2,
+            columns: 2,
+            rows: 1,
+            output_width: 2,
+            output_height: 1,
+            canonical_block: 0,
+            last_block: 3,
+            status: VerificationStatus::HumanVerified,
+        };
+
+        let extracted = archive
+            .extract_verified_layered_assembly(rule, 4, 8)
+            .expect("extract layered assembly");
+        let decoded = image::load_from_memory_with_format(&extracted.png, image::ImageFormat::Png)
+            .expect("decode layered PNG")
+            .to_rgba8();
+
+        assert_eq!((extracted.width, extracted.height), (2, 1));
+        assert_eq!(decoded.get_pixel(0, 0).0, [10, 20, 30, 255]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [70, 80, 90, 255]);
     }
 
     #[test]
