@@ -12,7 +12,10 @@ pub use snapshot::{
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use dho_catalog::{CatalogRecordKey, VerificationStatus, assembly_plan, classify_record};
+use dho_catalog::{
+    CatalogRecordKey, LayeredAssemblyRule, VerificationStatus, assembly_plan, classify_record,
+    layered_assembly_rule,
+};
 use dho_core::{IndexParseError, IndexedArchive};
 use dho_extract::{
     ExtractError, LoadedArchive, LoadedRawImageArchive, RawArchiveLayout, RawImageSpec,
@@ -29,8 +32,8 @@ use std::path::{Path, PathBuf};
 pub const INDEXED_ARCHIVE_PREFIXES: [&str; 13] = [
     "im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sw", "sx", "sy", "sz", "is",
 ];
-pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 15] = [
-    "im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sh", "tm", "sw", "sx", "sy", "sz", "is",
+pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 16] = [
+    "im", "kp", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sh", "tm", "sw", "sx", "sy", "sz", "is",
 ];
 pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 32;
 
@@ -64,8 +67,29 @@ const TM_IMAGE_VARIANTS: &[RawImageVariant] = &[
         height: 139,
     },
 ];
+const KP_IMAGE_VARIANTS: &[RawImageVariant] = &[
+    RawImageVariant {
+        decoded_size: 9_216,
+        width: 48,
+        height: 48,
+    },
+    RawImageVariant {
+        decoded_size: 262_144,
+        width: 256,
+        height: 256,
+    },
+];
 
-pub(crate) const RAW_IMAGE_ARCHIVES: [RawArchiveDefinition; 2] = [
+pub(crate) const RAW_IMAGE_ARCHIVES: [RawArchiveDefinition; 3] = [
+    RawArchiveDefinition {
+        prefix: "kp",
+        file_numbers: &[0, 10, 100_000],
+        layout: RawArchiveLayout::InlineBlockTable,
+        spec: RawImageSpec {
+            pixel_format: RawPixelFormat::Bgra8,
+            variants: KP_IMAGE_VARIANTS,
+        },
+    },
     RawArchiveDefinition {
         prefix: "sh",
         file_numbers: &[1],
@@ -97,7 +121,7 @@ pub fn resolve_archive_directory(resource_root: impl AsRef<Path>, prefix: &str) 
     }
 
     let subdirectory = match prefix.to_ascii_lowercase().as_str() {
-        "tm" => "0000",
+        "kp" | "tm" => "0000",
         "sw" | "sx" | "sy" | "sz" => "0002",
         _ => "0001",
     };
@@ -110,6 +134,15 @@ fn raw_archive_path(resource_root: &Path, definition: RawArchiveDefinition) -> O
         resolve_archive_directory(resource_root, definition.prefix)
             .join(format!("{}{file_number:06}.bin", definition.prefix)),
     )
+}
+
+fn raw_layered_rule(prefix: &str, key: RawResourceKey) -> Option<LayeredAssemblyRule> {
+    layered_assembly_rule(prefix)
+        .filter(|rule| rule.contains_source(key.file_number, key.file_block_index))
+}
+
+fn raw_canonical_block(prefix: &str, key: RawResourceKey) -> u32 {
+    raw_layered_rule(prefix, key).map_or(key.block_index, |rule| rule.canonical_block)
 }
 
 const THUMBNAIL_MAX_WIDTH: u32 = 160;
@@ -526,8 +559,13 @@ impl ViewerSession {
                 review_required_count += 1;
                 continue;
             };
-            let canonical_block = assembly_plan(&asset.archive, asset.block_index)
-                .map_or(asset.block_index, |plan| plan.first_block);
+            let canonical_block = raw_key.map_or_else(
+                || {
+                    assembly_plan(&asset.archive, asset.block_index)
+                        .map_or(asset.block_index, |plan| plan.first_block)
+                },
+                |key| raw_canonical_block(&asset.archive, key),
+            );
             let path = category
                 .segments()
                 .iter()
@@ -548,7 +586,10 @@ impl ViewerSession {
         let assets = unique
             .into_iter()
             .map(|((path, prefix, canonical_block), (key, raw_key))| {
-                let assembled = assembly_plan(&prefix, canonical_block).is_some();
+                let assembled = raw_key
+                    .and_then(|key| raw_layered_rule(&prefix, key))
+                    .is_some()
+                    || assembly_plan(&prefix, canonical_block).is_some();
                 VerifiedSearchAssetRef {
                     path,
                     asset: VerifiedAssetRef {
@@ -634,6 +675,41 @@ impl ViewerSession {
     ) -> Result<VerifiedAssetDetail, ViewerSessionError> {
         let asset = self.verified_asset(path, prefix, block_index)?;
         if let Some(raw_key) = asset.raw_key {
+            if asset.assembled {
+                let rule = raw_layered_rule(&asset.prefix, raw_key).ok_or_else(|| {
+                    ViewerSessionError::AssemblyRuleMissing {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                    }
+                })?;
+                let extracted = self
+                    .raw_archive(&asset.prefix)?
+                    .extract_verified_layered_assembly_thumbnail(
+                        rule,
+                        MAX_IMAGE_DECODE_SIZE,
+                        MAX_ASSEMBLED_DECODE_SIZE,
+                        DETAIL_MAX_WIDTH,
+                        DETAIL_MAX_HEIGHT,
+                        MAX_DETAIL_DECODE_SIZE,
+                    )
+                    .map_err(|source| ViewerSessionError::Extract {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                        source,
+                    })?;
+                return Ok(VerifiedAssetDetail {
+                    path: path.to_vec(),
+                    archive: asset.prefix,
+                    icon_id: None,
+                    block_index: extracted.first_block,
+                    source_width: extracted.source_width,
+                    source_height: extracted.source_height,
+                    preview_width: extracted.width,
+                    preview_height: extracted.height,
+                    assembled: true,
+                    preview_data_url: png_data_url(&extracted.png),
+                });
+            }
             let extracted = self
                 .raw_archive(&asset.prefix)?
                 .extract_thumbnail_png(
@@ -738,6 +814,35 @@ impl ViewerSession {
         asset: VerifiedAssetRef,
     ) -> Result<VerifiedAssetPng, ViewerSessionError> {
         if let Some(raw_key) = asset.raw_key {
+            if asset.assembled {
+                let rule = raw_layered_rule(&asset.prefix, raw_key).ok_or_else(|| {
+                    ViewerSessionError::AssemblyRuleMissing {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                    }
+                })?;
+                let extracted = self
+                    .raw_archive(&asset.prefix)?
+                    .extract_verified_layered_assembly(
+                        rule,
+                        MAX_IMAGE_DECODE_SIZE,
+                        MAX_ASSEMBLED_DECODE_SIZE,
+                    )
+                    .map_err(|source| ViewerSessionError::Extract {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                        source,
+                    })?;
+                return Ok(VerifiedAssetPng {
+                    archive: asset.prefix,
+                    icon_id: None,
+                    block_index: extracted.first_block,
+                    width: extracted.width,
+                    height: extracted.height,
+                    assembled: true,
+                    png: extracted.png,
+                });
+            }
             let extracted = self
                 .raw_archive(&asset.prefix)?
                 .extract_png(raw_key, MAX_IMAGE_DECODE_SIZE)
@@ -813,6 +918,42 @@ impl ViewerSession {
         }
 
         if let Some(raw_key) = asset.raw_key {
+            if asset.assembled {
+                let rule = raw_layered_rule(&asset.prefix, raw_key).ok_or_else(|| {
+                    ViewerSessionError::AssemblyRuleMissing {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                    }
+                })?;
+                let extracted = self
+                    .raw_archive(&asset.prefix)?
+                    .extract_verified_layered_assembly_thumbnail(
+                        rule,
+                        MAX_IMAGE_DECODE_SIZE,
+                        MAX_ASSEMBLED_DECODE_SIZE,
+                        THUMBNAIL_MAX_WIDTH,
+                        THUMBNAIL_MAX_HEIGHT,
+                        MAX_THUMBNAIL_DECODE_SIZE,
+                    )
+                    .map_err(|source| ViewerSessionError::Extract {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                        source,
+                    })?;
+                let thumbnail = VerifiedAssetThumbnail {
+                    archive: asset.prefix,
+                    icon_id: None,
+                    block_index: extracted.first_block,
+                    source_width: extracted.source_width,
+                    source_height: extracted.source_height,
+                    thumbnail_width: extracted.width,
+                    thumbnail_height: extracted.height,
+                    assembled: true,
+                    thumbnail_data_url: png_data_url(&extracted.png),
+                };
+                self.thumbnail_cache.insert(cache_key, thumbnail.clone());
+                return Ok(thumbnail);
+            }
             let extracted = self
                 .raw_archive(&asset.prefix)?
                 .extract_thumbnail_png(
@@ -1018,34 +1159,42 @@ impl ViewerSession {
                 continue;
             }
             let archive = self.raw_archive(definition.prefix)?;
-            let matching = archive
-                .records()
-                .filter_map(|record| {
-                    let classification = classify_record(CatalogRecordKey {
-                        archive: definition.prefix,
-                        group_code: 0,
-                        icon_id: record.key.block_index,
-                        block_index: record.key.block_index,
-                    });
-                    (classification.boundary_status == VerificationStatus::HumanVerified
-                        && classification.meaning_status == VerificationStatus::HumanVerified
-                        && classification
-                            .category
-                            .is_some_and(|category| category_matches(category.segments(), path)))
-                    .then_some(VerifiedAssetRef {
+            let mut matching = BTreeMap::<u32, (RawResourceKey, bool)>::new();
+            for record in archive.records() {
+                let classification = classify_record(CatalogRecordKey {
+                    archive: definition.prefix,
+                    group_code: 0,
+                    icon_id: record.key.block_index,
+                    block_index: record.key.block_index,
+                });
+                if classification.boundary_status == VerificationStatus::HumanVerified
+                    && classification.meaning_status == VerificationStatus::HumanVerified
+                    && classification
+                        .category
+                        .is_some_and(|category| category_matches(category.segments(), path))
+                {
+                    let canonical_block = raw_canonical_block(definition.prefix, record.key);
+                    let assembled = raw_layered_rule(definition.prefix, record.key).is_some();
+                    matching
+                        .entry(canonical_block)
+                        .or_insert((record.key, assembled));
+                }
+            }
+            assets.extend(
+                matching
+                    .into_iter()
+                    .map(|(canonical_block, (raw_key, assembled))| VerifiedAssetRef {
                         prefix: definition.prefix.to_owned(),
                         key: ResourceKey {
                             group_code: 0,
-                            icon_id: record.key.block_index,
-                            block_index: record.key.block_index,
+                            icon_id: raw_key.block_index,
+                            block_index: raw_key.block_index,
                         },
-                        raw_key: Some(record.key),
-                        canonical_block: record.key.block_index,
-                        assembled: false,
-                    })
-                })
-                .collect::<Vec<_>>();
-            assets.extend(matching);
+                        raw_key: Some(raw_key),
+                        canonical_block,
+                        assembled,
+                    }),
+            );
         }
 
         Ok(assets)
@@ -1139,43 +1288,49 @@ impl ViewerSession {
                     continue;
                 }
                 let archive = self.raw_archive(definition.prefix)?;
-                let raw_assets = archive
-                    .records()
-                    .filter_map(|record| {
-                        let classification = classify_record(CatalogRecordKey {
-                            archive: definition.prefix,
-                            group_code: 0,
-                            icon_id: record.key.block_index,
-                            block_index: record.key.block_index,
-                        });
-                        if classification.boundary_status != VerificationStatus::HumanVerified
-                            || classification.meaning_status != VerificationStatus::HumanVerified
-                        {
-                            return None;
-                        }
-                        let path = classification
-                            .category?
-                            .segments()
-                            .iter()
-                            .map(|segment| (*segment).to_owned())
-                            .collect();
-                        Some(VerifiedSearchAssetRef {
-                            path,
-                            asset: VerifiedAssetRef {
-                                prefix: definition.prefix.to_owned(),
-                                key: ResourceKey {
-                                    group_code: 0,
-                                    icon_id: record.key.block_index,
-                                    block_index: record.key.block_index,
-                                },
-                                raw_key: Some(record.key),
-                                canonical_block: record.key.block_index,
-                                assembled: false,
+                let mut raw_assets = BTreeMap::<(Vec<String>, u32), (RawResourceKey, bool)>::new();
+                for record in archive.records() {
+                    let classification = classify_record(CatalogRecordKey {
+                        archive: definition.prefix,
+                        group_code: 0,
+                        icon_id: record.key.block_index,
+                        block_index: record.key.block_index,
+                    });
+                    if classification.boundary_status != VerificationStatus::HumanVerified
+                        || classification.meaning_status != VerificationStatus::HumanVerified
+                    {
+                        continue;
+                    }
+                    let Some(category) = classification.category else {
+                        continue;
+                    };
+                    let path = category
+                        .segments()
+                        .iter()
+                        .map(|segment| (*segment).to_owned())
+                        .collect::<Vec<_>>();
+                    let canonical_block = raw_canonical_block(definition.prefix, record.key);
+                    let assembled = raw_layered_rule(definition.prefix, record.key).is_some();
+                    raw_assets
+                        .entry((path, canonical_block))
+                        .or_insert((record.key, assembled));
+                }
+                assets.extend(raw_assets.into_iter().map(
+                    |((path, canonical_block), (raw_key, assembled))| VerifiedSearchAssetRef {
+                        path,
+                        asset: VerifiedAssetRef {
+                            prefix: definition.prefix.to_owned(),
+                            key: ResourceKey {
+                                group_code: 0,
+                                icon_id: raw_key.block_index,
+                                block_index: raw_key.block_index,
                             },
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                assets.extend(raw_assets);
+                            raw_key: Some(raw_key),
+                            canonical_block,
+                            assembled,
+                        },
+                    },
+                ));
             }
             assets.sort_by(|left, right| {
                 left.path
@@ -1374,10 +1529,11 @@ pub fn inspect_game_directory(
                 continue;
             }
             if let Some(category) = classification.category {
+                let canonical_block = raw_canonical_block(definition.prefix, record.key);
                 verified_assets
                     .entry(category.segments().to_vec())
                     .or_default()
-                    .insert((definition.prefix.to_owned(), record.key.block_index));
+                    .insert((definition.prefix.to_owned(), canonical_block));
             }
         }
         archives.push(ArchiveSummary {
@@ -1605,7 +1761,7 @@ impl fmt::Display for GameDirectoryError {
             ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 이미지 리소스(im, sa, sb, sc, sd, se, sf, sg, sh, tm, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
+                "지원하는 이미지 리소스(im, kp, sa, sb, sc, sd, se, sf, sg, sh, tm, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -1733,6 +1889,22 @@ mod tests {
             data.extend_from_slice(&block);
         }
         fs::write(path, data).expect("write inline test data file");
+    }
+
+    fn write_repeated_inline_data_file(path: &Path, raw: &[u8], count: usize) {
+        let block = zlib_block(raw);
+        let mut offset = 4 + count * 8;
+        let mut data = Vec::with_capacity(offset + block.len() * count);
+        push_u32(&mut data, count as u32);
+        for _ in 0..count {
+            push_u32(&mut data, offset as u32);
+            push_u32(&mut data, block.len() as u32);
+            offset += block.len();
+        }
+        for _ in 0..count {
+            data.extend_from_slice(&block);
+        }
+        fs::write(path, data).expect("write repeated inline test data file");
     }
 
     fn test_thumbnail(icon_id: u32, data_url_bytes: usize) -> VerifiedAssetThumbnail {
@@ -2382,6 +2554,129 @@ mod tests {
         assert_eq!(summary.verified_categories.len(), 1);
         assert_eq!(summary.verified_categories[0].path, category);
         assert_eq!(summary.verified_categories[0].asset_count, 2);
+    }
+
+    #[test]
+    fn displays_one_assembled_kp_world_map_and_five_overviews() {
+        let directory = TestDirectory::new();
+        let primary = directory.prepare_game();
+        let resource_root = primary.parent().expect("resource root");
+        let inline_directory = resource_root.join("0000");
+        fs::create_dir(&inline_directory).expect("create inline resource directory");
+        write_repeated_inline_data_file(
+            &inline_directory.join("kp000000.bin"),
+            &[30, 20, 10, 255].repeat(48 * 48),
+            2_048,
+        );
+        write_repeated_inline_data_file(
+            &inline_directory.join("kp000010.bin"),
+            &[0, 0, 0, 0].repeat(48 * 48),
+            2_048,
+        );
+        write_inline_data_file(
+            &inline_directory.join("kp100000.bin"),
+            &vec![vec![0x44; 256 * 256 * 4]; 5],
+        );
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(resource_root);
+        let world_map = ["지도", "세계지도 (3072×1536)"].map(str::to_owned);
+        let overviews = ["지도", "미분류 오버뷰 (256×256)"].map(str::to_owned);
+
+        let world_page = session
+            .category_page(&world_map, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("load assembled KP world map");
+        assert_eq!(world_page.total_count, 1);
+        assert_eq!(world_page.items[0].archive, "kp");
+        assert_eq!(world_page.items[0].icon_id, None);
+        assert_eq!(
+            (
+                world_page.items[0].source_width,
+                world_page.items[0].source_height
+            ),
+            (3_072, 1_536)
+        );
+        assert!(world_page.items[0].assembled);
+
+        let detail = session
+            .asset_detail(&world_map, "KP", 0)
+            .expect("load KP world map detail");
+        assert_eq!((detail.source_width, detail.source_height), (3_072, 1_536));
+        assert!(detail.assembled);
+        let png = session
+            .asset_png(&world_map, "kp", 0)
+            .expect("extract KP world map PNG");
+        assert_eq!((png.width, png.height), (3_072, 1_536));
+        assert!(png.assembled);
+        assert_eq!(&png.png[..8], b"\x89PNG\r\n\x1a\n");
+
+        let overview_page = session
+            .category_page(&overviews, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("load KP overviews");
+        assert_eq!(overview_page.total_count, 5);
+        assert!(overview_page.items.iter().all(|item| !item.assembled));
+        assert!(
+            overview_page
+                .items
+                .iter()
+                .all(|item| (item.source_width, item.source_height) == (256, 256))
+        );
+
+        let search = session
+            .search_page("KP 세계지도", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("search KP world map");
+        assert_eq!(search.total_count, 1);
+        assert_eq!(search.items[0].thumbnail.block_index, 0);
+
+        let update = session
+            .update_page(
+                &[
+                    AssetSnapshotEntry::new_raw(
+                        "kp",
+                        RawResourceKey {
+                            block_index: 7,
+                            file_number: 0,
+                            file_block_index: 7,
+                        },
+                        48,
+                        48,
+                    ),
+                    AssetSnapshotEntry::new_raw(
+                        "kp",
+                        RawResourceKey {
+                            block_index: 2_055,
+                            file_number: 10,
+                            file_block_index: 7,
+                        },
+                        48,
+                        48,
+                    ),
+                ],
+                0,
+                VIEWER_CATEGORY_PAGE_SIZE,
+            )
+            .expect("deduplicate changed KP layers");
+        assert_eq!(update.total_count, 1);
+        assert_eq!(update.review_required_count, 0);
+        assert!(update.items[0].thumbnail.assembled);
+
+        let summary = inspect_game_directory(&directory.0).expect("inspect KP-only fixture");
+        assert_eq!(summary.archives.len(), 1);
+        assert_eq!(summary.archives[0].prefix, "kp");
+        assert_eq!(summary.archives[0].record_count, 4_101);
+        assert_eq!(summary.archives[0].archive_count, 3);
+        assert_eq!(
+            summary.verified_categories,
+            [
+                VerifiedCategorySummary {
+                    path: overviews.to_vec(),
+                    asset_count: 5,
+                },
+                VerifiedCategorySummary {
+                    path: world_map.to_vec(),
+                    asset_count: 1,
+                },
+            ]
+        );
     }
 
     #[test]
