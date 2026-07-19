@@ -2,6 +2,13 @@
 
 //! Read-only discovery and inspection of a DHO game client installation.
 
+mod snapshot;
+
+pub use snapshot::{
+    ASSET_SNAPSHOT_FORMAT_VERSION, AssetSnapshot, AssetSnapshotChange, AssetSnapshotCompareError,
+    AssetSnapshotDiff, AssetSnapshotEntry, AssetSnapshotError, inspect_asset_snapshot,
+};
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use dho_catalog::{CatalogRecordKey, VerificationStatus, assembly_plan, classify_record};
