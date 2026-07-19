@@ -41,6 +41,31 @@ impl RgbaImage {
         })
     }
 
+    /// Expands exactly one grayscale byte per declared image position into opaque RGBA pixels.
+    pub fn from_gray8(width: u32, height: u32, bytes: &[u8]) -> Result<Self, PixelDecodeError> {
+        let expected_len = pixel_count(width, height)?;
+        if bytes.len() != expected_len {
+            return Err(PixelDecodeError::ByteLengthMismatch {
+                width,
+                height,
+                expected_len,
+                actual_len: bytes.len(),
+            });
+        }
+
+        let rgba_len = pixel_byte_len(width, height)?;
+        let mut pixels = Vec::with_capacity(rgba_len);
+        for gray in bytes {
+            pixels.extend_from_slice(&[*gray, *gray, *gray, 0xff]);
+        }
+
+        Ok(Self {
+            width,
+            height,
+            pixels,
+        })
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -332,7 +357,7 @@ impl fmt::Display for PixelDecodeError {
         match self {
             Self::DimensionOverflow { width, height } => write!(
                 formatter,
-                "BGRA image byte length overflows this platform: width={width}, height={height}"
+                "decoded image byte length overflows this platform: width={width}, height={height}"
             ),
             Self::ByteLengthMismatch {
                 width,
@@ -341,7 +366,7 @@ impl fmt::Display for PixelDecodeError {
                 actual_len,
             } => write!(
                 formatter,
-                "BGRA image byte length mismatch for {width}x{height}: expected {expected_len}, found {actual_len}"
+                "decoded image byte length mismatch for {width}x{height}: expected {expected_len}, found {actual_len}"
             ),
         }
     }
@@ -470,15 +495,20 @@ impl fmt::Display for ImageAssemblyError {
 impl Error for ImageAssemblyError {}
 
 fn pixel_byte_len(width: u32, height: u32) -> Result<usize, PixelDecodeError> {
-    let pixels = usize::try_from(width)
+    pixel_count(width, height)?
+        .checked_mul(4)
+        .ok_or(PixelDecodeError::DimensionOverflow { width, height })
+}
+
+fn pixel_count(width: u32, height: u32) -> Result<usize, PixelDecodeError> {
+    usize::try_from(width)
         .ok()
         .and_then(|width| {
             usize::try_from(height)
                 .ok()
                 .and_then(|height| width.checked_mul(height))
         })
-        .and_then(|pixels| pixels.checked_mul(4));
-    pixels.ok_or(PixelDecodeError::DimensionOverflow { width, height })
+        .ok_or(PixelDecodeError::DimensionOverflow { width, height })
 }
 
 fn checked_dimension_sum(values: &[u32]) -> Option<u32> {
@@ -499,6 +529,31 @@ mod tests {
         assert_eq!(
             image.pixels(),
             &[0x33, 0x22, 0x11, 0x44, 0x77, 0x66, 0x55, 0x88]
+        );
+    }
+
+    #[test]
+    fn expands_grayscale_pixels_to_opaque_rgba() {
+        let image = RgbaImage::from_gray8(2, 1, &[0x11, 0xcc]).expect("valid grayscale pixels");
+
+        assert_eq!(
+            image.pixels(),
+            &[0x11, 0x11, 0x11, 0xff, 0xcc, 0xcc, 0xcc, 0xff]
+        );
+    }
+
+    #[test]
+    fn rejects_an_incorrect_grayscale_byte_length() {
+        let error = RgbaImage::from_gray8(2, 2, &[0; 3]).unwrap_err();
+
+        assert_eq!(
+            error,
+            PixelDecodeError::ByteLengthMismatch {
+                width: 2,
+                height: 2,
+                expected_len: 4,
+                actual_len: 3,
+            }
         );
     }
 
