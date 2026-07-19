@@ -22,7 +22,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 5] = ["im", "sb", "sc", "sd", "is"];
+pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 6] = ["im", "sa", "sb", "sc", "sd", "is"];
 pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 32;
 
 const THUMBNAIL_MAX_WIDTH: u32 = 160;
@@ -1233,7 +1233,7 @@ impl fmt::Display for GameDirectoryError {
             ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 MWC 인덱스(sb, sc, sd, is)를 찾지 못했습니다: {}",
+                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -1437,6 +1437,7 @@ mod tests {
         let directory = TestDirectory::new();
         let resources = directory.prepare_game();
         write_index_records(&resources.join("im000000.bin"), &[[0, 0, 128, 128, 0]], 1);
+        write_index_records(&resources.join("sa000000.bin"), &[[0, 0, 48, 48, 0]], 1);
         write_index(&resources.join("sb000000.bin"), 10);
         write_index(&resources.join("is000000.bin"), 20);
 
@@ -1448,7 +1449,7 @@ mod tests {
                 .iter()
                 .map(|archive| archive.prefix.as_str())
                 .collect::<Vec<_>>(),
-            ["im", "sb", "is"]
+            ["im", "sa", "sb", "is"]
         );
         assert_eq!(summary.archives[0].record_count, 1);
         assert_eq!(summary.archives[0].group_count, 1);
@@ -1457,6 +1458,10 @@ mod tests {
         assert_eq!(
             summary.verified_categories,
             [
+                VerifiedCategorySummary {
+                    path: ["인물", "부관 스킬"].map(str::to_owned).to_vec(),
+                    asset_count: 1,
+                },
                 VerifiedCategorySummary {
                     path: ["장비", "방어구", "몸"].map(str::to_owned).to_vec(),
                     asset_count: 1,

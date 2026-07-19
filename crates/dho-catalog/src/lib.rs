@@ -5,6 +5,7 @@
 mod assembly;
 mod im;
 mod is;
+mod sa;
 mod sb;
 mod sc;
 mod sd;
@@ -265,6 +266,8 @@ impl<'a> Catalog<'a> {
 pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
     if key.archive.eq_ignore_ascii_case("im") {
         Catalog::new(im::RECORD_RULES, &[]).classify(key)
+    } else if key.archive.eq_ignore_ascii_case("sa") {
+        Catalog::new(sa::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("sb") {
         Catalog::new(sb::RECORD_RULES, sb::RESERVATION_RULES).classify(key)
     } else if key.archive.eq_ignore_ascii_case("sc") {
@@ -348,6 +351,15 @@ mod tests {
         }
     }
 
+    fn sa_key(group_code: u32, icon_id: u32, block_index: u32) -> CatalogRecordKey<'static> {
+        CatalogRecordKey {
+            archive: "sa",
+            group_code,
+            icon_id,
+            block_index,
+        }
+    }
+
     fn assert_category(icon_id: u32, expected: &[&str]) {
         let classification = classify_record(key(0, icon_id));
         assert_eq!(
@@ -418,6 +430,39 @@ mod tests {
         }
         assert_eq!(
             classify_record(im_key(6, 6)),
+            RecordClassification::unknown()
+        );
+    }
+
+    #[test]
+    fn classifies_human_verified_sa_boundaries() {
+        for (key, expected) in [
+            (sa_key(0, 0, 0), &["인물", "부관 스킬"][..]),
+            (sa_key(1, 9_999, 829), &["인물", "부관 스킬"]),
+            (sa_key(1, 301, 839), &["UI 아이콘", "감정표현"]),
+            (sa_key(2, 372, 910), &["인물", "부관 스킬"]),
+            (sa_key(2, 1, 911), &["선박", "선박 그레이드 보너스"]),
+            (sa_key(2, 22, 932), &["인물", "부관 스킬"]),
+            (sa_key(3, 31, 941), &["선박", "선박 그레이드 보너스"]),
+            (sa_key(3, 1, 942), &["UI 아이콘", "연금술"]),
+        ] {
+            let classification = classify_record(key);
+            assert_eq!(
+                classification.category.map(CategoryPath::segments),
+                Some(expected)
+            );
+            assert_eq!(
+                classification.boundary_status,
+                VerificationStatus::HumanVerified
+            );
+            assert_eq!(
+                classification.meaning_status,
+                VerificationStatus::HumanVerified
+            );
+        }
+
+        assert_eq!(
+            classify_record(sa_key(3, 99, 944)),
             RecordClassification::unknown()
         );
     }
