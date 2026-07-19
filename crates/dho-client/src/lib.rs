@@ -85,6 +85,17 @@ pub struct VerifiedAssetSearchPage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VerifiedUpdatePage {
+    pub offset: usize,
+    pub page_size: usize,
+    pub total_count: usize,
+    pub detected_record_count: usize,
+    pub review_required_count: usize,
+    pub items: Vec<VerifiedAssetSearchItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VerifiedAssetSearchItem {
     pub path: Vec<String>,
     pub thumbnail: VerifiedAssetThumbnail,
@@ -376,6 +387,96 @@ impl ViewerSession {
             offset,
             page_size,
             total_count,
+            items,
+        })
+    }
+
+    pub fn update_page(
+        &mut self,
+        added_assets: &[AssetSnapshotEntry],
+        offset: usize,
+        page_size: usize,
+    ) -> Result<VerifiedUpdatePage, ViewerSessionError> {
+        if !(1..=VIEWER_CATEGORY_PAGE_SIZE).contains(&page_size) {
+            return Err(ViewerSessionError::InvalidPageSize {
+                requested: page_size,
+                maximum: VIEWER_CATEGORY_PAGE_SIZE,
+            });
+        }
+
+        let mut review_required_count = 0;
+        let mut unique = BTreeMap::<(Vec<String>, String, u32), ResourceKey>::new();
+        for asset in added_assets {
+            let classification = classify_record(CatalogRecordKey {
+                archive: &asset.archive,
+                group_code: asset.group_code,
+                icon_id: asset.icon_id,
+                block_index: asset.block_index,
+            });
+            if classification.boundary_status != VerificationStatus::HumanVerified
+                || classification.meaning_status != VerificationStatus::HumanVerified
+            {
+                review_required_count += 1;
+                continue;
+            }
+            let Some(category) = classification.category else {
+                review_required_count += 1;
+                continue;
+            };
+            let canonical_block = assembly_plan(&asset.archive, asset.block_index)
+                .map_or(asset.block_index, |plan| plan.first_block);
+            let path = category
+                .segments()
+                .iter()
+                .map(|segment| (*segment).to_owned())
+                .collect::<Vec<_>>();
+            unique
+                .entry((path, asset.archive.to_ascii_lowercase(), canonical_block))
+                .or_insert(ResourceKey {
+                    group_code: asset.group_code,
+                    icon_id: asset.icon_id,
+                    block_index: asset.block_index,
+                });
+        }
+
+        let assets = unique
+            .into_iter()
+            .map(|((path, prefix, canonical_block), key)| {
+                let assembled = assembly_plan(&prefix, canonical_block).is_some();
+                VerifiedSearchAssetRef {
+                    path,
+                    asset: VerifiedAssetRef {
+                        prefix,
+                        key,
+                        canonical_block,
+                        assembled,
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
+        let total_count = assets.len();
+        if offset > 0 && offset >= total_count {
+            return Err(ViewerSessionError::OffsetOutOfRange {
+                offset,
+                total_count,
+            });
+        }
+        let end = offset.saturating_add(page_size).min(total_count);
+        let selected = assets.get(offset..end).unwrap_or_default().to_vec();
+        let mut items = Vec::with_capacity(selected.len());
+        for selected in selected {
+            items.push(VerifiedAssetSearchItem {
+                path: selected.path,
+                thumbnail: self.asset_thumbnail(selected.asset)?,
+            });
+        }
+
+        Ok(VerifiedUpdatePage {
+            offset,
+            page_size,
+            total_count,
+            detected_record_count: added_assets.len(),
+            review_required_count,
             items,
         })
     }
@@ -1567,6 +1668,26 @@ mod tests {
             .expect("extract search asset PNG");
         assert_eq!(search_png.block_index, 1);
         assert_eq!(&search_png.png[..8], b"\x89PNG\r\n\x1a\n");
+
+        let added_assets = vec![
+            AssetSnapshotEntry::new("sb", 1, 100_100, 0, 1, 1),
+            AssetSnapshotEntry::new("sb", 1, 100_101, 1, 1, 1),
+            AssetSnapshotEntry::new("sb", 1, 1_200_002, 2, 1, 1),
+            AssetSnapshotEntry::new("SB", 1, 100_100, 0, 1, 1),
+        ];
+        let update_page = session
+            .update_page(&added_assets, 0, 1)
+            .expect("page verified newly added assets");
+        assert_eq!(update_page.detected_record_count, 4);
+        assert_eq!(update_page.review_required_count, 1);
+        assert_eq!(update_page.total_count, 2);
+        assert_eq!(update_page.items.len(), 1);
+        assert_eq!(update_page.items[0].path, ["장비", "방어구", "머리"]);
+        assert_eq!(update_page.items[0].thumbnail.icon_id, 100_100);
+        let second_update_page = session
+            .update_page(&added_assets, 1, 1)
+            .expect("page the next newly added asset");
+        assert_eq!(second_update_page.items[0].thumbnail.icon_id, 100_101);
 
         let empty_page = session
             .search_page("없는 검색어", 0, VIEWER_CATEGORY_PAGE_SIZE)

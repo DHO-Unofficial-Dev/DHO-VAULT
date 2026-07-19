@@ -8,7 +8,7 @@ use asset_baseline::AssetUpdateStatus;
 use dho_client::{
     GameDirectorySummary, VIEWER_CATEGORY_PAGE_SIZE, VerifiedAssetDetail, VerifiedAssetPng,
     VerifiedAssetSearchItem, VerifiedAssetSearchPage, VerifiedCategoryAsset, VerifiedCategoryPage,
-    VerifiedSearchAsset, ViewerSession, inspect_game_directory,
+    VerifiedSearchAsset, VerifiedUpdatePage, ViewerSession, inspect_game_directory,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -419,6 +419,27 @@ async fn create_asset_update_baseline(
     })
     .await
     .map_err(|error| format!("업데이트 기준점 저장 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn load_verified_update_page(
+    app: tauri::AppHandle,
+    offset: usize,
+    session: State<'_, SharedViewerSession>,
+) -> Result<VerifiedUpdatePage, String> {
+    let baseline_path = viewer_asset_baseline_path(&app)?;
+    let resource_directory = selected_resource_directory(&session)?;
+    let session = session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let report = asset_baseline::load_report(&baseline_path, &resource_directory)?;
+        session
+            .lock()
+            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?
+            .update_page(&report.added_assets, offset, VIEWER_CATEGORY_PAGE_SIZE)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("신규 이미지 목록 작업이 중단되었습니다: {error}"))?
 }
 
 #[tauri::command]
@@ -995,6 +1016,7 @@ fn main() {
             pick_game_directory,
             load_asset_update_status,
             create_asset_update_baseline,
+            load_verified_update_page,
             load_verified_category_page,
             load_verified_asset_search_page,
             load_verified_asset_detail,
