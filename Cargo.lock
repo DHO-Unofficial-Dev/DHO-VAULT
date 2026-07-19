@@ -561,6 +561,7 @@ dependencies = [
  "dho-extract",
  "flate2",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
