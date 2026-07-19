@@ -4,8 +4,8 @@
 
 use dho_client::{
     GameDirectorySummary, VIEWER_CATEGORY_PAGE_SIZE, VerifiedAssetDetail, VerifiedAssetPng,
-    VerifiedAssetSearchPage, VerifiedCategoryAsset, VerifiedCategoryPage, ViewerSession,
-    inspect_game_directory,
+    VerifiedAssetSearchItem, VerifiedAssetSearchPage, VerifiedCategoryAsset, VerifiedCategoryPage,
+    ViewerSession, inspect_game_directory,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -64,6 +64,26 @@ impl From<&VerifiedCategoryAsset> for PageAssetPlan {
             icon_id: asset.icon_id(),
             block_index: asset.block_index(),
             assembled: asset.assembled(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchPageAssetPlan {
+    path: Vec<String>,
+    asset: PageAssetPlan,
+}
+
+impl From<&VerifiedAssetSearchItem> for SearchPageAssetPlan {
+    fn from(item: &VerifiedAssetSearchItem) -> Self {
+        Self {
+            path: item.path.clone(),
+            asset: PageAssetPlan {
+                archive: item.thumbnail.archive.clone(),
+                icon_id: item.thumbnail.icon_id,
+                block_index: item.thumbnail.block_index,
+                assembled: item.thumbnail.assembled,
+            },
         }
     }
 }
@@ -481,6 +501,52 @@ async fn save_verified_category_page(
 }
 
 #[tauri::command]
+async fn save_verified_search_page(
+    app: tauri::AppHandle,
+    query: String,
+    offset: usize,
+    session: State<'_, SharedViewerSession>,
+) -> Result<Option<SavedVerifiedPage>, String> {
+    let selection = app
+        .dialog()
+        .file()
+        .set_title("검색 결과 현재 페이지 PNG 저장 폴더 선택")
+        .blocking_pick_folder();
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let destination = selection
+        .into_path()
+        .map_err(|error| format!("선택한 저장 폴더를 처리하지 못했습니다: {error}"))?;
+    let session = session.inner().clone();
+    let saved = tauri::async_runtime::spawn_blocking(move || {
+        let mut session = session
+            .lock()
+            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?;
+        let page = session
+            .search_page(&query, offset, VIEWER_CATEGORY_PAGE_SIZE)
+            .map_err(|error| error.to_string())?;
+        let assets = page
+            .items
+            .iter()
+            .map(SearchPageAssetPlan::from)
+            .collect::<Vec<_>>();
+        save_verified_search_page_assets(&destination, &assets, |asset| {
+            session
+                .asset_png(&asset.path, &asset.asset.archive, asset.asset.block_index)
+                .map_err(|error| error.to_string())
+        })?;
+        Ok::<_, String>(SavedVerifiedPage {
+            saved_count: assets.len(),
+        })
+    })
+    .await
+    .map_err(|error| format!("검색 결과 현재 페이지 저장 작업이 중단되었습니다: {error}"))??;
+
+    Ok(Some(saved))
+}
+
+#[tauri::command]
 async fn start_verified_category_export(
     app: tauri::AppHandle,
     path: Vec<String>,
@@ -678,6 +744,31 @@ where
     }
 }
 
+fn save_verified_search_page_assets<F>(
+    directory: &Path,
+    assets: &[SearchPageAssetPlan],
+    mut load: F,
+) -> Result<(), String>
+where
+    F: FnMut(&SearchPageAssetPlan) -> Result<VerifiedAssetPng, String>,
+{
+    let plans = assets
+        .iter()
+        .map(|asset| asset.asset.clone())
+        .collect::<Vec<_>>();
+    let mut asset_index = 0;
+    save_verified_asset_page(directory, &plans, |plan| {
+        let asset = assets
+            .get(asset_index)
+            .ok_or_else(|| "검색 결과 저장 순서가 일치하지 않습니다.".to_owned())?;
+        asset_index += 1;
+        if &asset.asset != plan {
+            return Err("검색 결과 저장 계획이 일치하지 않습니다.".to_owned());
+        }
+        load(asset)
+    })
+}
+
 fn run_category_export(
     session: SharedViewerSession,
     destination: PathBuf,
@@ -756,6 +847,7 @@ fn main() {
             load_verified_asset_detail,
             save_verified_asset_png,
             save_verified_category_page,
+            save_verified_search_page,
             start_verified_category_export,
             get_verified_category_export_status,
             cancel_verified_category_export
@@ -799,6 +891,24 @@ mod tests {
             assembled: false,
             png: b"test-png".to_vec(),
         }
+    }
+
+    fn test_search_plan(path: &[&str], block_index: u32) -> SearchPageAssetPlan {
+        let item = VerifiedAssetSearchItem {
+            path: path.iter().map(|segment| (*segment).to_owned()).collect(),
+            thumbnail: dho_client::VerifiedAssetThumbnail {
+                archive: "sb".to_owned(),
+                icon_id: 100_100 + block_index,
+                block_index,
+                source_width: 1,
+                source_height: 1,
+                thumbnail_width: 1,
+                thumbnail_height: 1,
+                assembled: false,
+                thumbnail_data_url: String::new(),
+            },
+        };
+        SearchPageAssetPlan::from(&item)
     }
 
     #[test]
@@ -883,6 +993,37 @@ mod tests {
             save_verified_asset_page(&directory, &assets, |plan| Ok(test_asset(plan))).is_err()
         );
 
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn saves_search_page_assets_in_result_order_with_their_paths() {
+        let directory = test_directory("search-page-save");
+        fs::create_dir(&directory).expect("create test directory");
+        let assets = [
+            test_search_plan(&["장비", "방어구", "머리"], 1),
+            test_search_plan(&["아이템", "소비품"], 2),
+        ];
+        let mut loaded_paths = Vec::new();
+
+        save_verified_search_page_assets(&directory, &assets, |asset| {
+            loaded_paths.push(asset.path.clone());
+            Ok(test_asset(&asset.asset))
+        })
+        .expect("save verified search page");
+
+        assert_eq!(
+            loaded_paths,
+            assets
+                .iter()
+                .map(|asset| asset.path.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            assets
+                .iter()
+                .all(|asset| directory.join(page_asset_file_name(&asset.asset)).is_file())
+        );
         fs::remove_dir_all(directory).expect("remove test directory");
     }
 
