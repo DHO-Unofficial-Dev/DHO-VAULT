@@ -5,7 +5,7 @@
 use dho_client::{
     GameDirectorySummary, VIEWER_CATEGORY_PAGE_SIZE, VerifiedAssetDetail, VerifiedAssetPng,
     VerifiedAssetSearchItem, VerifiedAssetSearchPage, VerifiedCategoryAsset, VerifiedCategoryPage,
-    ViewerSession, inspect_game_directory,
+    VerifiedSearchAsset, ViewerSession, inspect_game_directory,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -65,6 +65,40 @@ impl From<&VerifiedCategoryAsset> for PageAssetPlan {
             block_index: asset.block_index(),
             assembled: asset.assembled(),
         }
+    }
+}
+
+impl From<&VerifiedSearchAsset> for PageAssetPlan {
+    fn from(asset: &VerifiedSearchAsset) -> Self {
+        Self {
+            archive: asset.archive().to_owned(),
+            icon_id: asset.icon_id(),
+            block_index: asset.block_index(),
+            assembled: asset.assembled(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum ExportAsset {
+    Category(VerifiedCategoryAsset),
+    Search(VerifiedSearchAsset),
+}
+
+impl ExportAsset {
+    fn plan(&self) -> PageAssetPlan {
+        match self {
+            Self::Category(asset) => PageAssetPlan::from(asset),
+            Self::Search(asset) => PageAssetPlan::from(asset),
+        }
+    }
+
+    fn extract_png(&self, session: &mut ViewerSession) -> Result<VerifiedAssetPng, String> {
+        match self {
+            Self::Category(asset) => session.category_asset_png(asset),
+            Self::Search(asset) => session.search_asset_png(asset),
+        }
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -146,7 +180,7 @@ impl CategoryExportManager {
                 .lock()
                 .map_err(|_| "전체 저장 진행 상태를 확인하지 못했습니다.".to_owned())?;
             if status.state == CategoryExportState::Running {
-                return Err("이미 카테고리 전체 저장이 진행 중입니다.".to_owned());
+                return Err("이미 전체 저장 작업이 진행 중입니다.".to_owned());
             }
         }
         Ok(())
@@ -163,7 +197,7 @@ impl CategoryExportManager {
                 .lock()
                 .map_err(|_| "전체 저장 진행 상태를 확인하지 못했습니다.".to_owned())?;
             if status.state == CategoryExportState::Running {
-                return Err("이미 카테고리 전체 저장이 진행 중입니다.".to_owned());
+                return Err("이미 전체 저장 작업이 진행 중입니다.".to_owned());
             }
         }
         let job_id = self.next_job_id.fetch_add(1, Ordering::Relaxed) + 1;
@@ -577,7 +611,11 @@ async fn start_verified_category_export(
     })
     .await
     .map_err(|error| format!("전체 저장 목록 확인 작업이 중단되었습니다: {error}"))??;
-    let plans = assets.iter().map(PageAssetPlan::from).collect::<Vec<_>>();
+    let assets = assets
+        .into_iter()
+        .map(ExportAsset::Category)
+        .collect::<Vec<_>>();
+    let plans = assets.iter().map(ExportAsset::plan).collect::<Vec<_>>();
     preflight_asset_batch(&destination, &plans)?;
 
     let exports = exports.inner().clone();
@@ -585,7 +623,7 @@ async fn start_verified_category_export(
     let control = exports.start(total_count)?;
     let job_id = control.job_id;
     std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
-        run_category_export(
+        run_asset_export(
             session,
             destination,
             assets,
@@ -602,7 +640,66 @@ async fn start_verified_category_export(
 }
 
 #[tauri::command]
-fn get_verified_category_export_status(
+async fn start_verified_search_export(
+    app: tauri::AppHandle,
+    query: String,
+    session: State<'_, SharedViewerSession>,
+    exports: State<'_, SharedCategoryExportManager>,
+) -> Result<Option<StartedCategoryExport>, String> {
+    exports.ensure_idle()?;
+    let selection = app
+        .dialog()
+        .file()
+        .set_title("검색 결과 전체 PNG 저장 폴더 선택")
+        .blocking_pick_folder();
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let destination = selection
+        .into_path()
+        .map_err(|error| format!("선택한 저장 폴더를 처리하지 못했습니다: {error}"))?;
+
+    let session = session.inner().clone();
+    let manifest_session = session.clone();
+    let assets = tauri::async_runtime::spawn_blocking(move || {
+        manifest_session
+            .lock()
+            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?
+            .search_assets(&query)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("검색 결과 전체 저장 목록 확인 작업이 중단되었습니다: {error}"))??;
+    let assets = assets
+        .into_iter()
+        .map(ExportAsset::Search)
+        .collect::<Vec<_>>();
+    let plans = assets.iter().map(ExportAsset::plan).collect::<Vec<_>>();
+    preflight_asset_batch(&destination, &plans)?;
+
+    let exports = exports.inner().clone();
+    let total_count = plans.len();
+    let control = exports.start(total_count)?;
+    let job_id = control.job_id;
+    std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+        run_asset_export(
+            session,
+            destination,
+            assets,
+            plans,
+            control.cancel,
+            control.status,
+        );
+    }));
+
+    Ok(Some(StartedCategoryExport {
+        job_id,
+        total_count,
+    }))
+}
+
+#[tauri::command]
+fn get_verified_asset_export_status(
     job_id: u64,
     exports: State<'_, SharedCategoryExportManager>,
 ) -> Result<CategoryExportStatus, String> {
@@ -610,7 +707,7 @@ fn get_verified_category_export_status(
 }
 
 #[tauri::command]
-fn cancel_verified_category_export(
+fn cancel_verified_asset_export(
     job_id: u64,
     exports: State<'_, SharedCategoryExportManager>,
 ) -> Result<bool, String> {
@@ -769,10 +866,10 @@ where
     })
 }
 
-fn run_category_export(
+fn run_asset_export(
     session: SharedViewerSession,
     destination: PathBuf,
-    assets: Vec<VerifiedCategoryAsset>,
+    assets: Vec<ExportAsset>,
     plans: Vec<PageAssetPlan>,
     cancel: Arc<AtomicBool>,
     status: Arc<Mutex<CategoryExportStatus>>,
@@ -794,9 +891,7 @@ fn run_category_export(
                     .get(asset_index)
                     .ok_or_else(|| "전체 저장 자산 순서가 일치하지 않습니다.".to_owned())?;
                 asset_index += 1;
-                session
-                    .category_asset_png(asset)
-                    .map_err(|error| error.to_string())
+                asset.extract_png(&mut session)
             },
             |completed_count, total_count| {
                 let mut current = status
@@ -849,8 +944,9 @@ fn main() {
             save_verified_category_page,
             save_verified_search_page,
             start_verified_category_export,
-            get_verified_category_export_status,
-            cancel_verified_category_export
+            start_verified_search_export,
+            get_verified_asset_export_status,
+            cancel_verified_asset_export
         ])
         .run(tauri::generate_context!())
         .expect("failed to run DHO-VAULT viewer");
@@ -1094,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn manages_one_category_export_at_a_time() {
+    fn manages_one_asset_export_at_a_time() {
         let manager = CategoryExportManager::default();
         let first = manager.start(3).expect("start first export");
 

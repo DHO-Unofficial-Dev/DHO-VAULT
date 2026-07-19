@@ -144,6 +144,31 @@ impl VerifiedCategoryAsset {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct VerifiedSearchAsset(VerifiedSearchAssetRef);
+
+impl VerifiedSearchAsset {
+    pub fn path(&self) -> &[String] {
+        &self.0.path
+    }
+
+    pub fn archive(&self) -> &str {
+        &self.0.asset.prefix
+    }
+
+    pub fn icon_id(&self) -> u32 {
+        self.0.asset.key.icon_id
+    }
+
+    pub fn block_index(&self) -> u32 {
+        self.0.asset.canonical_block
+    }
+
+    pub fn assembled(&self) -> bool {
+        self.0.asset.assembled
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ViewerSession {
     resource_directory: Option<PathBuf>,
@@ -310,10 +335,6 @@ impl ViewerSession {
         offset: usize,
         page_size: usize,
     ) -> Result<VerifiedAssetSearchPage, ViewerSessionError> {
-        let query = query.trim();
-        if query.is_empty() {
-            return Err(ViewerSessionError::EmptySearchQuery);
-        }
         if !(1..=VIEWER_CATEGORY_PAGE_SIZE).contains(&page_size) {
             return Err(ViewerSessionError::InvalidPageSize {
                 requested: page_size,
@@ -321,16 +342,7 @@ impl ViewerSession {
             });
         }
 
-        let terms = query
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .collect::<Vec<_>>();
-        let matching = self
-            .verified_search_assets()?
-            .iter()
-            .filter(|asset| search_asset_matches(asset, &terms))
-            .cloned()
-            .collect::<Vec<_>>();
+        let (query, matching) = self.matching_search_assets(query)?;
         let total_count = matching.len();
         if offset > 0 && offset >= total_count {
             return Err(ViewerSessionError::OffsetOutOfRange {
@@ -349,7 +361,7 @@ impl ViewerSession {
         }
 
         Ok(VerifiedAssetSearchPage {
-            query: query.to_owned(),
+            query,
             offset,
             page_size,
             total_count,
@@ -373,11 +385,26 @@ impl ViewerSession {
         Ok(assets.into_iter().map(VerifiedCategoryAsset).collect())
     }
 
+    pub fn search_assets(
+        &mut self,
+        query: &str,
+    ) -> Result<Vec<VerifiedSearchAsset>, ViewerSessionError> {
+        let (_, assets) = self.matching_search_assets(query)?;
+        Ok(assets.into_iter().map(VerifiedSearchAsset).collect())
+    }
+
     pub fn category_asset_png(
         &mut self,
         asset: &VerifiedCategoryAsset,
     ) -> Result<VerifiedAssetPng, ViewerSessionError> {
         self.extract_asset_png(asset.0.clone())
+    }
+
+    pub fn search_asset_png(
+        &mut self,
+        asset: &VerifiedSearchAsset,
+    ) -> Result<VerifiedAssetPng, ViewerSessionError> {
+        self.extract_asset_png(asset.0.asset.clone())
     }
 
     pub fn asset_detail(
@@ -689,6 +716,27 @@ impl ViewerSession {
         }
 
         Ok(assets)
+    }
+
+    fn matching_search_assets(
+        &mut self,
+        query: &str,
+    ) -> Result<(String, Vec<VerifiedSearchAssetRef>), ViewerSessionError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err(ViewerSessionError::EmptySearchQuery);
+        }
+        let terms = query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect::<Vec<_>>();
+        let assets = self
+            .verified_search_assets()?
+            .iter()
+            .filter(|asset| search_asset_matches(asset, &terms))
+            .cloned()
+            .collect();
+        Ok((query.to_owned(), assets))
     }
 
     fn verified_search_assets(&mut self) -> Result<&[VerifiedSearchAssetRef], ViewerSessionError> {
@@ -1496,6 +1544,18 @@ mod tests {
             .expect("search exact icon ID");
         assert_eq!(id_page.total_count, 1);
         assert_eq!(id_page.items[0].thumbnail.block_index, 0);
+
+        let search_assets = session
+            .search_assets("머리")
+            .expect("list matching search assets without thumbnails");
+        assert_eq!(search_assets.len(), 2);
+        assert_eq!(search_assets[0].path(), ["장비", "방어구", "머리"]);
+        assert_eq!(search_assets[1].icon_id(), 100_101);
+        let search_png = session
+            .search_asset_png(&search_assets[1])
+            .expect("extract search asset PNG");
+        assert_eq!(search_png.block_index, 1);
+        assert_eq!(&search_png.png[..8], b"\x89PNG\r\n\x1a\n");
 
         let empty_page = session
             .search_page("없는 검색어", 0, VIEWER_CATEGORY_PAGE_SIZE)

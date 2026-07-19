@@ -19,7 +19,7 @@ const galleryTitle = document.querySelector("#gallery-title");
 const galleryStatus = document.querySelector("#gallery-status");
 const galleryGrid = document.querySelector("#gallery-grid");
 const savePageButton = document.querySelector("#save-page");
-const saveCategoryButton = document.querySelector("#save-category");
+const saveAllButton = document.querySelector("#save-all");
 const categoryExport = document.querySelector("#category-export");
 const categoryExportStatus = document.querySelector("#category-export-status");
 const categoryExportProgress = document.querySelector(
@@ -90,9 +90,8 @@ function setCategoryExportBusy(busy) {
     button.disabled = busy;
   }
   const hasPageItems = (currentPage?.items.length ?? 0) > 0;
-  const categoryPage = currentPage?.mode === "category";
   savePageButton.disabled = busy || !hasPageItems;
-  saveCategoryButton.disabled = busy || !categoryPage;
+  saveAllButton.disabled = busy || !hasPageItems;
   if (currentPage === null) {
     previousPage.disabled = true;
     nextPage.disabled = true;
@@ -115,7 +114,8 @@ function clearSummary() {
   galleryStatus.textContent = "";
   savePageButton.disabled = true;
   savePageButton.textContent = "현재 페이지 저장";
-  saveCategoryButton.disabled = true;
+  saveAllButton.disabled = true;
+  saveAllButton.textContent = "카테고리 전체 저장";
   galleryGrid.replaceChildren();
   pagePosition.textContent = "";
   categoryPanel.hidden = true;
@@ -266,7 +266,10 @@ function renderGallery(page) {
   galleryStatus.textContent = galleryPageStatus(page);
   pagePosition.textContent = `${formatNumber(currentNumber)} / ${formatNumber(pageCount)} 페이지`;
   savePageButton.disabled = categoryExportBusy || page.items.length === 0;
-  saveCategoryButton.disabled = categoryExportBusy || searchMode;
+  saveAllButton.disabled = categoryExportBusy || page.items.length === 0;
+  saveAllButton.textContent = searchMode
+    ? "검색 결과 전체 저장"
+    : "카테고리 전체 저장";
   previousPage.disabled = categoryExportBusy || page.offset === 0;
   nextPage.disabled = categoryExportBusy || last >= page.totalCount;
 }
@@ -286,7 +289,7 @@ async function saveCurrentPage() {
   }
   const requestedPage = currentPage;
   savePageButton.disabled = true;
-  saveCategoryButton.disabled = true;
+  saveAllButton.disabled = true;
   savePageButton.textContent = "저장 중…";
   galleryStatus.textContent = "저장할 폴더를 선택해 주세요";
 
@@ -313,8 +316,8 @@ async function saveCurrentPage() {
   } finally {
     if (currentPage === requestedPage) {
       savePageButton.disabled = categoryExportBusy;
-      saveCategoryButton.disabled =
-        categoryExportBusy || requestedPage.mode !== "category";
+      saveAllButton.disabled =
+        categoryExportBusy || requestedPage.items.length === 0;
       savePageButton.textContent = "현재 페이지 저장";
     }
   }
@@ -346,7 +349,7 @@ async function pollCategoryExport() {
 
   try {
     const status = await window.__TAURI__.core.invoke(
-      "get_verified_category_export_status",
+      "get_verified_asset_export_status",
       { jobId: requestedExport.jobId },
     );
     if (currentCategoryExport !== requestedExport) {
@@ -384,8 +387,12 @@ async function pollCategoryExport() {
   }
 }
 
-async function startCategoryExport() {
-  if (currentPage?.mode !== "category" || categoryExportBusy) {
+async function startAssetExport() {
+  if (
+    currentPage === null ||
+    currentPage.items.length === 0 ||
+    categoryExportBusy
+  ) {
     return;
   }
   const requestedPage = currentPage;
@@ -396,9 +403,14 @@ async function startCategoryExport() {
   setCategoryExportBusy(true);
 
   try {
+    const searchMode = requestedPage.mode === "search";
     const started = await window.__TAURI__.core.invoke(
-      "start_verified_category_export",
-      { path: requestedPage.path },
+      searchMode
+        ? "start_verified_search_export"
+        : "start_verified_category_export",
+      searchMode
+        ? { query: requestedPage.query }
+        : { path: requestedPage.path },
     );
     if (currentPage !== requestedPage) {
       return;
@@ -433,7 +445,7 @@ async function cancelCategoryExport() {
   categoryExportStatus.textContent = "현재 이미지 처리가 끝나면 취소합니다";
 
   try {
-    await window.__TAURI__.core.invoke("cancel_verified_category_export", {
+    await window.__TAURI__.core.invoke("cancel_verified_asset_export", {
       jobId: requestedExport.jobId,
     });
   } catch (error) {
@@ -567,7 +579,7 @@ async function loadCategoryPage(path, offset) {
   galleryStatus.textContent = "썸네일을 불러오는 중입니다";
   savePageButton.disabled = true;
   savePageButton.textContent = "현재 페이지 저장";
-  saveCategoryButton.disabled = true;
+  saveAllButton.disabled = true;
   galleryGrid.dataset.status = "loading";
   galleryGrid.replaceChildren();
   pagePosition.textContent = "불러오는 중";
@@ -619,7 +631,7 @@ async function loadSearchPage(query, offset) {
   galleryStatus.textContent = "검색 결과를 불러오는 중입니다";
   savePageButton.disabled = true;
   savePageButton.textContent = "현재 페이지 저장";
-  saveCategoryButton.disabled = true;
+  saveAllButton.disabled = true;
   galleryGrid.dataset.status = "loading";
   galleryGrid.replaceChildren();
   pagePosition.textContent = "불러오는 중";
@@ -791,7 +803,7 @@ assetSearchForm.addEventListener("submit", (event) => {
 closeDetailButton.addEventListener("click", closeDetail);
 downloadDetailButton.addEventListener("click", saveCurrentDetail);
 savePageButton.addEventListener("click", saveCurrentPage);
-saveCategoryButton.addEventListener("click", startCategoryExport);
+saveAllButton.addEventListener("click", startAssetExport);
 cancelCategoryExportButton.addEventListener("click", cancelCategoryExport);
 detailDialog.addEventListener("close", () => {
   detailRequestId += 1;
