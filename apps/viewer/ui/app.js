@@ -89,8 +89,9 @@ function setCategoryExportBusy(busy) {
   for (const button of galleryGrid.querySelectorAll(".gallery-item")) {
     button.disabled = busy;
   }
+  const hasPageItems = (currentPage?.items.length ?? 0) > 0;
   const categoryPage = currentPage?.mode === "category";
-  savePageButton.disabled = busy || !categoryPage;
+  savePageButton.disabled = busy || !hasPageItems;
   saveCategoryButton.disabled = busy || !categoryPage;
   if (currentPage === null) {
     previousPage.disabled = true;
@@ -264,7 +265,7 @@ function renderGallery(page) {
   const pageCount = Math.ceil(page.totalCount / page.pageSize);
   galleryStatus.textContent = galleryPageStatus(page);
   pagePosition.textContent = `${formatNumber(currentNumber)} / ${formatNumber(pageCount)} 페이지`;
-  savePageButton.disabled = categoryExportBusy || searchMode;
+  savePageButton.disabled = categoryExportBusy || page.items.length === 0;
   saveCategoryButton.disabled = categoryExportBusy || searchMode;
   previousPage.disabled = categoryExportBusy || page.offset === 0;
   nextPage.disabled = categoryExportBusy || last >= page.totalCount;
@@ -280,7 +281,7 @@ function galleryPageStatus(page) {
 }
 
 async function saveCurrentPage() {
-  if (currentPage?.mode !== "category") {
+  if (currentPage === null || currentPage.items.length === 0) {
     return;
   }
   const requestedPage = currentPage;
@@ -290,12 +291,12 @@ async function saveCurrentPage() {
   galleryStatus.textContent = "저장할 폴더를 선택해 주세요";
 
   try {
+    const searchMode = requestedPage.mode === "search";
     const saved = await window.__TAURI__.core.invoke(
-      "save_verified_category_page",
-      {
-        path: requestedPage.path,
-        offset: requestedPage.offset,
-      },
+      searchMode ? "save_verified_search_page" : "save_verified_category_page",
+      searchMode
+        ? { query: requestedPage.query, offset: requestedPage.offset }
+        : { path: requestedPage.path, offset: requestedPage.offset },
     );
     if (currentPage !== requestedPage) {
       return;
@@ -311,8 +312,9 @@ async function saveCurrentPage() {
     }
   } finally {
     if (currentPage === requestedPage) {
-      savePageButton.disabled = false;
-      saveCategoryButton.disabled = categoryExportBusy;
+      savePageButton.disabled = categoryExportBusy;
+      saveCategoryButton.disabled =
+        categoryExportBusy || requestedPage.mode !== "category";
       savePageButton.textContent = "현재 페이지 저장";
     }
   }
