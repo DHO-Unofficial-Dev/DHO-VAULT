@@ -17,6 +17,7 @@ mod sw;
 mod sx;
 mod sy;
 mod sz;
+mod tm;
 
 pub use assembly::{AssemblyPlan, AssemblyRule, TileOrder};
 use serde::Serialize;
@@ -298,6 +299,8 @@ pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
         Catalog::new(sy::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("sz") {
         Catalog::new(sz::RECORD_RULES, &[]).classify(key)
+    } else if key.archive.eq_ignore_ascii_case("tm") {
+        Catalog::new(tm::RECORD_RULES, &[]).classify(key)
     } else if key.archive.eq_ignore_ascii_case("is") {
         Catalog::new(is::RECORD_RULES, &[]).classify(key)
     } else {
@@ -368,6 +371,40 @@ mod tests {
                 group_code: 0,
                 icon_id: 88,
                 block_index: 88,
+            }),
+            RecordClassification::unknown()
+        );
+    }
+
+    #[test]
+    fn classifies_only_the_reviewed_tm_minimap_blocks() {
+        for block_index in [0, 198, 212, 248] {
+            let classification = classify_record(CatalogRecordKey {
+                archive: "tm",
+                group_code: 0,
+                icon_id: block_index,
+                block_index,
+            });
+            assert_eq!(
+                classification.category.map(CategoryPath::segments),
+                Some(&["지도", "도시·항구 미니맵 (180×139~141)"][..])
+            );
+            assert_eq!(
+                classification.boundary_status,
+                VerificationStatus::HumanVerified
+            );
+            assert_eq!(
+                classification.meaning_status,
+                VerificationStatus::HumanVerified
+            );
+        }
+
+        assert_eq!(
+            classify_record(CatalogRecordKey {
+                archive: "tm",
+                group_code: 0,
+                icon_id: 249,
+                block_index: 249,
             }),
             RecordClassification::unknown()
         );

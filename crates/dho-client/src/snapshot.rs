@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::{INDEXED_ARCHIVE_PREFIXES, RAW_IMAGE_ARCHIVES, resolve_archive_directory};
+use crate::{
+    INDEXED_ARCHIVE_PREFIXES, RAW_IMAGE_ARCHIVES, raw_archive_path, resolve_archive_directory,
+};
 use dho_core::{IndexParseError, IndexedArchive};
 use dho_extract::{ExtractError, LoadedRawImageArchive, RawResourceKey};
 use serde::{Deserialize, Serialize};
@@ -225,17 +227,15 @@ pub fn inspect_asset_snapshot(
 
     for definition in RAW_IMAGE_ARCHIVES {
         let directory = resolve_archive_directory(resource_directory, definition.prefix);
-        if !directory
-            .join(format!("{}000001.bin", definition.prefix))
-            .is_file()
-        {
+        if !raw_archive_path(resource_directory, definition).is_some_and(|path| path.is_file()) {
             continue;
         }
         archives += 1;
-        let archive = LoadedRawImageArchive::open(
+        let archive = LoadedRawImageArchive::open_files(
             directory,
             definition.prefix,
-            definition.archive_count,
+            definition.file_numbers,
+            definition.layout,
             definition.spec,
         )
         .map_err(|source| AssetSnapshotError::OpenRawArchive {
@@ -373,7 +373,7 @@ impl fmt::Display for AssetSnapshotError {
             ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 이미지 리소스(im, sa, sb, sc, sd, se, sf, sg, sh, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
+                "지원하는 이미지 리소스(im, sa, sb, sc, sd, se, sf, sg, sh, tm, sw, sx, sy, sz, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -454,6 +454,25 @@ mod tests {
         block.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
         block.extend_from_slice(&compressed);
         block
+    }
+
+    fn inline_archive(raw_blocks: &[Vec<u8>]) -> Vec<u8> {
+        let blocks = raw_blocks
+            .iter()
+            .map(|raw| zlib_block(raw))
+            .collect::<Vec<_>>();
+        let mut offset = 4 + blocks.len() * 8;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
+        for block in &blocks {
+            bytes.extend_from_slice(&(offset as u32).to_le_bytes());
+            bytes.extend_from_slice(&(block.len() as u32).to_le_bytes());
+            offset += block.len();
+        }
+        for block in blocks {
+            bytes.extend_from_slice(&block);
+        }
+        bytes
     }
 
     #[test]
@@ -610,6 +629,34 @@ mod tests {
         assert_eq!(snapshot.assets[0].file_block_index, Some(0));
         assert_eq!(snapshot.assets[1].block_index, 1);
         assert_eq!(snapshot.assets[1].file_block_index, Some(1));
+    }
+
+    #[test]
+    fn reads_inline_tm_blocks_from_file_zero_with_variable_dimensions() {
+        let directory = TestDirectory::new();
+        let inline = directory.0.join("0000");
+        fs::create_dir(&inline).expect("create inline resource directory");
+        fs::write(
+            inline.join("tm000000.bin"),
+            inline_archive(&[vec![0x11; 180 * 140 * 4], vec![0xcc; 180 * 141 * 4]]),
+        )
+        .expect("write TM inline archive");
+
+        let snapshot = inspect_asset_snapshot(&directory.0).expect("inspect TM snapshot");
+
+        assert_eq!(snapshot.assets.len(), 2);
+        assert_eq!(snapshot.assets[0].archive, "tm");
+        assert_eq!(snapshot.assets[0].source_kind, AssetSourceKind::RawBlock);
+        assert_eq!(snapshot.assets[0].data_file_number, Some(0));
+        assert_eq!(snapshot.assets[0].file_block_index, Some(0));
+        assert_eq!(
+            (snapshot.assets[0].width, snapshot.assets[0].height),
+            (180, 140)
+        );
+        assert_eq!(
+            (snapshot.assets[1].width, snapshot.assets[1].height),
+            (180, 141)
+        );
     }
 
     #[test]
