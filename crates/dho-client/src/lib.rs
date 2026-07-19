@@ -22,7 +22,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 6] = ["im", "sa", "sb", "sc", "sd", "is"];
+pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 7] = ["im", "sa", "sb", "sc", "sd", "se", "is"];
 pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 32;
 
 const THUMBNAIL_MAX_WIDTH: u32 = 160;
@@ -1233,7 +1233,7 @@ impl fmt::Display for GameDirectoryError {
             ),
             Self::NoSupportedArchives { path } => write!(
                 formatter,
-                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, is)를 찾지 못했습니다: {}",
+                "지원하는 MWC 인덱스(im, sa, sb, sc, sd, se, is)를 찾지 못했습니다: {}",
                 path.display()
             ),
         }
@@ -1439,6 +1439,7 @@ mod tests {
         write_index_records(&resources.join("im000000.bin"), &[[0, 0, 128, 128, 0]], 1);
         write_index_records(&resources.join("sa000000.bin"), &[[0, 0, 48, 48, 0]], 1);
         write_index(&resources.join("sb000000.bin"), 10);
+        write_index_records(&resources.join("se000000.bin"), &[[0, 0, 120, 24, 0]], 1);
         write_index(&resources.join("is000000.bin"), 20);
 
         let summary = inspect_game_directory(&directory.0).expect("inspect game directory");
@@ -1449,7 +1450,7 @@ mod tests {
                 .iter()
                 .map(|archive| archive.prefix.as_str())
                 .collect::<Vec<_>>(),
-            ["im", "sa", "sb", "is"]
+            ["im", "sa", "sb", "se", "is"]
         );
         assert_eq!(summary.archives[0].record_count, 1);
         assert_eq!(summary.archives[0].group_count, 1);
@@ -1458,6 +1459,10 @@ mod tests {
         assert_eq!(
             summary.verified_categories,
             [
+                VerifiedCategorySummary {
+                    path: ["UI 이미지", "텍스트 라벨"].map(str::to_owned).to_vec(),
+                    asset_count: 1,
+                },
                 VerifiedCategorySummary {
                     path: ["인물", "부관 스킬"].map(str::to_owned).to_vec(),
                     asset_count: 1,
