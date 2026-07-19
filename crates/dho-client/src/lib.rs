@@ -305,6 +305,10 @@ fn thumbnail_cache_size(thumbnail: &VerifiedAssetThumbnail) -> usize {
 }
 
 impl ViewerSession {
+    pub fn resource_directory(&self) -> Option<&Path> {
+        self.resource_directory.as_deref()
+    }
+
     pub fn set_resource_directory(&mut self, path: impl Into<PathBuf>) {
         let path = path.into();
         if self.resource_directory.as_ref() != Some(&path) {

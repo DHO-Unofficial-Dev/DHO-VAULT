@@ -2,6 +2,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod asset_baseline;
+
+use asset_baseline::AssetUpdateStatus;
 use dho_client::{
     GameDirectorySummary, VIEWER_CATEGORY_PAGE_SIZE, VerifiedAssetDetail, VerifiedAssetPng,
     VerifiedAssetSearchItem, VerifiedAssetSearchPage, VerifiedCategoryAsset, VerifiedCategoryPage,
@@ -273,6 +276,13 @@ fn viewer_preferences_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("앱 설정 폴더를 확인하지 못했습니다: {error}"))
 }
 
+fn viewer_asset_baseline_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join(asset_baseline::FILE_NAME))
+        .map_err(|error| format!("앱 설정 폴더를 확인하지 못했습니다: {error}"))
+}
+
 fn read_saved_game_directory(preferences_path: &Path) -> Result<Option<PathBuf>, String> {
     let contents = match fs::read(preferences_path) {
         Ok(contents) => contents,
@@ -321,6 +331,28 @@ fn open_viewer_session(
     Ok(())
 }
 
+fn selected_resource_directory(
+    session: &State<'_, SharedViewerSession>,
+) -> Result<PathBuf, String> {
+    session
+        .lock()
+        .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?
+        .resource_directory()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "먼저 게임 폴더를 선택해 주세요.".to_owned())
+}
+
+async fn calculate_asset_update_status(
+    baseline_path: PathBuf,
+    resource_directory: PathBuf,
+) -> Result<AssetUpdateStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        asset_baseline::load(&baseline_path, &resource_directory)
+    })
+    .await
+    .map_err(|error| format!("업데이트 비교 작업이 중단되었습니다: {error}"))?
+}
+
 #[tauri::command]
 async fn load_saved_game_directory(
     app: tauri::AppHandle,
@@ -363,6 +395,30 @@ async fn pick_game_directory(
         .err();
 
     Ok(Some(OpenedGameDirectory { summary, warning }))
+}
+
+#[tauri::command]
+async fn load_asset_update_status(
+    app: tauri::AppHandle,
+    session: State<'_, SharedViewerSession>,
+) -> Result<AssetUpdateStatus, String> {
+    let baseline_path = viewer_asset_baseline_path(&app)?;
+    let resource_directory = selected_resource_directory(&session)?;
+    calculate_asset_update_status(baseline_path, resource_directory).await
+}
+
+#[tauri::command]
+async fn create_asset_update_baseline(
+    app: tauri::AppHandle,
+    session: State<'_, SharedViewerSession>,
+) -> Result<AssetUpdateStatus, String> {
+    let baseline_path = viewer_asset_baseline_path(&app)?;
+    let resource_directory = selected_resource_directory(&session)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        asset_baseline::create(&baseline_path, &resource_directory)
+    })
+    .await
+    .map_err(|error| format!("업데이트 기준점 저장 작업이 중단되었습니다: {error}"))?
 }
 
 #[tauri::command]
@@ -937,6 +993,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             load_saved_game_directory,
             pick_game_directory,
+            load_asset_update_status,
+            create_asset_update_baseline,
             load_verified_category_page,
             load_verified_asset_search_page,
             load_verified_asset_detail,

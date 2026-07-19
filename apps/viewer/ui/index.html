@@ -48,6 +48,36 @@
         </div>
       </section>
 
+      <section id="update-panel" class="catalog-card update-card" aria-labelledby="update-title" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="section-label">CLIENT UPDATE</p>
+            <h2 id="update-title">클라이언트 업데이트</h2>
+          </div>
+          <p id="update-status" class="section-status" aria-live="polite"></p>
+        </div>
+        <p id="update-message" class="section-description"></p>
+        <dl id="update-counts" class="update-counts" hidden>
+          <div>
+            <dt>신규</dt>
+            <dd id="update-added-count">0</dd>
+          </div>
+          <div>
+            <dt>변경</dt>
+            <dd id="update-changed-count">0</dd>
+          </div>
+          <div>
+            <dt>삭제</dt>
+            <dd id="update-removed-count">0</dd>
+          </div>
+        </dl>
+        <div id="update-actions" class="update-actions" hidden>
+          <button id="create-update-baseline" type="button" hidden>
+            현재 상태를 기준점으로 저장
+          </button>
+        </div>
+      </section>
+
       <section id="category-panel" class="catalog-card" aria-labelledby="category-title" hidden>
         <div class="section-heading">
           <div>
