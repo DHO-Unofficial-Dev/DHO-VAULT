@@ -1095,6 +1095,7 @@ mod tests {
             (4_027, 6_267, 249, 3, 3, 378, 294),
             (6_277, 7_932, 184, 3, 3, 384, 384),
             (7_933, 8_718, 131, 3, 2, 320, 220),
+            (8_769, 8_810, 21, 2, 1, 256, 128),
             (8_842, 8_856, 1, 5, 3, 640, 320),
             (9_291, 9_978, 172, 2, 2, 192, 192),
             (10_156, 10_175, 5, 2, 2, 155, 256),
@@ -1141,6 +1142,22 @@ mod tests {
         assert_eq!(next_blessing.tile_index, 0);
         assert_eq!(next_blessing.row, 0);
         assert_eq!(next_blessing.column, 0);
+
+        let first_story_end = assembly_plan("sd", 8_770).expect("first story end");
+        assert_eq!(first_story_end.image_index, 0);
+        assert_eq!(first_story_end.first_block, 8_769);
+        assert_eq!(first_story_end.last_block, 8_770);
+        assert_eq!(first_story_end.tile_index, 1);
+        assert_eq!(first_story_end.row, 0);
+        assert_eq!(first_story_end.column, 1);
+
+        let next_story = assembly_plan("sd", 8_771).expect("second story start");
+        assert_eq!(next_story.image_index, 1);
+        assert_eq!(next_story.first_block, 8_771);
+        assert_eq!(next_story.last_block, 8_772);
+        assert_eq!(next_story.tile_index, 0);
+        assert_eq!(next_story.row, 0);
+        assert_eq!(next_story.column, 0);
 
         for block_index in [6_268, 6_276, 8_719, 8_768, 8_841, 9_290, 10_012] {
             assert_eq!(assembly_plan("sd", block_index), None);
