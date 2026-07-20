@@ -20,7 +20,10 @@ mod sy;
 mod sz;
 mod tm;
 
-pub use assembly::{AssemblyPlan, AssemblyRule, LayeredAssemblyRule, TileOrder};
+pub use assembly::{
+    AssemblyPlan, AssemblyRule, CompositeAssemblyLayer, CompositeAssemblyRule, LayeredAssemblyRule,
+    TileOrder,
+};
 use serde::Serialize;
 
 /// One raw record identity used by the category resolver.
@@ -335,6 +338,11 @@ pub fn assembly_candidate_plan(archive: &str, block_index: u32) -> Option<Assemb
 /// Returns a human-verified two-layer raw-image assembly rule for an archive.
 pub fn layered_assembly_rule(archive: &str) -> Option<LayeredAssemblyRule> {
     assembly::find_layered_rule(archive)
+}
+
+/// Returns the verified composite image containing one indexed physical block.
+pub fn composite_assembly_rule(archive: &str, block_index: u32) -> Option<CompositeAssemblyRule> {
+    assembly::find_composite_rule(archive, block_index)
 }
 
 #[cfg(test)]
@@ -1026,6 +1034,7 @@ mod tests {
                 8_768,
                 &["퀘스트", "트레져 헌트", "테마 이미지 (128×128)"],
             ),
+            (8_811, 8_841, &["UI 이미지", "월드 클락"]),
             (8_842, 8_856, &["지도", "세계지도 (640×320)"]),
             (8_857, 9_248, &["지도", "세계지도"]),
             (9_291, 9_978, &["지도", "필드 지도 (192×192)"]),
@@ -1081,7 +1090,7 @@ mod tests {
 
     #[test]
     fn sd_unverified_ranges_remain_unclassified() {
-        for block_index in [2_927, 3_070, 3_508, 4_022, 8_769, 8_841, 9_249, 9_290] {
+        for block_index in [2_927, 3_070, 3_508, 4_022, 8_769, 8_810, 9_249, 9_290] {
             assert_eq!(
                 classify_record(sd_key(block_index)),
                 RecordClassification::unknown()

@@ -14,7 +14,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use dho_catalog::{
     CatalogRecordKey, LayeredAssemblyRule, VerificationStatus, assembly_plan, classify_record,
-    layered_assembly_rule,
+    composite_assembly_rule, layered_assembly_rule,
 };
 use dho_core::{IndexParseError, IndexedArchive};
 use dho_extract::{
@@ -143,6 +143,18 @@ fn raw_layered_rule(prefix: &str, key: RawResourceKey) -> Option<LayeredAssembly
 
 fn raw_canonical_block(prefix: &str, key: RawResourceKey) -> u32 {
     raw_layered_rule(prefix, key).map_or(key.block_index, |rule| rule.canonical_block)
+}
+
+fn indexed_canonical_block(prefix: &str, block_index: u32) -> u32 {
+    composite_assembly_rule(prefix, block_index).map_or_else(
+        || assembly_plan(prefix, block_index).map_or(block_index, |plan| plan.first_block),
+        |rule| rule.canonical_block,
+    )
+}
+
+fn indexed_assembled(prefix: &str, block_index: u32) -> bool {
+    composite_assembly_rule(prefix, block_index).is_some()
+        || assembly_plan(prefix, block_index).is_some()
 }
 
 const THUMBNAIL_MAX_WIDTH: u32 = 160;
@@ -560,10 +572,7 @@ impl ViewerSession {
                 continue;
             };
             let canonical_block = raw_key.map_or_else(
-                || {
-                    assembly_plan(&asset.archive, asset.block_index)
-                        .map_or(asset.block_index, |plan| plan.first_block)
-                },
+                || indexed_canonical_block(&asset.archive, asset.block_index),
                 |key| raw_canonical_block(&asset.archive, key),
             );
             let path = category
@@ -589,7 +598,7 @@ impl ViewerSession {
                 let assembled = raw_key
                     .and_then(|key| raw_layered_rule(&prefix, key))
                     .is_some()
-                    || assembly_plan(&prefix, canonical_block).is_some();
+                    || indexed_assembled(&prefix, canonical_block);
                 VerifiedSearchAssetRef {
                     path,
                     asset: VerifiedAssetRef {
@@ -1145,8 +1154,7 @@ impl ViewerSession {
                 {
                     continue;
                 }
-                let canonical_block = assembly_plan(prefix, record.block_index)
-                    .map_or(record.block_index, |plan| plan.first_block);
+                let canonical_block = indexed_canonical_block(prefix, record.block_index);
                 unique.entry(canonical_block).or_insert(ResourceKey {
                     group_code: record.group_code,
                     icon_id: record.icon_id,
@@ -1161,7 +1169,7 @@ impl ViewerSession {
                         key,
                         raw_key: None,
                         canonical_block,
-                        assembled: assembly_plan(prefix, canonical_block).is_some(),
+                        assembled: indexed_assembled(prefix, canonical_block),
                     }),
             );
         }
@@ -1266,8 +1274,7 @@ impl ViewerSession {
                     let Some(category) = classification.category else {
                         continue;
                     };
-                    let canonical_block = assembly_plan(prefix, record.block_index)
-                        .map_or(record.block_index, |plan| plan.first_block);
+                    let canonical_block = indexed_canonical_block(prefix, record.block_index);
                     let path = category
                         .segments()
                         .iter()
@@ -1289,7 +1296,7 @@ impl ViewerSession {
                             key,
                             raw_key: None,
                             canonical_block,
-                            assembled: assembly_plan(prefix, canonical_block).is_some(),
+                            assembled: indexed_assembled(prefix, canonical_block),
                         },
                     }
                 }));
@@ -1495,8 +1502,7 @@ pub fn inspect_game_directory(
             let Some(category) = classification.category else {
                 continue;
             };
-            let canonical_block = assembly_plan(prefix, record.block_index)
-                .map_or(record.block_index, |plan| plan.first_block);
+            let canonical_block = indexed_canonical_block(prefix, record.block_index);
             verified_assets
                 .entry(category.segments().to_vec())
                 .or_default()
@@ -1804,6 +1810,18 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn maps_only_world_clock_body_sources_to_the_composite_asset() {
+        for block_index in [8_815, 8_818, 8_826, 8_829] {
+            assert_eq!(indexed_canonical_block("sd", block_index), 8_815);
+            assert!(indexed_assembled("SD", block_index));
+        }
+        for block_index in [8_814, 8_819, 8_825, 8_830] {
+            assert_eq!(indexed_canonical_block("sd", block_index), block_index);
+            assert!(!indexed_assembled("sd", block_index));
+        }
+    }
 
     struct TestDirectory(PathBuf);
 
