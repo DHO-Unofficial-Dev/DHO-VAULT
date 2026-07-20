@@ -10,6 +10,7 @@ const PORT_PERMIT_ACQUISITION: CategoryPath =
 const HELP: CategoryPath = CategoryPath::new(&["도움말"]);
 const HELP_SCREEN: CategoryPath = CategoryPath::new(&["도움말", "화면 이미지 (320×220)"]);
 const CLIENT_SPLASH_UI: CategoryPath = CategoryPath::new(&["클라이언트", "스플래시 UI"]);
+const CITY_MAP_ASSEMBLED: CategoryPath = CategoryPath::new(&["지도", "도시 지도 (378×294)"]);
 const WORLD_MAP: CategoryPath = CategoryPath::new(&["지도", "세계지도"]);
 const WORLD_MAP_ASSEMBLED: CategoryPath = CategoryPath::new(&["지도", "세계지도 (640×320)"]);
 const FIELD_MAP_ASSEMBLED: CategoryPath = CategoryPath::new(&["지도", "필드 지도 (192×192)"]);
@@ -61,6 +62,7 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
     custom_range(3_289, 3_314, PORT_PERMIT_ACQUISITION),
     in_game_range(3_315, 3_507, HELP),
     custom_range(4_023, 4_026, CLIENT_SPLASH_UI),
+    custom_range(4_027, 6_267, CITY_MAP_ASSEMBLED),
     custom_range(7_933, 8_718, HELP_SCREEN),
     custom_range(8_842, 8_856, WORLD_MAP_ASSEMBLED),
     in_game_range(8_857, 9_248, WORLD_MAP),
