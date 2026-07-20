@@ -55,6 +55,7 @@ const cancelCategoryExportButton = document.querySelector(
 const previousPage = document.querySelector("#previous-page");
 const nextPage = document.querySelector("#next-page");
 const pagePosition = document.querySelector("#page-position");
+const galleryNavigation = document.querySelector("#gallery-navigation");
 const detailDialog = document.querySelector("#asset-detail");
 const detailTitle = document.querySelector("#detail-title");
 const detailContent = document.querySelector("#detail-content");
@@ -175,7 +176,9 @@ function clearSummary() {
   saveAllButton.disabled = true;
   saveAllButton.textContent = "카테고리 전체 저장";
   galleryGrid.replaceChildren();
+  galleryGrid.dataset.status = "empty";
   pagePosition.textContent = "";
+  galleryNavigation.hidden = true;
   categoryPanel.hidden = true;
   categoryStatus.textContent = "";
   categoryGroups.replaceChildren();
@@ -201,8 +204,8 @@ function clearSummary() {
   refreshUpdateBaselineButton.hidden = true;
   refreshUpdateBaselineButton.disabled = false;
   refreshUpdateBaselineButton.textContent = "검토 완료 후 기준점 갱신";
-  savePageButton.hidden = false;
-  saveAllButton.hidden = false;
+  savePageButton.hidden = true;
+  saveAllButton.hidden = true;
 }
 
 function renderAssetUpdateStatus(status) {
@@ -329,15 +332,17 @@ function dismissUpdateGallery() {
   galleryRequestId += 1;
   closeDetail();
   currentPage = null;
-  galleryPanel.hidden = true;
+  galleryPanel.hidden = false;
   galleryTitle.textContent = "카테고리를 선택해 주세요";
   galleryStatus.textContent = "";
   galleryGrid.replaceChildren();
+  galleryGrid.dataset.status = "empty";
   pagePosition.textContent = "";
+  galleryNavigation.hidden = true;
   previousPage.disabled = true;
   nextPage.disabled = true;
-  savePageButton.hidden = false;
-  saveAllButton.hidden = false;
+  savePageButton.hidden = true;
+  saveAllButton.hidden = true;
 }
 
 async function refreshAssetUpdateBaseline() {
@@ -385,64 +390,109 @@ async function refreshAssetUpdateBaseline() {
   }
 }
 
-function renderCategories(categories) {
-  categoryGroups.replaceChildren();
-  const groups = new Map();
+function categoryTreeNode(segment, path) {
+  return {
+    segment,
+    path,
+    category: null,
+    children: new Map(),
+    assetCount: 0,
+  };
+}
+
+function categoryTree(categories) {
+  const roots = new Map();
   const sorted = [...categories].sort((left, right) =>
     left.path.join("\u0000").localeCompare(right.path.join("\u0000"), "ko"),
   );
 
   for (const category of sorted) {
-    const [domain, ...leaf] = category.path;
-    if (!groups.has(domain)) {
-      groups.set(domain, []);
+    let path = [];
+    let children = roots;
+    let node = null;
+    for (const segment of category.path) {
+      path = [...path, segment];
+      if (!children.has(segment)) {
+        children.set(segment, categoryTreeNode(segment, path));
+      }
+      node = children.get(segment);
+      children = node.children;
     }
-    groups.get(domain).push({
-      label: leaf.length === 0 ? "전체" : leaf.join(" > "),
-      path: category.path,
-      assetCount: category.assetCount,
-    });
+    node.category = category;
   }
 
-  for (const [domain, entries] of groups) {
-    const section = document.createElement("section");
-    const heading = document.createElement("div");
-    const title = document.createElement("h3");
-    const count = document.createElement("span");
-    const list = document.createElement("ul");
-    const domainTotal = entries.reduce(
-      (total, entry) => total + entry.assetCount,
-      0,
-    );
-    section.className = "category-domain";
-    heading.className = "category-domain-heading";
-    title.textContent = domain;
-    count.textContent = `${formatNumber(domainTotal)}개`;
-    list.className = "category-list";
-    heading.append(title, count);
-
-    for (const entry of entries) {
-      const item = document.createElement("li");
-      const button = document.createElement("button");
-      const label = document.createElement("strong");
-      const assetCount = document.createElement("span");
-      button.type = "button";
-      button.className = "category-button";
-      button.dataset.path = JSON.stringify(entry.path);
-      button.setAttribute("aria-pressed", "false");
-      label.textContent = entry.label;
-      assetCount.textContent = `${formatNumber(entry.assetCount)}개`;
-      button.append(label, assetCount);
-      button.addEventListener("click", () => {
-        loadCategoryPage(entry.path, 0);
-      });
-      item.append(button);
-      list.append(item);
+  function totalAssets(node) {
+    node.assetCount = node.category?.assetCount ?? 0;
+    for (const child of node.children.values()) {
+      node.assetCount += totalAssets(child);
     }
-
-    section.append(heading, list);
-    categoryGroups.append(section);
+    return node.assetCount;
   }
+  for (const root of roots.values()) {
+    totalAssets(root);
+  }
+  return [...roots.values()];
+}
+
+function appendCategoryButton(list, labelText, category) {
+  const item = document.createElement("li");
+  const button = document.createElement("button");
+  const label = document.createElement("strong");
+  const assetCount = document.createElement("span");
+  button.type = "button";
+  button.className = "category-button";
+  button.dataset.path = JSON.stringify(category.path);
+  button.setAttribute("aria-pressed", "false");
+  label.textContent = labelText;
+  assetCount.textContent = `${formatNumber(category.assetCount)}개`;
+  button.append(label, assetCount);
+  button.addEventListener("click", () => {
+    loadCategoryPage(category.path, 0);
+  });
+  item.append(button);
+  list.append(item);
+}
+
+function appendCategoryBranch(list, node) {
+  const item = document.createElement("li");
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  const label = document.createElement("strong");
+  const assetCount = document.createElement("span");
+  const children = document.createElement("ul");
+  details.className = "category-tree-branch";
+  details.dataset.path = JSON.stringify(node.path);
+  label.textContent = node.segment;
+  assetCount.textContent = `${formatNumber(node.assetCount)}개`;
+  children.className = "category-tree-list";
+  summary.append(label, assetCount);
+
+  if (node.category !== null) {
+    appendCategoryButton(children, "전체", node.category);
+  }
+  for (const child of node.children.values()) {
+    if (child.children.size > 0) {
+      appendCategoryBranch(children, child);
+    } else if (child.category !== null) {
+      appendCategoryButton(children, child.segment, child.category);
+    }
+  }
+
+  details.append(summary, children);
+  item.append(details);
+  list.append(item);
+}
+
+function renderCategories(categories) {
+  categoryGroups.replaceChildren();
+  const list = document.createElement("ul");
+  list.className = "category-tree category-tree-list";
+
+  for (const root of categoryTree(categories)) {
+    appendCategoryBranch(list, root);
+  }
+
+  categoryGroups.append(list);
 
   const totalAssets = categories.reduce(
     (total, category) => total + category.assetCount,
@@ -450,6 +500,8 @@ function renderCategories(categories) {
   );
   categoryStatus.textContent = `${formatNumber(categories.length)}개 카테고리 · ${formatNumber(totalAssets)}개 이미지`;
   categoryPanel.hidden = false;
+  galleryPanel.hidden = false;
+  galleryGrid.dataset.status = "empty";
 }
 
 function setSelectedCategory(path) {
@@ -461,12 +513,27 @@ function setSelectedCategory(path) {
       buttonPath.join("\u0000") === selected ? "true" : "false",
     );
   }
+  for (const branch of categoryGroups.querySelectorAll(
+    ".category-tree-branch",
+  )) {
+    const branchPath = JSON.parse(branch.dataset.path ?? "[]");
+    if (
+      branchPath.length <= path.length &&
+      branchPath.every((segment, index) => path[index] === segment)
+    ) {
+      branch.open = true;
+    }
+  }
+  categoryGroups
+    .querySelector('.category-button[aria-pressed="true"]')
+    ?.scrollIntoView({ block: "nearest" });
 }
 
 function renderGallery(page) {
   currentPage = page;
   galleryGrid.replaceChildren();
   galleryGrid.dataset.status = "ready";
+  galleryNavigation.hidden = false;
   const searchMode = page.mode === "search";
   const updateMode = page.mode === "update";
   const pathItemMode = searchMode || updateMode;
@@ -850,6 +917,7 @@ async function loadCategoryPage(path, offset) {
   assetSearchSubmit.disabled = true;
   setSelectedCategory(path);
   galleryPanel.hidden = false;
+  galleryNavigation.hidden = false;
   galleryTitle.textContent = path.join(" > ");
   galleryStatus.textContent = "썸네일을 불러오는 중입니다";
   savePageButton.disabled = true;
@@ -902,6 +970,7 @@ async function loadSearchPage(query, offset) {
   assetSearchQuery.disabled = true;
   assetSearchSubmit.disabled = true;
   galleryPanel.hidden = false;
+  galleryNavigation.hidden = false;
   galleryTitle.textContent = `검색: ${query}`;
   galleryStatus.textContent = "검색 결과를 불러오는 중입니다";
   savePageButton.disabled = true;
@@ -954,6 +1023,7 @@ async function loadUpdatePage(offset) {
   assetSearchQuery.disabled = true;
   assetSearchSubmit.disabled = true;
   galleryPanel.hidden = false;
+  galleryNavigation.hidden = false;
   galleryTitle.textContent = "이번 업데이트 신규";
   galleryStatus.textContent = "신규 이미지를 불러오는 중입니다";
   savePageButton.hidden = true;
