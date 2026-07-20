@@ -1061,7 +1061,7 @@ mod tests {
             ),
             (10_801, 10_811, &["인물", "미분류 초상화"]),
             (10_812, 10_821, &["캐러밴", "낙타"]),
-            (10_822, 10_830, &["캐러밴", "대장 초상화"]),
+            (10_822, 10_831, &["캐러밴", "대장 초상화"]),
         ] {
             assert_sd_category(start, expected);
             assert_sd_category(end, expected);
@@ -1072,7 +1072,6 @@ mod tests {
     fn sd_unverified_ranges_remain_unclassified() {
         for block_index in [
             2_927, 3_070, 3_508, 4_022, 6_268, 6_276, 8_719, 8_841, 9_249, 9_290, 10_419, 10_438,
-            10_831,
         ] {
             assert_eq!(
                 classify_record(sd_key(block_index)),

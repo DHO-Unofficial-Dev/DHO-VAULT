@@ -87,5 +87,5 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
     custom_range(10_617, 10_800, CONSTELLATION_IMAGE),
     custom_range(10_801, 10_811, PERSON_UNCLASSIFIED_PORTRAIT),
     custom_range(10_812, 10_821, CARAVAN_CAMEL),
-    custom_range(10_822, 10_830, CARAVAN_LEADER_PORTRAIT),
+    custom_range(10_822, 10_831, CARAVAN_LEADER_PORTRAIT),
 ];
