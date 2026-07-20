@@ -114,6 +114,54 @@ pub struct AssemblyPlan {
     pub column: u32,
 }
 
+/// One tiled layer positioned inside a verified composite image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositeAssemblyLayer {
+    pub start_block: u32,
+    pub end_block: u32,
+    pub columns: u32,
+    pub rows: u32,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub offset_x: u32,
+    pub offset_y: u32,
+}
+
+impl CompositeAssemblyLayer {
+    /// Number of consecutive physical blocks in this tiled layer.
+    pub const fn tile_count(self) -> u32 {
+        self.end_block - self.start_block + 1
+    }
+
+    const fn contains(self, block_index: u32) -> bool {
+        self.start_block <= block_index && block_index <= self.end_block
+    }
+}
+
+/// One human-verified image composed from non-contiguous tiled layers in an indexed archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompositeAssemblyRule {
+    pub archive: &'static str,
+    pub canonical_block: u32,
+    pub last_block: u32,
+    pub layers: &'static [CompositeAssemblyLayer],
+    pub output_width: u32,
+    pub output_height: u32,
+    pub status: VerificationStatus,
+}
+
+impl CompositeAssemblyRule {
+    /// Whether a physical block contributes to this completed image.
+    pub fn contains_source(self, block_index: u32) -> bool {
+        self.layers
+            .iter()
+            .copied()
+            .any(|layer| layer.contains(block_index))
+    }
+}
+
 /// One human-verified logical image composed from matching tiles in two raw files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +233,39 @@ pub(crate) const LAYERED_RULES: &[LayeredAssemblyRule] = &[LayeredAssemblyRule {
     status: VerificationStatus::HumanVerified,
 }];
 
+const SD_WORLD_CLOCK_LAYERS: &[CompositeAssemblyLayer] = &[
+    CompositeAssemblyLayer {
+        start_block: 8_815,
+        end_block: 8_818,
+        columns: 2,
+        rows: 2,
+        output_width: 152,
+        output_height: 152,
+        offset_x: 8,
+        offset_y: 8,
+    },
+    CompositeAssemblyLayer {
+        start_block: 8_826,
+        end_block: 8_829,
+        columns: 2,
+        rows: 2,
+        output_width: 168,
+        output_height: 168,
+        offset_x: 0,
+        offset_y: 0,
+    },
+];
+
+pub(crate) const COMPOSITE_RULES: &[CompositeAssemblyRule] = &[CompositeAssemblyRule {
+    archive: "sd",
+    canonical_block: 8_815,
+    last_block: 8_829,
+    layers: SD_WORLD_CLOCK_LAYERS,
+    output_width: 168,
+    output_height: 168,
+    status: VerificationStatus::HumanVerified,
+}];
+
 pub(crate) fn find_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
     find_plan_with_status(archive, block_index, VerificationStatus::HumanVerified)
 }
@@ -197,6 +278,17 @@ pub(crate) fn find_layered_rule(archive: &str) -> Option<LayeredAssemblyRule> {
     LAYERED_RULES.iter().copied().find(|rule| {
         rule.archive.eq_ignore_ascii_case(archive)
             && rule.status == VerificationStatus::HumanVerified
+    })
+}
+
+pub(crate) fn find_composite_rule(
+    archive: &str,
+    block_index: u32,
+) -> Option<CompositeAssemblyRule> {
+    COMPOSITE_RULES.iter().copied().find(|rule| {
+        rule.archive.eq_ignore_ascii_case(archive)
+            && rule.status == VerificationStatus::HumanVerified
+            && rule.contains_source(block_index)
     })
 }
 
@@ -269,5 +361,33 @@ mod tests {
         assert!(rule.contains_source(10, 2_047));
         assert!(!rule.contains_source(100_000, 0));
         assert!(!rule.contains_source(10, 2_048));
+    }
+
+    #[test]
+    fn composite_rules_have_complete_layers_inside_the_output_canvas() {
+        for rule in COMPOSITE_RULES {
+            assert_eq!(rule.status, VerificationStatus::HumanVerified);
+            assert!(rule.contains_source(rule.canonical_block));
+            for layer in rule.layers {
+                assert_eq!(layer.tile_count(), layer.columns * layer.rows);
+                assert!(layer.offset_x + layer.output_width <= rule.output_width);
+                assert!(layer.offset_y + layer.output_height <= rule.output_height);
+            }
+        }
+    }
+
+    #[test]
+    fn resolves_only_the_world_clock_body_source_blocks() {
+        let rule = find_composite_rule("SD", 8_815).expect("world clock composite rule");
+
+        assert_eq!(rule.canonical_block, 8_815);
+        assert_eq!(rule.last_block, 8_829);
+        assert_eq!((rule.output_width, rule.output_height), (168, 168));
+        assert!(rule.contains_source(8_818));
+        assert!(rule.contains_source(8_826));
+        assert!(rule.contains_source(8_829));
+        assert_eq!(find_composite_rule("sd", 8_819), None);
+        assert_eq!(find_composite_rule("sd", 8_825), None);
+        assert_eq!(find_composite_rule("sd", 8_830), None);
     }
 }

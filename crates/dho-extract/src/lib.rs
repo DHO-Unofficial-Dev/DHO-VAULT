@@ -3,7 +3,8 @@
 //! Read-only loading and on-demand extraction of indexed DHO image resources.
 
 use dho_catalog::{
-    AssemblyPlan, LayeredAssemblyRule, VerificationStatus, assembly_candidate_plan, assembly_plan,
+    AssemblyPlan, CompositeAssemblyRule, LayeredAssemblyRule, VerificationStatus,
+    assembly_candidate_plan, assembly_plan, composite_assembly_rule,
 };
 use dho_core::{
     ArchiveBlockDecodeError, ArchiveDiagnostic, ArchiveLayout, BlockDecodeError, BlockScanError,
@@ -721,6 +722,11 @@ impl LoadedArchive {
         max_tile_output_size: usize,
         max_assembled_output_size: usize,
     ) -> Result<Option<ExtractedAssembly>, ExtractError> {
+        if let Some(rule) = composite_assembly_rule(self.prefix.as_str(), block_index) {
+            return self
+                .extract_composite_assembly(rule, max_tile_output_size, max_assembled_output_size)
+                .map(Some);
+        }
         let Some(plan) = assembly_plan(self.prefix.as_str(), block_index) else {
             return Ok(None);
         };
@@ -759,6 +765,18 @@ impl LoadedArchive {
         max_height: u32,
         max_thumbnail_output_size: usize,
     ) -> Result<Option<ExtractedAssemblyThumbnail>, ExtractError> {
+        if let Some(rule) = composite_assembly_rule(self.prefix.as_str(), block_index) {
+            return self
+                .extract_composite_assembly_thumbnail(
+                    rule,
+                    max_tile_output_size,
+                    max_assembled_output_size,
+                    max_width,
+                    max_height,
+                    max_thumbnail_output_size,
+                )
+                .map(Some);
+        }
         let Some(plan) = assembly_plan(self.prefix.as_str(), block_index) else {
             return Ok(None);
         };
@@ -816,6 +834,104 @@ impl LoadedArchive {
             max_tile_output_size,
             max_assembled_output_size,
         )
+    }
+
+    fn extract_composite_assembly_thumbnail(
+        &self,
+        rule: CompositeAssemblyRule,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+        max_width: u32,
+        max_height: u32,
+        max_thumbnail_output_size: usize,
+    ) -> Result<ExtractedAssemblyThumbnail, ExtractError> {
+        let image =
+            self.decode_composite_assembly(rule, max_tile_output_size, max_assembled_output_size)?;
+        let thumbnail = image
+            .thumbnail(max_width, max_height, max_thumbnail_output_size)
+            .map_err(ExtractError::Thumbnail)?;
+        let png = thumbnail.encode_png().map_err(ExtractError::PngEncode)?;
+
+        Ok(ExtractedAssemblyThumbnail {
+            first_block: rule.canonical_block,
+            last_block: rule.last_block,
+            source_width: image.width(),
+            source_height: image.height(),
+            width: thumbnail.width(),
+            height: thumbnail.height(),
+            png,
+        })
+    }
+
+    fn extract_composite_assembly(
+        &self,
+        rule: CompositeAssemblyRule,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+    ) -> Result<ExtractedAssembly, ExtractError> {
+        let image =
+            self.decode_composite_assembly(rule, max_tile_output_size, max_assembled_output_size)?;
+        let png = image.encode_png().map_err(ExtractError::PngEncode)?;
+
+        Ok(ExtractedAssembly {
+            first_block: rule.canonical_block,
+            last_block: rule.last_block,
+            width: image.width(),
+            height: image.height(),
+            png,
+        })
+    }
+
+    fn decode_composite_assembly(
+        &self,
+        rule: CompositeAssemblyRule,
+        max_tile_output_size: usize,
+        max_assembled_output_size: usize,
+    ) -> Result<RgbaImage, ExtractError> {
+        if !rule.archive.eq_ignore_ascii_case(self.prefix.as_str()) {
+            return Err(ExtractError::AssemblyArchiveMismatch {
+                expected: rule.archive,
+                actual: self.prefix.as_str().to_owned(),
+            });
+        }
+        if rule.status != VerificationStatus::HumanVerified {
+            return Err(ExtractError::AssemblyRuleNotVerified {
+                first_block: rule.canonical_block,
+                last_block: rule.last_block,
+            });
+        }
+
+        let mut layer_images = Vec::with_capacity(rule.layers.len());
+        for layer in rule.layers {
+            let mut tiles = Vec::new();
+            for block_index in layer.start_block..=layer.end_block {
+                let record = self.record_for_block(block_index)?;
+                tiles.push(self.decode_record(record, max_tile_output_size)?);
+            }
+            layer_images.push(
+                RgbaImage::assemble_grid(
+                    &tiles,
+                    layer.columns,
+                    layer.rows,
+                    layer.output_width,
+                    layer.output_height,
+                    max_assembled_output_size,
+                )
+                .map_err(ExtractError::ImageAssembly)?,
+            );
+        }
+        let positioned_layers = layer_images
+            .iter()
+            .zip(rule.layers)
+            .map(|(image, layer)| (image, layer.offset_x, layer.offset_y))
+            .collect::<Vec<_>>();
+        RgbaImage::compose_layers(
+            &positioned_layers,
+            rule.output_width,
+            rule.output_height,
+            max_assembled_output_size,
+        )
+        .map_err(ExtractError::ImageAssembly)
     }
 
     fn extract_assembly_with_status(
@@ -1847,6 +1963,65 @@ mod tests {
         assert_eq!((thumbnail.source_width, thumbnail.source_height), (3, 3));
         assert_eq!((thumbnail.width, thumbnail.height), (2, 2));
         assert_eq!(&thumbnail.png[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn joins_and_alpha_composites_non_contiguous_indexed_layers() {
+        const LAYERS: &[dho_catalog::CompositeAssemblyLayer] = &[
+            dho_catalog::CompositeAssemblyLayer {
+                start_block: 0,
+                end_block: 0,
+                columns: 1,
+                rows: 1,
+                output_width: 1,
+                output_height: 1,
+                offset_x: 0,
+                offset_y: 0,
+            },
+            dho_catalog::CompositeAssemblyLayer {
+                start_block: 2,
+                end_block: 2,
+                columns: 1,
+                rows: 1,
+                output_width: 1,
+                output_height: 1,
+                offset_x: 0,
+                offset_y: 0,
+            },
+        ];
+        let directory = TestDirectory::new();
+        let records = [[100, 0, 1, 1, 9], [101, 1, 1, 1, 9], [102, 2, 1, 1, 9]];
+        let raw_tiles = [
+            vec![0, 0, 255, 255],
+            vec![255, 0, 0, 255],
+            vec![0, 255, 0, 128],
+        ];
+        let data = raw_tiles
+            .iter()
+            .flat_map(|raw| zlib_block(raw))
+            .collect::<Vec<_>>();
+        write_archive(&directory.0, &records, &data);
+        let archive = LoadedArchive::open(&directory.0, "sc").expect("open test archive");
+        let rule = CompositeAssemblyRule {
+            archive: "sc",
+            canonical_block: 0,
+            last_block: 2,
+            layers: LAYERS,
+            output_width: 1,
+            output_height: 1,
+            status: VerificationStatus::HumanVerified,
+        };
+
+        let assembled = archive
+            .extract_composite_assembly(rule, 4, 4)
+            .expect("extract composite PNG");
+        let decoded = image::load_from_memory_with_format(&assembled.png, image::ImageFormat::Png)
+            .expect("decode composite PNG")
+            .into_rgba8();
+
+        assert_eq!((assembled.first_block, assembled.last_block), (0, 2));
+        assert_eq!((assembled.width, assembled.height), (1, 1));
+        assert_eq!(decoded.as_raw(), &[127, 128, 0, 255]);
     }
 
     #[test]

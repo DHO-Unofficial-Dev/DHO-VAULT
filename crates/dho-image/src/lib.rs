@@ -92,24 +92,90 @@ impl RgbaImage {
             .chunks_exact_mut(4)
             .zip(layer.pixels.chunks_exact(4))
         {
-            let source_alpha = u32::from(layer[3]);
-            let base_alpha = u32::from(base[3]);
-            let inverse_source_alpha = 255 - source_alpha;
-            let output_alpha = source_alpha + (base_alpha * inverse_source_alpha + 127) / 255;
-            if output_alpha == 0 {
-                base.copy_from_slice(&[0, 0, 0, 0]);
-                continue;
-            }
-
-            for channel in 0..3 {
-                let premultiplied = u32::from(layer[channel]) * source_alpha * 255
-                    + u32::from(base[channel]) * base_alpha * inverse_source_alpha;
-                let divisor = output_alpha * 255;
-                base[channel] = ((premultiplied + divisor / 2) / divisor) as u8;
-            }
-            base[3] = output_alpha as u8;
+            blend_pixel(base, layer);
         }
         Ok(())
+    }
+
+    /// Alpha-composites positioned RGBA layers onto a transparent output image.
+    pub fn compose_layers(
+        layers: &[(&Self, u32, u32)],
+        output_width: u32,
+        output_height: u32,
+        max_output_size: usize,
+    ) -> Result<Self, ImageAssemblyError> {
+        let required = pixel_byte_len(output_width, output_height).map_err(|_| {
+            ImageAssemblyError::DimensionOverflow {
+                output_width,
+                output_height,
+            }
+        })?;
+        if required > max_output_size {
+            return Err(ImageAssemblyError::OutputTooLarge {
+                required,
+                maximum: max_output_size,
+            });
+        }
+        let output_width_usize =
+            usize::try_from(output_width).map_err(|_| ImageAssemblyError::DimensionOverflow {
+                output_width,
+                output_height,
+            })?;
+        let mut output = Self {
+            width: output_width,
+            height: output_height,
+            pixels: vec![0; required],
+        };
+
+        for (layer, offset_x, offset_y) in layers {
+            let right = offset_x.checked_add(layer.width);
+            let bottom = offset_y.checked_add(layer.height);
+            if right.is_none_or(|right| right > output_width)
+                || bottom.is_none_or(|bottom| bottom > output_height)
+            {
+                return Err(ImageAssemblyError::LayerOutsideCanvas {
+                    canvas: (output_width, output_height),
+                    layer: (layer.width, layer.height),
+                    offset: (*offset_x, *offset_y),
+                });
+            }
+            let offset_x =
+                usize::try_from(*offset_x).map_err(|_| ImageAssemblyError::DimensionOverflow {
+                    output_width,
+                    output_height,
+                })?;
+            let offset_y =
+                usize::try_from(*offset_y).map_err(|_| ImageAssemblyError::DimensionOverflow {
+                    output_width,
+                    output_height,
+                })?;
+            let layer_width = usize::try_from(layer.width).map_err(|_| {
+                ImageAssemblyError::DimensionOverflow {
+                    output_width,
+                    output_height,
+                }
+            })?;
+            let layer_height = usize::try_from(layer.height).map_err(|_| {
+                ImageAssemblyError::DimensionOverflow {
+                    output_width,
+                    output_height,
+                }
+            })?;
+
+            for row in 0..layer_height {
+                for column in 0..layer_width {
+                    let source = (row * layer_width + column) * 4;
+                    let destination =
+                        ((offset_y + row) * output_width_usize + offset_x + column) * 4;
+                    blend_pixel(
+                        &mut output.pixels[destination..destination + 4],
+                        &layer.pixels[source..source + 4],
+                    );
+                }
+            }
+        }
+
+        Ok(output)
     }
 
     /// Shrinks an image to fit within the requested bounds without enlarging it.
@@ -433,6 +499,11 @@ pub enum ImageAssemblyError {
         base: (u32, u32),
         layer: (u32, u32),
     },
+    LayerOutsideCanvas {
+        canvas: (u32, u32),
+        layer: (u32, u32),
+        offset: (u32, u32),
+    },
     EmptyGrid {
         columns: u32,
         rows: u32,
@@ -480,6 +551,15 @@ impl fmt::Display for ImageAssemblyError {
                 formatter,
                 "overlay dimensions are {}x{}, expected {}x{}",
                 layer.0, layer.1, base.0, base.1
+            ),
+            Self::LayerOutsideCanvas {
+                canvas,
+                layer,
+                offset,
+            } => write!(
+                formatter,
+                "layer {}x{} at {},{} exceeds the {}x{} canvas",
+                layer.0, layer.1, offset.0, offset.1, canvas.0, canvas.1
             ),
             Self::EmptyGrid { columns, rows } => {
                 write!(formatter, "image grid must not be empty: {columns}x{rows}")
@@ -536,6 +616,25 @@ impl fmt::Display for ImageAssemblyError {
 }
 
 impl Error for ImageAssemblyError {}
+
+fn blend_pixel(base: &mut [u8], layer: &[u8]) {
+    let source_alpha = u32::from(layer[3]);
+    let base_alpha = u32::from(base[3]);
+    let inverse_source_alpha = 255 - source_alpha;
+    let output_alpha = source_alpha + (base_alpha * inverse_source_alpha + 127) / 255;
+    if output_alpha == 0 {
+        base.copy_from_slice(&[0, 0, 0, 0]);
+        return;
+    }
+
+    for channel in 0..3 {
+        let premultiplied = u32::from(layer[channel]) * source_alpha * 255
+            + u32::from(base[channel]) * base_alpha * inverse_source_alpha;
+        let divisor = output_alpha * 255;
+        base[channel] = ((premultiplied + divisor / 2) / divisor) as u8;
+    }
+    base[3] = output_alpha as u8;
+}
 
 fn pixel_byte_len(width: u32, height: u32) -> Result<usize, PixelDecodeError> {
     pixel_count(width, height)?
@@ -607,6 +706,34 @@ mod tests {
             Err(ImageAssemblyError::LayerDimensionMismatch {
                 base: (1, 1),
                 layer: (2, 1),
+            })
+        );
+    }
+
+    #[test]
+    fn alpha_composites_positioned_layers_on_a_transparent_canvas() {
+        let red = RgbaImage::from_bgra(2, 1, &[0, 0, 255, 255, 0, 0, 255, 255]).expect("red layer");
+        let green = RgbaImage::from_bgra(1, 1, &[0, 255, 0, 255]).expect("green layer");
+
+        let composed = RgbaImage::compose_layers(&[(&red, 0, 0), (&green, 1, 0)], 3, 1, 12)
+            .expect("compose positioned layers");
+
+        assert_eq!(
+            composed.pixels(),
+            &[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn rejects_a_positioned_layer_outside_the_canvas() {
+        let layer = RgbaImage::from_bgra(2, 1, &[0; 8]).expect("layer pixels");
+
+        assert_eq!(
+            RgbaImage::compose_layers(&[(&layer, 1, 0)], 2, 1, 8),
+            Err(ImageAssemblyError::LayerOutsideCanvas {
+                canvas: (2, 1),
+                layer: (2, 1),
+                offset: (1, 0),
             })
         );
     }
