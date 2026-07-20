@@ -122,6 +122,24 @@ body[data-view="workspace"] .shell {
   margin-top: 0;
 }
 
+.library-layout {
+  display: grid;
+  grid-template-columns: minmax(18rem, 22rem) minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.library-layout #category-panel {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 6.5rem);
+  overflow: hidden;
+}
+
+.library-layout .gallery-card {
+  margin-top: 0;
+}
+
 .eyebrow {
   margin: 0 0 var(--space-2);
   color: var(--accent);
@@ -518,45 +536,79 @@ button:disabled {
 }
 
 .category-groups {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-3);
+  min-height: 0;
   margin-top: var(--space-4);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--accent) var(--bg);
 }
 
-.category-domain {
-  min-width: 0;
+.category-tree-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.category-tree {
   border: 1px solid var(--rule);
   background: var(--bg);
 }
 
-.category-domain-heading {
-  padding: var(--space-2);
-  border-bottom: 1px solid var(--rule);
+.category-tree-list .category-tree-list {
+  margin-left: var(--space-2);
+  border-left: 1px solid var(--rule);
 }
 
-.category-domain-heading h3 {
-  margin: 0;
-  font-size: 0.92rem;
+.category-tree-list li + li {
+  border-top: 1px solid var(--rule);
 }
 
-.category-domain-heading span {
-  color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: 0.68rem;
-}
-
-.category-list {
+.category-tree-branch > summary {
   display: grid;
-  gap: 1px;
-  margin: 0;
-  padding: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--space-1);
+  align-items: center;
+  padding: 0.7rem var(--space-2);
+  cursor: pointer;
   list-style: none;
+  background: var(--surface);
+}
+
+.category-tree-branch > summary::-webkit-details-marker {
+  display: none;
+}
+
+.category-tree-branch > summary::before {
+  color: var(--muted);
+  content: "›";
+  font-size: 1rem;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.category-tree-branch[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.category-tree-branch > summary:hover {
   background: var(--rule);
 }
 
-.category-list li {
-  background: var(--surface);
+.category-tree-branch > summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.category-tree-branch > summary strong {
+  min-width: 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.category-tree-branch > summary span {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
 }
 
 .category-button {
@@ -606,8 +658,10 @@ button:disabled {
 }
 
 .gallery-grid[data-status="loading"],
-.gallery-grid[data-status="error"] {
+.gallery-grid[data-status="error"],
+.gallery-grid[data-status="empty"] {
   display: grid;
+  grid-template-columns: 1fr;
   place-items: center;
   border: 1px dashed var(--rule);
 }
@@ -615,6 +669,15 @@ button:disabled {
 .gallery-grid[data-status="loading"]::after {
   color: var(--muted);
   content: "필요한 이미지만 불러오고 있습니다";
+}
+
+.gallery-grid[data-status="empty"] {
+  text-align: center;
+}
+
+.gallery-grid[data-status="empty"]::after {
+  color: var(--muted);
+  content: "왼쪽 카테고리에서 확인할 이미지를 선택해 주세요";
 }
 
 .gallery-grid[data-status="error"]::after {
@@ -837,6 +900,16 @@ button:disabled {
   }
 }
 
+@media (max-width: 56rem) {
+  .library-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .library-layout #category-panel {
+    max-height: min(34rem, calc(100vh - 7rem));
+  }
+}
+
 @media (max-width: 36rem) {
   .shell {
     width: min(100% - 2rem, 54rem);
@@ -927,8 +1000,8 @@ button:disabled {
     flex-direction: column;
   }
 
-  .category-groups {
-    grid-template-columns: 1fr;
+  .library-layout #category-panel {
+    max-height: min(30rem, calc(100vh - 8rem));
   }
 
   .gallery-grid {
