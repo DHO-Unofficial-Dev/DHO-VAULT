@@ -19,6 +19,8 @@ const CITY_MAP_ASSEMBLED: CategoryPath = CategoryPath::new(&["지도", "도시 �
 const LARGE_FIELD_MAP_ASSEMBLED: CategoryPath = CategoryPath::new(&["지도", "필드 지도 (384×384)"]);
 const WORLD_MAP: CategoryPath = CategoryPath::new(&["지도", "세계지도"]);
 const WORLD_MAP_ASSEMBLED: CategoryPath = CategoryPath::new(&["지도", "세계지도 (640×320)"]);
+const UNCLASSIFIED_UI_IMAGE: CategoryPath = CategoryPath::new(&["미분류", "UI 이미지"]);
+const DUNGEON_TRAP_UI_IMAGE: CategoryPath = CategoryPath::new(&["던전", "함정 UI 이미지"]);
 const FIELD_MAP_ASSEMBLED: CategoryPath = CategoryPath::new(&["지도", "필드 지도 (192×192)"]);
 const DISCOVERY_SET_2_LARGE: CategoryPath =
     CategoryPath::new(&["발견물", "2", "획득 이미지 (128×128)"]);
@@ -80,6 +82,8 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
     custom_range(8_811, 8_841, WORLD_CLOCK),
     custom_range(8_842, 8_856, WORLD_MAP_ASSEMBLED),
     in_game_range(8_857, 9_248, WORLD_MAP),
+    custom_range(9_249, 9_274, UNCLASSIFIED_UI_IMAGE),
+    custom_range(9_275, 9_290, DUNGEON_TRAP_UI_IMAGE),
     custom_range(9_291, 9_978, FIELD_MAP_ASSEMBLED),
     custom_range(9_979, 10_011, DISCOVERY_SET_2_LARGE),
     in_game_range(10_012, 10_155, DUNGEON_MAP),
