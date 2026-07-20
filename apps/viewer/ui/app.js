@@ -145,7 +145,7 @@ function updateSelectionControls() {
   const hasCurrentPageSelection = currentPageSelectionEntries().some(({ key }) =>
     selectedAssets.has(key),
   );
-  const active = selectionMode || count > 0;
+  const active = libraryVisible && (selectionMode || count > 0);
   document.body.dataset.selectionActive = String(active);
   selectionBar.hidden = !active;
   selectionCount.textContent = `${formatNumber(count)}개 선택`;
