@@ -155,6 +155,7 @@ pub(crate) const RULES: &[AssemblyRule] = &[
     AssemblyRule::verified_sd(10_396, 10_399, 2, 2, 256, 256),
     AssemblyRule::verified_sd(10_400, 10_405, 3, 2, 294, 166),
     AssemblyRule::verified_sd(10_406, 10_409, 2, 2, 166, 166),
+    AssemblyRule::verified_sd(10_419, 10_438, 2, 1, 256, 128),
     AssemblyRule::verified_sd(10_439, 10_470, 8, 4, 1_024, 512),
     AssemblyRule::verified_sd(10_617, 10_800, 2, 2, 192, 192),
     AssemblyRule::verified_is(0, 11, 1_024, 768),

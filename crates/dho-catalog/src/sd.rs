@@ -30,6 +30,8 @@ const LEGACY_THEME_UI: CategoryPath =
     CategoryPath::new(&["UI 이미지", "예지의 서", "유산의 장", "레거시 테마 UI"]);
 const LEGACY_DETAIL_UI: CategoryPath =
     CategoryPath::new(&["UI 이미지", "예지의 서", "유산의 장", "레거시 상세 UI"]);
+const LEGACY_DETAIL_IMAGE: CategoryPath =
+    CategoryPath::new(&["UI 이미지", "예지의 서", "유산의 장", "레거시 상세 이미지"]);
 const CONSTELLATION_SKY_MAP: CategoryPath =
     CategoryPath::new(&["UI 이미지", "별자리 조사", "천구도"]);
 const CONSTELLATION_LINES: CategoryPath =
@@ -81,6 +83,7 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
     custom_range(10_368, 10_395, PROPHECY_BOOK_COVER),
     custom_range(10_396, 10_399, LEGACY_THEME_UI),
     custom_range(10_400, 10_418, LEGACY_DETAIL_UI),
+    custom_range(10_419, 10_438, LEGACY_DETAIL_IMAGE),
     custom_range(10_439, 10_470, CONSTELLATION_SKY_MAP),
     custom_range(10_471, 10_543, CONSTELLATION_LINES),
     custom_range(10_544, 10_616, CONSTELLATION_LINES_AND_ART),
