@@ -1025,6 +1025,7 @@ mod tests {
             (3_071, 3_288, &["전투"]),
             (3_289, 3_314, &["입항허가", "획득 이미지 (128×128)"]),
             (3_315, 3_507, &["도움말"]),
+            (3_508, 3_510, &["미분류", "색상·효과 이미지"]),
             (3_511, 4_022, &["지도", "세계지도"]),
             (4_023, 4_026, &["클라이언트", "스플래시 UI"]),
             (4_027, 6_267, &["지도", "도시 지도 (378×294)"]),
@@ -1094,11 +1095,20 @@ mod tests {
     }
 
     #[test]
-    fn sd_unverified_ranges_remain_unclassified() {
-        for block_index in [3_508, 3_509, 3_510] {
+    fn classifies_every_sd_physical_block() {
+        for block_index in 0..=10_831 {
+            let classification = classify_record(sd_key(block_index));
+            assert!(
+                classification.category.is_some(),
+                "SD block {block_index} must have a category"
+            );
             assert_eq!(
-                classify_record(sd_key(block_index)),
-                RecordClassification::unknown()
+                classification.boundary_status,
+                VerificationStatus::HumanVerified
+            );
+            assert_eq!(
+                classification.meaning_status,
+                VerificationStatus::HumanVerified
             );
         }
     }
