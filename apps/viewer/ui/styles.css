@@ -755,14 +755,69 @@ button:disabled {
 }
 
 .gallery-navigation {
-  display: grid;
-  grid-template-columns: auto minmax(8rem, 1fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
   align-items: center;
+  justify-content: center;
   margin-top: var(--space-4);
 }
 
-.gallery-navigation span {
+.gallery-navigation[data-position="top"] {
+  margin-top: 0;
+  margin-bottom: var(--space-4);
+}
+
+.gallery-navigation button {
+  min-height: 2.35rem;
+  padding: 0.45rem 0.7rem;
+}
+
+.page-number-list,
+.page-jump {
+  display: flex;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+.page-number-list {
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.page-number-button {
+  min-width: 2.35rem;
+}
+
+.page-number-button[aria-current="page"] {
+  color: var(--bg);
+  background: var(--accent);
+  opacity: 1;
+}
+
+.page-number-input {
+  width: 4.25rem;
+  min-height: 2.35rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  background: var(--surface);
+  font: inherit;
+  font-family: var(--font-mono);
+  text-align: right;
+}
+
+.page-number-input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.page-number-input:disabled {
+  opacity: 0.55;
+}
+
+.page-jump span {
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 0.72rem;

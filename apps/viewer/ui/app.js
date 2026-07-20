@@ -52,10 +52,25 @@ const categoryExportProgress = document.querySelector(
 const cancelCategoryExportButton = document.querySelector(
   "#cancel-category-export",
 );
-const previousPage = document.querySelector("#previous-page");
-const nextPage = document.querySelector("#next-page");
-const pagePosition = document.querySelector("#page-position");
-const galleryNavigation = document.querySelector("#gallery-navigation");
+const galleryNavigations = document.querySelectorAll(
+  "[data-gallery-navigation]",
+);
+const firstPageButtons = document.querySelectorAll(
+  '[data-page-action="first"]',
+);
+const previousPageButtons = document.querySelectorAll(
+  '[data-page-action="previous"]',
+);
+const nextPageButtons = document.querySelectorAll(
+  '[data-page-action="next"]',
+);
+const lastPageButtons = document.querySelectorAll(
+  '[data-page-action="last"]',
+);
+const pageJumpForms = document.querySelectorAll("[data-page-jump]");
+const pageNumberLists = document.querySelectorAll("[data-page-number-list]");
+const pageNumberInputs = document.querySelectorAll(".page-number-input");
+const pageCountLabels = document.querySelectorAll(".page-count");
 const detailDialog = document.querySelector("#asset-detail");
 const detailTitle = document.querySelector("#detail-title");
 const detailContent = document.querySelector("#detail-content");
@@ -77,8 +92,154 @@ let categoryExportBusy = false;
 let categoryExportCancelRequested = false;
 let updateRequestId = 0;
 let currentAssetUpdateStatus = null;
+const rememberedPageOffsets = new Map();
 
 const CATEGORY_EXPORT_POLL_INTERVAL = 250;
+const VISIBLE_PAGE_BUTTON_COUNT = 9;
+const VISIBLE_PAGE_RADIUS = 4;
+
+function pageMemoryKey(page) {
+  if (page.mode === "update") {
+    return "update";
+  }
+  if (page.mode === "search") {
+    return `search:${page.query.trim().toLocaleLowerCase("ko-KR")}`;
+  }
+  return `category:${page.path.join("\u0000")}`;
+}
+
+function rememberedPageOffset(page) {
+  return rememberedPageOffsets.get(pageMemoryKey(page)) ?? 0;
+}
+
+function rememberPage(page) {
+  rememberedPageOffsets.set(pageMemoryKey(page), page.offset);
+}
+
+function pageOffsetIsOutOfRange(error, offset) {
+  return (
+    offset > 0 &&
+    String(error).includes("이미지 시작 위치가 카테고리 범위를 벗어났습니다")
+  );
+}
+
+function totalPages(page) {
+  return Math.ceil(page.totalCount / page.pageSize);
+}
+
+function currentPageNumber(page) {
+  return page.totalCount === 0
+    ? 0
+    : Math.floor(page.offset / page.pageSize) + 1;
+}
+
+function setPageNavigationHidden(hidden) {
+  for (const navigation of galleryNavigations) {
+    navigation.hidden = hidden;
+  }
+}
+
+function setAllPageNavigationControlsDisabled(disabled) {
+  for (const button of document.querySelectorAll(
+    "[data-gallery-navigation] button",
+  )) {
+    button.disabled = disabled;
+  }
+  for (const input of pageNumberInputs) {
+    input.disabled = disabled;
+  }
+}
+
+function setPageNavigationLoading() {
+  setPageNavigationHidden(false);
+  for (const list of pageNumberLists) {
+    list.replaceChildren();
+  }
+  setAllPageNavigationControlsDisabled(true);
+  for (const input of pageNumberInputs) {
+    input.value = "";
+  }
+  for (const label of pageCountLabels) {
+    label.textContent = "불러오는 중";
+  }
+}
+
+function renderPageNavigation(page) {
+  const pageNumber = currentPageNumber(page);
+  const pageTotal = totalPages(page);
+  const firstPage = pageNumber <= 1;
+  const lastPage = pageNumber === 0 || pageNumber >= pageTotal;
+  setPageNavigationHidden(false);
+
+  for (const button of firstPageButtons) {
+    button.disabled = categoryExportBusy || firstPage;
+  }
+  for (const button of previousPageButtons) {
+    button.disabled = categoryExportBusy || firstPage;
+  }
+  for (const button of nextPageButtons) {
+    button.disabled = categoryExportBusy || lastPage;
+  }
+  for (const button of lastPageButtons) {
+    button.disabled = categoryExportBusy || lastPage;
+  }
+  let firstVisiblePage = Math.max(1, pageNumber - VISIBLE_PAGE_RADIUS);
+  const lastVisiblePage = Math.min(
+    pageTotal,
+    firstVisiblePage + VISIBLE_PAGE_BUTTON_COUNT - 1,
+  );
+  firstVisiblePage = Math.max(
+    1,
+    lastVisiblePage - VISIBLE_PAGE_BUTTON_COUNT + 1,
+  );
+  for (const list of pageNumberLists) {
+    list.replaceChildren();
+    for (
+      let visiblePage = firstVisiblePage;
+      visiblePage <= lastVisiblePage;
+      visiblePage += 1
+    ) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "secondary-button page-number-button";
+      button.textContent = formatNumber(visiblePage);
+      button.setAttribute(
+        "aria-label",
+        `${formatNumber(visiblePage)}페이지로 이동`,
+      );
+      if (visiblePage === pageNumber) {
+        button.setAttribute("aria-current", "page");
+      }
+      button.disabled = categoryExportBusy || visiblePage === pageNumber;
+      button.addEventListener("click", () => navigateToPage(visiblePage));
+      list.append(button);
+    }
+  }
+  for (const input of pageNumberInputs) {
+    input.value = String(pageNumber);
+    input.max = String(pageTotal);
+    input.disabled = categoryExportBusy || pageTotal === 0;
+  }
+  for (const label of pageCountLabels) {
+    label.textContent = `${formatNumber(pageTotal)} 페이지`;
+  }
+  for (const form of pageJumpForms) {
+    form.querySelector('button[type="submit"]').disabled =
+      categoryExportBusy || pageTotal === 0;
+  }
+}
+
+function setPageNavigationBusy(busy) {
+  if (currentPage === null || busy) {
+    setAllPageNavigationControlsDisabled(true);
+    return;
+  }
+  renderPageNavigation(currentPage);
+}
+
+function scrollGalleryToTop() {
+  galleryPanel.scrollIntoView({ block: "start" });
+}
 
 function setStatus(kind, title, message) {
   statusCard.dataset.status = kind;
@@ -151,21 +312,14 @@ function setCategoryExportBusy(busy) {
   const hasPageItems = (currentPage?.items.length ?? 0) > 0;
   savePageButton.disabled = busy || !hasPageItems;
   saveAllButton.disabled = busy || !hasPageItems;
-  if (currentPage === null) {
-    previousPage.disabled = true;
-    nextPage.disabled = true;
-  } else {
-    previousPage.disabled = busy || currentPage.offset === 0;
-    nextPage.disabled =
-      busy ||
-      currentPage.offset + currentPage.items.length >= currentPage.totalCount;
-  }
+  setPageNavigationBusy(busy);
 }
 
 function clearSummary() {
   closeDetail();
   hideCategoryExport();
   categoryExportBusy = false;
+  rememberedPageOffsets.clear();
   galleryRequestId += 1;
   currentPage = null;
   galleryPanel.hidden = true;
@@ -177,8 +331,7 @@ function clearSummary() {
   saveAllButton.textContent = "카테고리 전체 저장";
   galleryGrid.replaceChildren();
   galleryGrid.dataset.status = "empty";
-  pagePosition.textContent = "";
-  galleryNavigation.hidden = true;
+  setPageNavigationHidden(true);
   categoryPanel.hidden = true;
   categoryStatus.textContent = "";
   categoryGroups.replaceChildren();
@@ -329,6 +482,7 @@ function dismissUpdateGallery() {
   if (currentPage?.mode !== "update") {
     return;
   }
+  rememberedPageOffsets.delete("update");
   galleryRequestId += 1;
   closeDetail();
   currentPage = null;
@@ -337,10 +491,8 @@ function dismissUpdateGallery() {
   galleryStatus.textContent = "";
   galleryGrid.replaceChildren();
   galleryGrid.dataset.status = "empty";
-  pagePosition.textContent = "";
-  galleryNavigation.hidden = true;
-  previousPage.disabled = true;
-  nextPage.disabled = true;
+  setPageNavigationHidden(true);
+  setPageNavigationBusy(true);
   savePageButton.hidden = true;
   saveAllButton.hidden = true;
 }
@@ -447,7 +599,10 @@ function appendCategoryButton(list, labelText, category) {
   assetCount.textContent = `${formatNumber(category.assetCount)}개`;
   button.append(label, assetCount);
   button.addEventListener("click", () => {
-    loadCategoryPage(category.path, 0);
+    loadCategoryPage(
+      category.path,
+      rememberedPageOffset({ mode: "category", path: category.path }),
+    );
   });
   item.append(button);
   list.append(item);
@@ -531,9 +686,10 @@ function setSelectedCategory(path) {
 
 function renderGallery(page) {
   currentPage = page;
+  rememberPage(page);
   galleryGrid.replaceChildren();
   galleryGrid.dataset.status = "ready";
-  galleryNavigation.hidden = false;
+  setPageNavigationHidden(false);
   const searchMode = page.mode === "search";
   const updateMode = page.mode === "update";
   const pathItemMode = searchMode || updateMode;
@@ -587,12 +743,8 @@ function renderGallery(page) {
     galleryGrid.append(button);
   }
 
-  const last = page.offset + page.items.length;
-  const currentNumber =
-    page.totalCount === 0 ? 0 : Math.floor(page.offset / page.pageSize) + 1;
-  const pageCount = Math.ceil(page.totalCount / page.pageSize);
   galleryStatus.textContent = galleryPageStatus(page);
-  pagePosition.textContent = `${formatNumber(currentNumber)} / ${formatNumber(pageCount)} 페이지`;
+  renderPageNavigation(page);
   savePageButton.hidden = updateMode;
   saveAllButton.hidden = updateMode;
   savePageButton.disabled =
@@ -602,8 +754,6 @@ function renderGallery(page) {
   saveAllButton.textContent = searchMode
     ? "검색 결과 전체 저장"
     : "카테고리 전체 저장";
-  previousPage.disabled = categoryExportBusy || page.offset === 0;
-  nextPage.disabled = categoryExportBusy || last >= page.totalCount;
 }
 
 function galleryPageStatus(page) {
@@ -917,7 +1067,7 @@ async function loadCategoryPage(path, offset) {
   assetSearchSubmit.disabled = true;
   setSelectedCategory(path);
   galleryPanel.hidden = false;
-  galleryNavigation.hidden = false;
+  setPageNavigationLoading();
   galleryTitle.textContent = path.join(" > ");
   galleryStatus.textContent = "썸네일을 불러오는 중입니다";
   savePageButton.disabled = true;
@@ -925,9 +1075,6 @@ async function loadCategoryPage(path, offset) {
   saveAllButton.disabled = true;
   galleryGrid.dataset.status = "loading";
   galleryGrid.replaceChildren();
-  pagePosition.textContent = "불러오는 중";
-  previousPage.disabled = true;
-  nextPage.disabled = true;
 
   try {
     const page = await window.__TAURI__.core.invoke(
@@ -939,10 +1086,17 @@ async function loadCategoryPage(path, offset) {
     }
   } catch (error) {
     if (requestId === galleryRequestId) {
+      if (pageOffsetIsOutOfRange(error, offset)) {
+        rememberedPageOffsets.delete(
+          pageMemoryKey({ mode: "category", path }),
+        );
+        loadCategoryPage(path, 0);
+        return;
+      }
       currentPage = null;
       galleryGrid.dataset.status = "error";
-      galleryStatus.textContent = "이미지를 불러오지 못했습니다";
-      pagePosition.textContent = String(error);
+      galleryStatus.textContent = `이미지를 불러오지 못했습니다: ${String(error)}`;
+      setPageNavigationHidden(true);
     }
   } finally {
     if (requestId === galleryRequestId) {
@@ -970,7 +1124,7 @@ async function loadSearchPage(query, offset) {
   assetSearchQuery.disabled = true;
   assetSearchSubmit.disabled = true;
   galleryPanel.hidden = false;
-  galleryNavigation.hidden = false;
+  setPageNavigationLoading();
   galleryTitle.textContent = `검색: ${query}`;
   galleryStatus.textContent = "검색 결과를 불러오는 중입니다";
   savePageButton.disabled = true;
@@ -978,9 +1132,6 @@ async function loadSearchPage(query, offset) {
   saveAllButton.disabled = true;
   galleryGrid.dataset.status = "loading";
   galleryGrid.replaceChildren();
-  pagePosition.textContent = "불러오는 중";
-  previousPage.disabled = true;
-  nextPage.disabled = true;
 
   try {
     const page = await window.__TAURI__.core.invoke(
@@ -992,10 +1143,17 @@ async function loadSearchPage(query, offset) {
     }
   } catch (error) {
     if (requestId === galleryRequestId) {
+      if (pageOffsetIsOutOfRange(error, offset)) {
+        rememberedPageOffsets.delete(
+          pageMemoryKey({ mode: "search", query }),
+        );
+        loadSearchPage(query, 0);
+        return;
+      }
       currentPage = null;
       galleryGrid.dataset.status = "error";
-      galleryStatus.textContent = "검색 결과를 불러오지 못했습니다";
-      pagePosition.textContent = String(error);
+      galleryStatus.textContent = `검색 결과를 불러오지 못했습니다: ${String(error)}`;
+      setPageNavigationHidden(true);
     }
   } finally {
     if (requestId === galleryRequestId) {
@@ -1023,7 +1181,7 @@ async function loadUpdatePage(offset) {
   assetSearchQuery.disabled = true;
   assetSearchSubmit.disabled = true;
   galleryPanel.hidden = false;
-  galleryNavigation.hidden = false;
+  setPageNavigationLoading();
   galleryTitle.textContent = "이번 업데이트 신규";
   galleryStatus.textContent = "신규 이미지를 불러오는 중입니다";
   savePageButton.hidden = true;
@@ -1032,9 +1190,6 @@ async function loadUpdatePage(offset) {
   saveAllButton.disabled = true;
   galleryGrid.dataset.status = "loading";
   galleryGrid.replaceChildren();
-  pagePosition.textContent = "불러오는 중";
-  previousPage.disabled = true;
-  nextPage.disabled = true;
 
   try {
     const page = await window.__TAURI__.core.invoke(
@@ -1046,10 +1201,15 @@ async function loadUpdatePage(offset) {
     }
   } catch (error) {
     if (requestId === galleryRequestId) {
+      if (pageOffsetIsOutOfRange(error, offset)) {
+        rememberedPageOffsets.delete("update");
+        loadUpdatePage(0);
+        return;
+      }
       currentPage = null;
       galleryGrid.dataset.status = "error";
-      galleryStatus.textContent = "신규 이미지를 불러오지 못했습니다";
-      pagePosition.textContent = String(error);
+      galleryStatus.textContent = `신규 이미지를 불러오지 못했습니다: ${String(error)}`;
+      setPageNavigationHidden(true);
     }
   } finally {
     if (requestId === galleryRequestId) {
@@ -1072,6 +1232,29 @@ function loadPage(page, offset) {
   } else {
     loadCategoryPage(page.path, offset);
   }
+}
+
+function navigateToPage(pageNumber) {
+  if (currentPage === null || categoryExportBusy) {
+    return;
+  }
+  const requestedPage = currentPage;
+  const pageTotal = totalPages(requestedPage);
+  if (pageTotal === 0 || !Number.isFinite(pageNumber)) {
+    renderPageNavigation(requestedPage);
+    return;
+  }
+  const targetPage = Math.min(
+    pageTotal,
+    Math.max(1, Math.trunc(pageNumber)),
+  );
+  const targetOffset = (targetPage - 1) * requestedPage.pageSize;
+  if (targetOffset === requestedPage.offset) {
+    renderPageNavigation(requestedPage);
+    return;
+  }
+  scrollGalleryToTop();
+  loadPage(requestedPage, targetOffset);
 }
 
 function formatNumber(value) {
@@ -1207,23 +1390,64 @@ for (const button of navigationButtons) {
   });
 }
 
-previousPage.addEventListener("click", () => {
-  if (currentPage !== null && currentPage.offset > 0) {
-    loadPage(
-      currentPage,
-      Math.max(0, currentPage.offset - currentPage.pageSize),
-    );
-  }
-});
+for (const button of firstPageButtons) {
+  button.addEventListener("click", () => navigateToPage(1));
+}
 
-nextPage.addEventListener("click", () => {
-  if (
-    currentPage !== null &&
-    currentPage.offset + currentPage.items.length < currentPage.totalCount
-  ) {
-    loadPage(currentPage, currentPage.offset + currentPage.pageSize);
-  }
-});
+for (const button of previousPageButtons) {
+  button.addEventListener("click", () => {
+    if (currentPage !== null) {
+      navigateToPage(currentPageNumber(currentPage) - 1);
+    }
+  });
+}
+
+for (const button of nextPageButtons) {
+  button.addEventListener("click", () => {
+    if (currentPage !== null) {
+      navigateToPage(currentPageNumber(currentPage) + 1);
+    }
+  });
+}
+
+for (const button of lastPageButtons) {
+  button.addEventListener("click", () => {
+    if (currentPage !== null) {
+      navigateToPage(totalPages(currentPage));
+    }
+  });
+}
+
+for (const input of pageNumberInputs) {
+  input.addEventListener("input", () => {
+    for (const otherInput of pageNumberInputs) {
+      if (otherInput !== input) {
+        otherInput.value = input.value;
+      }
+    }
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      input.closest("form").requestSubmit();
+    }
+  });
+}
+
+for (const form of pageJumpForms) {
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const input = form.querySelector(".page-number-input");
+    if (input.value.trim() === "") {
+      if (currentPage !== null) {
+        renderPageNavigation(currentPage);
+      }
+      input.focus();
+      return;
+    }
+    navigateToPage(Number(input.value));
+  });
+}
 
 assetSearchForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -1232,7 +1456,7 @@ assetSearchForm.addEventListener("submit", (event) => {
     assetSearchQuery.focus();
     return;
   }
-  loadSearchPage(query, 0);
+  loadSearchPage(query, rememberedPageOffset({ mode: "search", query }));
 });
 
 closeDetailButton.addEventListener("click", closeDetail);
@@ -1245,7 +1469,7 @@ createUpdateBaselineButton.addEventListener(
 );
 viewUpdateAssetsButton.addEventListener("click", () => {
   showWorkspacePage("library");
-  loadUpdatePage(0);
+  loadUpdatePage(rememberedPageOffset({ mode: "update" }));
 });
 refreshUpdateBaselineButton.addEventListener(
   "click",

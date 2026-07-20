@@ -116,11 +116,84 @@
               </div>
               <progress id="category-export-progress" value="0" max="1"></progress>
             </div>
+            <nav
+              class="gallery-navigation"
+              data-gallery-navigation
+              data-position="top"
+              aria-label="이미지 페이지 이동 (위)"
+              hidden
+            >
+              <button class="secondary-button" type="button" data-page-action="first">
+                처음
+              </button>
+              <button class="secondary-button" type="button" data-page-action="previous">
+                이전
+              </button>
+              <div
+                class="page-number-list"
+                data-page-number-list
+                role="group"
+                aria-label="페이지 번호"
+              ></div>
+              <form class="page-jump" data-page-jump novalidate>
+                <input
+                  class="page-number-input"
+                  type="number"
+                  min="1"
+                  step="1"
+                  inputmode="numeric"
+                  aria-label="이동할 페이지 번호"
+                />
+                <span aria-hidden="true">/</span>
+                <span class="page-count">0 페이지</span>
+                <button class="secondary-button" type="submit">이동</button>
+              </form>
+              <button class="secondary-button" type="button" data-page-action="next">
+                다음
+              </button>
+              <button class="secondary-button" type="button" data-page-action="last">
+                마지막
+              </button>
+            </nav>
             <div id="gallery-grid" class="gallery-grid" aria-live="polite"></div>
-            <nav id="gallery-navigation" class="gallery-navigation" aria-label="이미지 페이지 이동" hidden>
-              <button id="previous-page" class="secondary-button" type="button">이전</button>
-              <span id="page-position"></span>
-              <button id="next-page" class="secondary-button" type="button">다음</button>
+            <nav
+              class="gallery-navigation"
+              data-gallery-navigation
+              data-position="bottom"
+              aria-label="이미지 페이지 이동 (아래)"
+              hidden
+            >
+              <button class="secondary-button" type="button" data-page-action="first">
+                처음
+              </button>
+              <button class="secondary-button" type="button" data-page-action="previous">
+                이전
+              </button>
+              <div
+                class="page-number-list"
+                data-page-number-list
+                role="group"
+                aria-label="페이지 번호"
+              ></div>
+              <form class="page-jump" data-page-jump novalidate>
+                <input
+                  class="page-number-input"
+                  type="number"
+                  min="1"
+                  step="1"
+                  inputmode="numeric"
+                  aria-label="이동할 페이지 번호"
+                />
+                <span aria-hidden="true">/</span>
+                <span class="page-count">0 페이지</span>
+                <button class="secondary-button" type="submit">이동</button>
+              </form>
+              <button class="secondary-button" type="button" data-page-action="next">
+                다음
+              </button>
+              <button class="secondary-button" type="button" data-page-action="last">
+                마지막
+              </button>
             </nav>
           </section>
         </section>
