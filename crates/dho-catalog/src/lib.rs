@@ -1021,6 +1021,11 @@ mod tests {
             (6_268, 6_276, &["전투", "UI 이미지"]),
             (6_277, 7_932, &["지도", "필드 지도 (384×384)"]),
             (7_933, 8_718, &["도움말", "화면 이미지 (320×220)"]),
+            (
+                8_719,
+                8_768,
+                &["퀘스트", "트레져 헌트", "테마 이미지 (128×128)"],
+            ),
             (8_842, 8_856, &["지도", "세계지도 (640×320)"]),
             (8_857, 9_248, &["지도", "세계지도"]),
             (9_291, 9_978, &["지도", "필드 지도 (192×192)"]),
@@ -1076,7 +1081,7 @@ mod tests {
 
     #[test]
     fn sd_unverified_ranges_remain_unclassified() {
-        for block_index in [2_927, 3_070, 3_508, 4_022, 8_719, 8_841, 9_249, 9_290] {
+        for block_index in [2_927, 3_070, 3_508, 4_022, 8_769, 8_841, 9_249, 9_290] {
             assert_eq!(
                 classify_record(sd_key(block_index)),
                 RecordClassification::unknown()
@@ -1137,7 +1142,7 @@ mod tests {
         assert_eq!(next_blessing.row, 0);
         assert_eq!(next_blessing.column, 0);
 
-        for block_index in [6_268, 6_276, 8_841, 9_290, 10_012] {
+        for block_index in [6_268, 6_276, 8_719, 8_768, 8_841, 9_290, 10_012] {
             assert_eq!(assembly_plan("sd", block_index), None);
         }
         assert_eq!(assembly_plan("sc", 10_156), None);
