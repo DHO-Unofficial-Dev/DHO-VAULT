@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: MPL-2.0
 
 const selectButton = document.querySelector("#select-game-directory");
+const changeDirectoryButton = document.querySelector("#change-game-directory");
+const connectionView = document.querySelector("#connection-view");
+const workspaceView = document.querySelector("#workspace-view");
+const navigationButtons = document.querySelectorAll(".nav-button");
+const appPages = document.querySelectorAll(".app-page");
 const statusCard = document.querySelector(".status-card");
 const statusTitle = document.querySelector("#status-title");
 const statusMessage = document.querySelector("#status-message");
+const settingsMessage = document.querySelector("#settings-message");
 const directoryDetails = document.querySelector("#directory-details");
 const gameDirectory = document.querySelector("#game-directory");
 const resourceDirectory = document.querySelector("#resource-directory");
 const archiveList = document.querySelector("#archive-list");
+const archiveStatus = document.querySelector("#archive-status");
 const updatePanel = document.querySelector("#update-panel");
 const updateStatus = document.querySelector("#update-status");
 const updateMessage = document.querySelector("#update-message");
@@ -78,6 +85,32 @@ function setStatus(kind, title, message) {
   statusMessage.textContent = message;
 }
 
+function setDirectorySelectionBusy(busy) {
+  selectButton.disabled = busy;
+  changeDirectoryButton.disabled = busy;
+}
+
+function showConnectionView() {
+  document.body.dataset.view = "connection";
+  connectionView.hidden = false;
+  workspaceView.hidden = true;
+}
+
+function showWorkspacePage(pageName) {
+  document.body.dataset.view = "workspace";
+  connectionView.hidden = true;
+  workspaceView.hidden = false;
+  for (const page of appPages) {
+    page.hidden = page.dataset.page !== pageName;
+  }
+  for (const button of navigationButtons) {
+    button.setAttribute(
+      "aria-pressed",
+      String(button.dataset.page === pageName),
+    );
+  }
+}
+
 function clearCategoryExportPoll() {
   if (categoryExportPollTimer !== null) {
     window.clearTimeout(categoryExportPollTimer);
@@ -99,12 +132,15 @@ function hideCategoryExport() {
 
 function setCategoryExportBusy(busy) {
   categoryExportBusy = busy;
-  selectButton.disabled = busy;
+  setDirectorySelectionBusy(busy);
   createUpdateBaselineButton.disabled = busy;
   viewUpdateAssetsButton.disabled = busy;
   refreshUpdateBaselineButton.disabled = busy;
   assetSearchQuery.disabled = busy;
   assetSearchSubmit.disabled = busy;
+  for (const button of navigationButtons) {
+    button.disabled = busy;
+  }
   for (const button of categoryGroups.querySelectorAll(".category-button")) {
     button.disabled = busy;
   }
@@ -148,6 +184,8 @@ function clearSummary() {
   gameDirectory.textContent = "";
   resourceDirectory.textContent = "";
   archiveList.replaceChildren();
+  archiveStatus.textContent = "";
+  settingsMessage.textContent = "";
   updateRequestId += 1;
   currentAssetUpdateStatus = null;
   updatePanel.hidden = true;
@@ -260,7 +298,7 @@ async function loadAssetUpdateStatus() {
 
 async function createAssetUpdateBaseline() {
   const requestId = ++updateRequestId;
-  selectButton.disabled = true;
+  setDirectorySelectionBusy(true);
   createUpdateBaselineButton.disabled = true;
   createUpdateBaselineButton.textContent = "저장 중…";
   updateStatus.textContent = "기준점 저장 중";
@@ -279,7 +317,7 @@ async function createAssetUpdateBaseline() {
     }
   } finally {
     if (requestId === updateRequestId) {
-      selectButton.disabled = false;
+      setDirectorySelectionBusy(false);
     }
   }
 }
@@ -320,7 +358,7 @@ async function refreshAssetUpdateBaseline() {
   }
 
   const requestId = ++updateRequestId;
-  selectButton.disabled = true;
+  setDirectorySelectionBusy(true);
   createUpdateBaselineButton.disabled = true;
   viewUpdateAssetsButton.disabled = true;
   refreshUpdateBaselineButton.disabled = true;
@@ -342,7 +380,7 @@ async function refreshAssetUpdateBaseline() {
     }
   } finally {
     if (requestId === updateRequestId) {
-      selectButton.disabled = false;
+      setDirectorySelectionBusy(false);
     }
   }
 }
@@ -998,35 +1036,27 @@ function renderSummary(summary) {
     archiveList.append(item);
   }
 
-  renderCategories(summary.verifiedCategories);
+  archiveStatus.textContent = `${formatNumber(summary.archives.length)}개 확인`;
 
-  setStatus(
-    "success",
-    "게임 리소스를 확인했습니다",
-    `지원하는 리소스 묶음 ${summary.archives.length}개와 확인된 카테고리 ${summary.verifiedCategories.length}개를 찾았습니다.`,
-  );
+  renderCategories(summary.verifiedCategories);
 }
 
 function renderOpenedGameDirectory(opened, automatic) {
   renderSummary(opened.summary);
   if (opened.warning !== null) {
-    setStatus(
-      "warning",
-      "게임 리소스는 열었지만 폴더를 기억하지 못했습니다",
-      `${opened.warning} 다음 실행 때 게임 폴더를 다시 선택해야 할 수 있습니다.`,
-    );
+    settingsMessage.textContent = `게임 리소스는 열었지만 폴더를 기억하지 못했습니다. ${opened.warning} 다음 실행 때 게임 폴더를 다시 선택해야 할 수 있습니다.`;
   } else if (automatic) {
-    setStatus(
-      "success",
-      "마지막 게임 폴더를 자동으로 열었습니다",
-      `지원하는 리소스 묶음 ${opened.summary.archives.length}개와 확인된 카테고리 ${opened.summary.verifiedCategories.length}개를 찾았습니다.`,
-    );
+    settingsMessage.textContent = "마지막으로 사용한 게임 폴더를 자동으로 연결했습니다.";
+  } else {
+    settingsMessage.textContent = "게임 폴더가 연결되어 있습니다.";
   }
+  showWorkspacePage("library");
 }
 
 async function loadSavedGameDirectory() {
-  selectButton.disabled = true;
+  setDirectorySelectionBusy(true);
   clearSummary();
+  showConnectionView();
   setStatus(
     "loading",
     "마지막 게임 폴더를 확인하는 중입니다",
@@ -1054,13 +1084,14 @@ async function loadSavedGameDirectory() {
       `${String(error)} 아래 버튼으로 현재 게임 폴더를 다시 선택해 주세요.`,
     );
   } finally {
-    selectButton.disabled = false;
+    setDirectorySelectionBusy(false);
   }
 }
 
 selectButton.addEventListener("click", async () => {
-  selectButton.disabled = true;
+  setDirectorySelectionBusy(true);
   clearSummary();
+  showConnectionView();
   setStatus("loading", "게임 폴더를 확인하는 중입니다", "폴더 선택 창이 열려 있습니다.");
 
   try {
@@ -1074,9 +1105,37 @@ selectButton.addEventListener("click", async () => {
   } catch (error) {
     setStatus("error", "게임 폴더를 확인하지 못했습니다", String(error));
   } finally {
-    selectButton.disabled = false;
+    setDirectorySelectionBusy(false);
   }
 });
+
+changeDirectoryButton.addEventListener("click", async () => {
+  setDirectorySelectionBusy(true);
+  settingsMessage.textContent = "새 게임 폴더를 확인하고 있습니다.";
+
+  try {
+    const opened = await window.__TAURI__.core.invoke("pick_game_directory");
+    if (opened === null) {
+      settingsMessage.textContent = "게임 폴더 변경을 취소했습니다. 현재 연결을 유지합니다.";
+      return;
+    }
+    clearSummary();
+    renderOpenedGameDirectory(opened, false);
+    await loadAssetUpdateStatus();
+  } catch (error) {
+    settingsMessage.textContent = `게임 폴더를 변경하지 못했습니다: ${String(error)}`;
+  } finally {
+    setDirectorySelectionBusy(false);
+  }
+});
+
+for (const button of navigationButtons) {
+  button.addEventListener("click", () => {
+    if (!categoryExportBusy) {
+      showWorkspacePage(button.dataset.page);
+    }
+  });
+}
 
 previousPage.addEventListener("click", () => {
   if (currentPage !== null && currentPage.offset > 0) {
@@ -1115,6 +1174,7 @@ createUpdateBaselineButton.addEventListener(
   createAssetUpdateBaseline,
 );
 viewUpdateAssetsButton.addEventListener("click", () => {
+  showWorkspacePage("library");
   loadUpdatePage(0);
 });
 refreshUpdateBaselineButton.addEventListener(
