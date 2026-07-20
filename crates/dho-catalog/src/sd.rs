@@ -5,6 +5,7 @@ use crate::{CategoryPath, CategorySource, RecordRule, RuleScope};
 const DISCOVERY_SET_1_LARGE: CategoryPath =
     CategoryPath::new(&["발견물", "1", "획득 이미지 (128×128)"]);
 const BATTLE: CategoryPath = CategoryPath::new(&["전투"]);
+const BATTLE_UI_IMAGE: CategoryPath = CategoryPath::new(&["전투", "UI 이미지"]);
 const PORT_PERMIT_ACQUISITION: CategoryPath =
     CategoryPath::new(&["입항허가", "획득 이미지 (128×128)"]);
 const HELP: CategoryPath = CategoryPath::new(&["도움말"]);
@@ -66,6 +67,7 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
     in_game_range(3_315, 3_507, HELP),
     custom_range(4_023, 4_026, CLIENT_SPLASH_UI),
     custom_range(4_027, 6_267, CITY_MAP_ASSEMBLED),
+    custom_range(6_268, 6_276, BATTLE_UI_IMAGE),
     custom_range(6_277, 7_932, LARGE_FIELD_MAP_ASSEMBLED),
     custom_range(7_933, 8_718, HELP_SCREEN),
     custom_range(8_842, 8_856, WORLD_MAP_ASSEMBLED),
