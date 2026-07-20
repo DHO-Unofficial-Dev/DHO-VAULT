@@ -98,8 +98,8 @@
               <div class="gallery-heading-actions">
                 <p id="gallery-status" class="section-status" aria-live="polite"></p>
                 <div class="gallery-save-actions">
-                  <button id="save-page" class="secondary-button" type="button" disabled>
-                    현재 페이지 저장
+                  <button id="toggle-selection" class="secondary-button" type="button" disabled>
+                    선택
                   </button>
                   <button id="save-all" type="button" disabled>
                     카테고리 전체 저장
@@ -265,6 +265,22 @@
         </section>
       </section>
     </main>
+
+    <aside id="selection-bar" class="selection-bar" aria-label="선택한 이미지 작업" hidden>
+      <strong id="selection-count" aria-live="polite">0개 선택</strong>
+      <div class="selection-actions">
+        <button id="select-current-page" class="secondary-button" type="button">
+          현재 페이지 모두 선택
+        </button>
+        <button id="clear-current-page" class="secondary-button" type="button">
+          현재 페이지 선택 해제
+        </button>
+        <button id="clear-selection" class="secondary-button" type="button">
+          전체 선택 해제
+        </button>
+        <button id="save-selection" type="button" disabled>선택한 0개 저장</button>
+      </div>
+    </aside>
 
     <dialog id="asset-detail" class="detail-dialog" aria-labelledby="detail-title">
       <div class="detail-header">

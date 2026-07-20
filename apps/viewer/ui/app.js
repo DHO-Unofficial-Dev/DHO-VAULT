@@ -42,8 +42,14 @@ const galleryPanel = document.querySelector("#gallery-panel");
 const galleryTitle = document.querySelector("#gallery-title");
 const galleryStatus = document.querySelector("#gallery-status");
 const galleryGrid = document.querySelector("#gallery-grid");
-const savePageButton = document.querySelector("#save-page");
+const toggleSelectionButton = document.querySelector("#toggle-selection");
 const saveAllButton = document.querySelector("#save-all");
+const selectionBar = document.querySelector("#selection-bar");
+const selectionCount = document.querySelector("#selection-count");
+const selectCurrentPageButton = document.querySelector("#select-current-page");
+const clearCurrentPageButton = document.querySelector("#clear-current-page");
+const clearSelectionButton = document.querySelector("#clear-selection");
+const saveSelectionButton = document.querySelector("#save-selection");
 const categoryExport = document.querySelector("#category-export");
 const categoryExportStatus = document.querySelector("#category-export-status");
 const categoryExportProgress = document.querySelector(
@@ -93,10 +99,84 @@ let categoryExportCancelRequested = false;
 let updateRequestId = 0;
 let currentAssetUpdateStatus = null;
 const rememberedPageOffsets = new Map();
+const selectedAssets = new Map();
+let selectionMode = false;
+let currentWorkspacePage = "library";
 
 const CATEGORY_EXPORT_POLL_INTERVAL = 250;
 const VISIBLE_PAGE_BUTTON_COUNT = 9;
 const VISIBLE_PAGE_RADIUS = 4;
+
+function selectionKey(path, item) {
+  return JSON.stringify([
+    path,
+    item.archive.toLocaleLowerCase("en-US"),
+    item.blockIndex,
+  ]);
+}
+
+function selectionEntry(path, item) {
+  return {
+    path: [...path],
+    archive: item.archive,
+    blockIndex: item.blockIndex,
+  };
+}
+
+function currentPageSelectionEntries() {
+  if (currentPage === null) {
+    return [];
+  }
+  const pathItemMode = currentPage.mode === "search" || currentPage.mode === "update";
+  return currentPage.items.map((entry) => {
+    const path = pathItemMode ? entry.path : currentPage.path;
+    const item = pathItemMode ? entry.thumbnail : entry;
+    return {
+      key: selectionKey(path, item),
+      value: selectionEntry(path, item),
+    };
+  });
+}
+
+function updateSelectionControls() {
+  const count = selectedAssets.size;
+  const libraryVisible = currentWorkspacePage === "library";
+  const hasPageItems = libraryVisible && (currentPage?.items.length ?? 0) > 0;
+  const hasCurrentPageSelection = currentPageSelectionEntries().some(({ key }) =>
+    selectedAssets.has(key),
+  );
+  const active = selectionMode || count > 0;
+  document.body.dataset.selectionActive = String(active);
+  selectionBar.hidden = !active;
+  selectionCount.textContent = `${formatNumber(count)}개 선택`;
+  saveSelectionButton.textContent = `선택한 ${formatNumber(count)}개 저장`;
+  saveSelectionButton.disabled =
+    categoryExportBusy || !libraryVisible || count === 0;
+  selectCurrentPageButton.disabled = categoryExportBusy || !hasPageItems;
+  clearCurrentPageButton.disabled =
+    categoryExportBusy || !hasCurrentPageSelection;
+  clearSelectionButton.disabled = categoryExportBusy || count === 0;
+  toggleSelectionButton.disabled = categoryExportBusy || !hasPageItems;
+  toggleSelectionButton.textContent = selectionMode ? "선택 완료" : "선택";
+}
+
+function setSelectionMode(enabled) {
+  selectionMode = enabled;
+  if (currentPage !== null) {
+    renderGallery(currentPage);
+    return;
+  }
+  updateSelectionControls();
+}
+
+function clearSelections() {
+  selectedAssets.clear();
+  if (currentPage !== null) {
+    renderGallery(currentPage);
+    return;
+  }
+  updateSelectionControls();
+}
 
 function pageMemoryKey(page) {
   if (page.mode === "update") {
@@ -259,6 +339,7 @@ function showConnectionView() {
 }
 
 function showWorkspacePage(pageName) {
+  currentWorkspacePage = pageName;
   document.body.dataset.view = "workspace";
   connectionView.hidden = true;
   workspaceView.hidden = false;
@@ -271,6 +352,7 @@ function showWorkspacePage(pageName) {
       String(button.dataset.page === pageName),
     );
   }
+  updateSelectionControls();
 }
 
 function clearCategoryExportPoll() {
@@ -306,13 +388,13 @@ function setCategoryExportBusy(busy) {
   for (const button of categoryGroups.querySelectorAll(".category-button")) {
     button.disabled = busy;
   }
-  for (const button of galleryGrid.querySelectorAll(".gallery-item")) {
+  for (const button of galleryGrid.querySelectorAll("button")) {
     button.disabled = busy;
   }
   const hasPageItems = (currentPage?.items.length ?? 0) > 0;
-  savePageButton.disabled = busy || !hasPageItems;
   saveAllButton.disabled = busy || !hasPageItems;
   setPageNavigationBusy(busy);
+  updateSelectionControls();
 }
 
 function clearSummary() {
@@ -320,13 +402,15 @@ function clearSummary() {
   hideCategoryExport();
   categoryExportBusy = false;
   rememberedPageOffsets.clear();
+  selectedAssets.clear();
+  selectionMode = false;
   galleryRequestId += 1;
   currentPage = null;
   galleryPanel.hidden = true;
   galleryTitle.textContent = "카테고리를 선택해 주세요";
   galleryStatus.textContent = "";
-  savePageButton.disabled = true;
-  savePageButton.textContent = "현재 페이지 저장";
+  toggleSelectionButton.disabled = true;
+  toggleSelectionButton.textContent = "선택";
   saveAllButton.disabled = true;
   saveAllButton.textContent = "카테고리 전체 저장";
   galleryGrid.replaceChildren();
@@ -336,6 +420,7 @@ function clearSummary() {
   categoryStatus.textContent = "";
   categoryGroups.replaceChildren();
   assetSearchQuery.value = "";
+  updateSelectionControls();
   directoryDetails.hidden = true;
   gameDirectory.textContent = "";
   resourceDirectory.textContent = "";
@@ -357,7 +442,7 @@ function clearSummary() {
   refreshUpdateBaselineButton.hidden = true;
   refreshUpdateBaselineButton.disabled = false;
   refreshUpdateBaselineButton.textContent = "검토 완료 후 기준점 갱신";
-  savePageButton.hidden = true;
+  toggleSelectionButton.hidden = true;
   saveAllButton.hidden = true;
 }
 
@@ -493,7 +578,7 @@ function dismissUpdateGallery() {
   galleryGrid.dataset.status = "empty";
   setPageNavigationHidden(true);
   setPageNavigationBusy(true);
-  savePageButton.hidden = true;
+  toggleSelectionButton.hidden = true;
   saveAllButton.hidden = true;
 }
 
@@ -702,20 +787,44 @@ function renderGallery(page) {
   for (const [index, entry] of page.items.entries()) {
     const path = pathItemMode ? entry.path : page.path;
     const item = pathItemMode ? entry.thumbnail : entry;
+    const key = selectionKey(path, item);
+    const selected = selectedAssets.has(key);
+    const card = document.createElement("div");
     const button = document.createElement("button");
     const frame = document.createElement("div");
     const image = document.createElement("img");
     const caption = document.createElement("span");
+    const marker = document.createElement("span");
+    const detailButton = document.createElement("button");
     const position = page.offset + index + 1;
+    card.className = "gallery-item";
+    card.dataset.selected = String(selected);
+    card.dataset.selectionMode = String(selectionMode);
     button.type = "button";
-    button.className = "gallery-item";
+    button.className = "gallery-item-main";
     button.disabled = categoryExportBusy;
+    button.setAttribute("aria-pressed", String(selected));
     button.setAttribute(
       "aria-label",
-      `${path.at(-1)} 이미지 ${position} 상세 보기`,
+      selectionMode
+        ? `${path.at(-1)} 이미지 ${position} ${selected ? "선택 해제" : "선택"}`
+        : `${path.at(-1)} 이미지 ${position} 상세 보기`,
     );
     frame.className = "thumbnail-frame";
     caption.className = "gallery-caption";
+    marker.className = "selection-marker";
+    marker.textContent = "✓";
+    marker.hidden = !selectionMode && !selected;
+    marker.setAttribute("aria-hidden", "true");
+    detailButton.type = "button";
+    detailButton.className = "secondary-button gallery-detail-button";
+    detailButton.textContent = "상세";
+    detailButton.hidden = !selectionMode;
+    detailButton.disabled = categoryExportBusy;
+    detailButton.setAttribute(
+      "aria-label",
+      `${path.at(-1)} 이미지 ${position} 상세 보기`,
+    );
     image.src = item.thumbnailDataUrl;
     image.alt = `${path.at(-1)} 이미지 ${position}`;
     image.width = item.thumbnailWidth;
@@ -738,22 +847,41 @@ function renderGallery(page) {
     frame.append(image);
     button.append(frame, caption);
     button.addEventListener("click", () => {
+      if (!selectionMode) {
+        loadAssetDetail(path, item, position);
+        return;
+      }
+      if (selectedAssets.has(key)) {
+        selectedAssets.delete(key);
+      } else {
+        selectedAssets.set(key, selectionEntry(path, item));
+      }
+      const isSelected = selectedAssets.has(key);
+      card.dataset.selected = String(isSelected);
+      button.setAttribute("aria-pressed", String(isSelected));
+      button.setAttribute(
+        "aria-label",
+        `${path.at(-1)} 이미지 ${position} ${isSelected ? "선택 해제" : "선택"}`,
+      );
+      updateSelectionControls();
+    });
+    detailButton.addEventListener("click", () => {
       loadAssetDetail(path, item, position);
     });
-    galleryGrid.append(button);
+    card.append(marker, button, detailButton);
+    galleryGrid.append(card);
   }
 
   galleryStatus.textContent = galleryPageStatus(page);
   renderPageNavigation(page);
-  savePageButton.hidden = updateMode;
+  toggleSelectionButton.hidden = false;
   saveAllButton.hidden = updateMode;
-  savePageButton.disabled =
-    updateMode || categoryExportBusy || page.items.length === 0;
   saveAllButton.disabled =
     updateMode || categoryExportBusy || page.items.length === 0;
   saveAllButton.textContent = searchMode
     ? "검색 결과 전체 저장"
     : "카테고리 전체 저장";
+  updateSelectionControls();
 }
 
 function galleryPageStatus(page) {
@@ -770,47 +898,22 @@ function galleryPageStatus(page) {
     : range;
 }
 
-async function saveCurrentPage() {
-  if (
-    currentPage === null ||
-    currentPage.mode === "update" ||
-    currentPage.items.length === 0
-  ) {
-    return;
+function selectCurrentPage() {
+  for (const { key, value } of currentPageSelectionEntries()) {
+    selectedAssets.set(key, value);
   }
-  const requestedPage = currentPage;
-  savePageButton.disabled = true;
-  saveAllButton.disabled = true;
-  savePageButton.textContent = "저장 중…";
-  galleryStatus.textContent = "저장할 폴더를 선택해 주세요";
+  selectionMode = true;
+  if (currentPage !== null) {
+    renderGallery(currentPage);
+  }
+}
 
-  try {
-    const searchMode = requestedPage.mode === "search";
-    const saved = await window.__TAURI__.core.invoke(
-      searchMode ? "save_verified_search_page" : "save_verified_category_page",
-      searchMode
-        ? { query: requestedPage.query, offset: requestedPage.offset }
-        : { path: requestedPage.path, offset: requestedPage.offset },
-    );
-    if (currentPage !== requestedPage) {
-      return;
-    }
-    const pageStatus = galleryPageStatus(requestedPage);
-    galleryStatus.textContent =
-      saved === null
-        ? pageStatus
-        : `${pageStatus} · ${formatNumber(saved.savedCount)}개 저장 완료`;
-  } catch (error) {
-    if (currentPage === requestedPage) {
-      galleryStatus.textContent = `${galleryPageStatus(requestedPage)} · 저장하지 못했습니다: ${String(error)}`;
-    }
-  } finally {
-    if (currentPage === requestedPage) {
-      savePageButton.disabled = categoryExportBusy;
-      saveAllButton.disabled =
-        categoryExportBusy || requestedPage.items.length === 0;
-      savePageButton.textContent = "현재 페이지 저장";
-    }
+function clearCurrentPageSelection() {
+  for (const { key } of currentPageSelectionEntries()) {
+    selectedAssets.delete(key);
+  }
+  if (currentPage !== null) {
+    renderGallery(currentPage);
   }
 }
 
@@ -921,6 +1024,40 @@ async function startAssetExport() {
   } catch (error) {
     currentCategoryExport = null;
     categoryExportStatus.textContent = `전체 저장을 시작하지 못했습니다: ${String(error)}`;
+    cancelCategoryExportButton.disabled = true;
+    setCategoryExportBusy(false);
+  }
+}
+
+async function startSelectedAssetExport() {
+  if (selectedAssets.size === 0 || categoryExportBusy) {
+    return;
+  }
+  hideCategoryExport();
+  categoryExport.hidden = false;
+  categoryExportStatus.textContent = "저장할 폴더를 선택해 주세요";
+  cancelCategoryExportButton.disabled = true;
+  setCategoryExportBusy(true);
+
+  try {
+    const started = await window.__TAURI__.core.invoke(
+      "start_verified_selected_export",
+      { assets: [...selectedAssets.values()] },
+    );
+    if (started === null) {
+      hideCategoryExport();
+      setCategoryExportBusy(false);
+      return;
+    }
+    currentCategoryExport = started;
+    categoryExportProgress.max = Math.max(1, started.totalCount);
+    categoryExportProgress.value = 0;
+    categoryExportStatus.textContent = `0 / ${formatNumber(started.totalCount)}개 저장 중`;
+    cancelCategoryExportButton.disabled = false;
+    scheduleCategoryExportPoll();
+  } catch (error) {
+    currentCategoryExport = null;
+    categoryExportStatus.textContent = `선택 이미지 저장을 시작하지 못했습니다: ${String(error)}`;
     cancelCategoryExportButton.disabled = true;
     setCategoryExportBusy(false);
   }
@@ -1070,8 +1207,8 @@ async function loadCategoryPage(path, offset) {
   setPageNavigationLoading();
   galleryTitle.textContent = path.join(" > ");
   galleryStatus.textContent = "썸네일을 불러오는 중입니다";
-  savePageButton.disabled = true;
-  savePageButton.textContent = "현재 페이지 저장";
+  toggleSelectionButton.hidden = false;
+  toggleSelectionButton.disabled = true;
   saveAllButton.disabled = true;
   galleryGrid.dataset.status = "loading";
   galleryGrid.replaceChildren();
@@ -1127,8 +1264,8 @@ async function loadSearchPage(query, offset) {
   setPageNavigationLoading();
   galleryTitle.textContent = `검색: ${query}`;
   galleryStatus.textContent = "검색 결과를 불러오는 중입니다";
-  savePageButton.disabled = true;
-  savePageButton.textContent = "현재 페이지 저장";
+  toggleSelectionButton.hidden = false;
+  toggleSelectionButton.disabled = true;
   saveAllButton.disabled = true;
   galleryGrid.dataset.status = "loading";
   galleryGrid.replaceChildren();
@@ -1184,9 +1321,9 @@ async function loadUpdatePage(offset) {
   setPageNavigationLoading();
   galleryTitle.textContent = "이번 업데이트 신규";
   galleryStatus.textContent = "신규 이미지를 불러오는 중입니다";
-  savePageButton.hidden = true;
+  toggleSelectionButton.hidden = false;
   saveAllButton.hidden = true;
-  savePageButton.disabled = true;
+  toggleSelectionButton.disabled = true;
   saveAllButton.disabled = true;
   galleryGrid.dataset.status = "loading";
   galleryGrid.replaceChildren();
@@ -1461,7 +1598,13 @@ assetSearchForm.addEventListener("submit", (event) => {
 
 closeDetailButton.addEventListener("click", closeDetail);
 downloadDetailButton.addEventListener("click", saveCurrentDetail);
-savePageButton.addEventListener("click", saveCurrentPage);
+toggleSelectionButton.addEventListener("click", () => {
+  setSelectionMode(!selectionMode);
+});
+selectCurrentPageButton.addEventListener("click", selectCurrentPage);
+clearCurrentPageButton.addEventListener("click", clearCurrentPageSelection);
+clearSelectionButton.addEventListener("click", clearSelections);
+saveSelectionButton.addEventListener("click", startSelectedAssetExport);
 saveAllButton.addEventListener("click", startAssetExport);
 createUpdateBaselineButton.addEventListener(
   "click",

@@ -91,6 +91,27 @@ struct SavedVerifiedPage {
     saved_count: usize,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+struct SelectedAssetRequest {
+    path: Vec<String>,
+    archive: String,
+    block_index: u32,
+}
+
+fn deduplicate_selected_asset_requests(
+    assets: Vec<SelectedAssetRequest>,
+) -> Vec<SelectedAssetRequest> {
+    let mut unique = HashSet::with_capacity(assets.len());
+    assets
+        .into_iter()
+        .filter_map(|mut asset| {
+            asset.archive.make_ascii_lowercase();
+            unique.insert(asset.clone()).then_some(asset)
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PageAssetPlan {
     archive: String,
@@ -871,6 +892,73 @@ async fn start_verified_search_export(
 }
 
 #[tauri::command]
+async fn start_verified_selected_export(
+    app: tauri::AppHandle,
+    assets: Vec<SelectedAssetRequest>,
+    session: State<'_, SharedViewerSession>,
+    exports: State<'_, SharedCategoryExportManager>,
+) -> Result<Option<StartedCategoryExport>, String> {
+    exports.ensure_idle()?;
+    let assets = deduplicate_selected_asset_requests(assets);
+    if assets.is_empty() {
+        return Err("저장할 이미지를 하나 이상 선택해 주세요.".to_owned());
+    }
+
+    let session = session.inner().clone();
+    let manifest_session = session.clone();
+    let assets = tauri::async_runtime::spawn_blocking(move || {
+        let mut session = manifest_session
+            .lock()
+            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?;
+        assets
+            .iter()
+            .map(|asset| {
+                session
+                    .selected_asset(&asset.path, &asset.archive, asset.block_index)
+                    .map(ExportAsset::Search)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .await
+    .map_err(|error| format!("선택 이미지 목록 확인 작업이 중단되었습니다: {error}"))??;
+
+    let selection = app
+        .dialog()
+        .file()
+        .set_title("선택한 PNG 저장 폴더 선택")
+        .blocking_pick_folder();
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let destination = selection
+        .into_path()
+        .map_err(|error| format!("선택한 저장 폴더를 처리하지 못했습니다: {error}"))?;
+    let plans = assets.iter().map(ExportAsset::plan).collect::<Vec<_>>();
+    preflight_asset_batch(&destination, &plans)?;
+
+    let exports = exports.inner().clone();
+    let total_count = plans.len();
+    let control = exports.start(total_count)?;
+    let job_id = control.job_id;
+    std::mem::drop(tauri::async_runtime::spawn_blocking(move || {
+        run_asset_export(
+            session,
+            destination,
+            assets,
+            plans,
+            control.cancel,
+            control.status,
+        );
+    }));
+
+    Ok(Some(StartedCategoryExport {
+        job_id,
+        total_count,
+    }))
+}
+
+#[tauri::command]
 fn get_verified_asset_export_status(
     job_id: u64,
     exports: State<'_, SharedCategoryExportManager>,
@@ -1128,6 +1216,7 @@ fn main() {
             save_verified_search_page,
             start_verified_category_export,
             start_verified_search_export,
+            start_verified_selected_export,
             get_verified_asset_export_status,
             cancel_verified_asset_export
         ])
@@ -1192,6 +1281,36 @@ mod tests {
 
     fn test_snapshot_entry(icon_id: u32) -> AssetSnapshotEntry {
         AssetSnapshotEntry::new("sb", 1, icon_id, icon_id, 48, 48)
+    }
+
+    #[test]
+    fn deduplicates_selected_assets_by_path_archive_and_block() {
+        let head = vec!["장비".to_owned(), "방어구".to_owned(), "머리".to_owned()];
+        let body = vec!["장비".to_owned(), "방어구".to_owned(), "몸".to_owned()];
+        let requests = vec![
+            SelectedAssetRequest {
+                path: head.clone(),
+                archive: "SB".to_owned(),
+                block_index: 12,
+            },
+            SelectedAssetRequest {
+                path: head.clone(),
+                archive: "sb".to_owned(),
+                block_index: 12,
+            },
+            SelectedAssetRequest {
+                path: body.clone(),
+                archive: "sb".to_owned(),
+                block_index: 12,
+            },
+        ];
+
+        let unique = deduplicate_selected_asset_requests(requests);
+
+        assert_eq!(unique.len(), 2);
+        assert_eq!(unique[0].path, head);
+        assert_eq!(unique[0].archive, "sb");
+        assert_eq!(unique[1].path, body);
     }
 
     #[test]
