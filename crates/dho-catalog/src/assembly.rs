@@ -147,6 +147,7 @@ pub(crate) const RULES: &[AssemblyRule] = &[
     AssemblyRule::verified_sd(4_027, 6_267, 3, 3, 378, 294),
     AssemblyRule::verified_sd(6_277, 7_932, 3, 3, 384, 384),
     AssemblyRule::verified_sd(7_933, 8_718, 3, 2, 320, 220),
+    AssemblyRule::verified_sd(8_769, 8_810, 2, 1, 256, 128),
     AssemblyRule::verified_sd(8_842, 8_856, 5, 3, 640, 320),
     AssemblyRule::verified_sd(9_291, 9_978, 2, 2, 192, 192),
     AssemblyRule::verified_sd(10_156, 10_175, 2, 2, 155, 256),
