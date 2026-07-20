@@ -34,6 +34,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   min-width: 20rem;
@@ -60,8 +64,62 @@ body {
   padding: clamp(4rem, 12vh, 8rem) 0 4rem;
 }
 
+body[data-view="workspace"] .shell {
+  width: min(82rem, calc(100% - 3rem));
+  padding-top: var(--space-3);
+}
+
 .hero {
   max-width: 44rem;
+}
+
+.app-header {
+  position: sticky;
+  z-index: 10;
+  top: 0;
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-4);
+  align-items: center;
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) 0 var(--space-3);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.app-brand .eyebrow {
+  margin-bottom: 0.2rem;
+  font-size: 0.62rem;
+}
+
+.app-brand h1 {
+  margin: 0;
+  font-size: 1.65rem;
+  line-height: 1;
+  letter-spacing: -0.025em;
+}
+
+.app-navigation {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.nav-button {
+  min-height: 2.35rem;
+  padding: 0.5rem 0.8rem;
+  border-color: var(--rule);
+  color: var(--muted);
+  background: transparent;
+}
+
+.nav-button[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--bg);
+  background: var(--accent);
+}
+
+.app-page > .catalog-card:first-child {
+  margin-top: 0;
 }
 
 .eyebrow {
@@ -335,6 +393,25 @@ button:disabled {
 
 .update-actions[hidden] {
   display: none;
+}
+
+.settings-card .directory-details {
+  margin-top: var(--space-3);
+}
+
+.archive-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  align-items: baseline;
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rule);
+}
+
+.archive-heading h3 {
+  margin: 0;
+  font-size: 0.9rem;
 }
 
 .asset-search {
@@ -766,6 +843,26 @@ button:disabled {
     padding-top: 3rem;
   }
 
+  body[data-view="workspace"] .shell {
+    width: calc(100% - 2rem);
+    padding-top: 0;
+  }
+
+  .app-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .app-navigation {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .nav-button {
+    padding-right: 0.45rem;
+    padding-left: 0.45rem;
+  }
+
   .status-card {
     padding: var(--space-3);
   }
@@ -783,6 +880,10 @@ button:disabled {
   .section-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .settings-heading button {
+    width: 100%;
   }
 
   .gallery-heading-actions {
