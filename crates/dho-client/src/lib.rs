@@ -653,6 +653,19 @@ impl ViewerSession {
         Ok(assets.into_iter().map(VerifiedSearchAsset).collect())
     }
 
+    pub fn selected_asset(
+        &mut self,
+        path: &[String],
+        prefix: &str,
+        block_index: u32,
+    ) -> Result<VerifiedSearchAsset, ViewerSessionError> {
+        let asset = self.verified_asset(path, prefix, block_index)?;
+        Ok(VerifiedSearchAsset(VerifiedSearchAssetRef {
+            path: path.to_vec(),
+            asset,
+        }))
+    }
+
     pub fn category_asset_png(
         &mut self,
         asset: &VerifiedCategoryAsset,
@@ -2269,6 +2282,17 @@ mod tests {
         assert_eq!(category_png.block_index, 1);
         assert_eq!(&category_png.png[..8], b"\x89PNG\r\n\x1a\n");
 
+        let selected = session
+            .selected_asset(&category, "SB", 1)
+            .expect("revalidate selected asset");
+        assert_eq!(selected.path(), &category);
+        assert_eq!(selected.archive(), "sb");
+        assert_eq!(selected.block_index(), 1);
+        let selected_png = session
+            .search_asset_png(&selected)
+            .expect("extract selected asset directly");
+        assert_eq!(selected_png.block_index, 1);
+
         let detail_error = session.asset_detail(&category, "sb", 2).unwrap_err();
         assert!(matches!(
             detail_error,
@@ -2721,6 +2745,16 @@ mod tests {
             .category_asset_png(&category_assets[0])
             .expect("extract verified assembly directly");
         assert_eq!((category_png.width, category_png.height), (782, 404));
+
+        let selected = session
+            .selected_asset(&category, "SD", 10_368)
+            .expect("revalidate selected assembly");
+        assert!(selected.assembled());
+        let selected_png = session
+            .search_asset_png(&selected)
+            .expect("extract selected assembly directly");
+        assert!(selected_png.assembled);
+        assert_eq!((selected_png.width, selected_png.height), (782, 404));
     }
 
     #[test]
