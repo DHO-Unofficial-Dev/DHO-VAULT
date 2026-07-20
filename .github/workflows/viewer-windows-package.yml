@@ -102,6 +102,9 @@ jobs:
       contents: write
 
     steps:
+      - name: 소스 받기
+        uses: actions/checkout@v7
+
       - name: 배포 파일 받기
         uses: actions/download-artifact@v8
         with:
@@ -117,4 +120,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "DHO Vault $GITHUB_REF_NAME" \
-            --generate-notes
+            --notes-file RELEASE_NOTES.md
