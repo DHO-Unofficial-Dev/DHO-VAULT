@@ -4,6 +4,7 @@ use crate::{CategoryPath, CategorySource, RecordRule, RuleScope};
 
 const DISCOVERY_SET_1_LARGE: CategoryPath =
     CategoryPath::new(&["발견물", "1", "획득 이미지 (128×128)"]);
+const SEA_MAP: CategoryPath = CategoryPath::new(&["지도", "해역 지도"]);
 const BATTLE: CategoryPath = CategoryPath::new(&["전투"]);
 const BATTLE_UI_IMAGE: CategoryPath = CategoryPath::new(&["전투", "UI 이미지"]);
 const PORT_PERMIT_ACQUISITION: CategoryPath =
@@ -65,6 +66,7 @@ const fn custom_range(start: u32, end: u32, category: CategoryPath) -> RecordRul
 
 pub(crate) const RECORD_RULES: &[RecordRule] = &[
     custom_range(0, 2_926, DISCOVERY_SET_1_LARGE),
+    custom_range(2_927, 3_070, SEA_MAP),
     in_game_range(3_071, 3_288, BATTLE),
     custom_range(3_289, 3_314, PORT_PERMIT_ACQUISITION),
     in_game_range(3_315, 3_507, HELP),
