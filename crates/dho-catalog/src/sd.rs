@@ -13,6 +13,7 @@ const HELP: CategoryPath = CategoryPath::new(&["도움말"]);
 const HELP_SCREEN: CategoryPath = CategoryPath::new(&["도움말", "화면 이미지 (320×220)"]);
 const TREASURE_HUNT_THEME_IMAGE: CategoryPath =
     CategoryPath::new(&["퀘스트", "트레져 헌트", "테마 이미지 (128×128)"]);
+const EVENT_ILLUSTRATION: CategoryPath = CategoryPath::new(&["이벤트", "삽화"]);
 const WORLD_CLOCK: CategoryPath = CategoryPath::new(&["UI 이미지", "월드 클락"]);
 const CLIENT_SPLASH_UI: CategoryPath = CategoryPath::new(&["클라이언트", "스플래시 UI"]);
 const CITY_MAP_ASSEMBLED: CategoryPath = CategoryPath::new(&["지도", "도시 지도 (378×294)"]);
@@ -79,6 +80,7 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
     custom_range(6_277, 7_932, LARGE_FIELD_MAP_ASSEMBLED),
     custom_range(7_933, 8_718, HELP_SCREEN),
     custom_range(8_719, 8_768, TREASURE_HUNT_THEME_IMAGE),
+    custom_range(8_769, 8_810, EVENT_ILLUSTRATION),
     custom_range(8_811, 8_841, WORLD_CLOCK),
     custom_range(8_842, 8_856, WORLD_MAP_ASSEMBLED),
     in_game_range(8_857, 9_248, WORLD_MAP),

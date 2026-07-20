@@ -1036,6 +1036,7 @@ mod tests {
                 8_768,
                 &["퀘스트", "트레져 헌트", "테마 이미지 (128×128)"],
             ),
+            (8_769, 8_810, &["이벤트", "삽화"]),
             (8_811, 8_841, &["UI 이미지", "월드 클락"]),
             (8_842, 8_856, &["지도", "세계지도 (640×320)"]),
             (8_857, 9_248, &["지도", "세계지도"]),
@@ -1094,7 +1095,7 @@ mod tests {
 
     #[test]
     fn sd_unverified_ranges_remain_unclassified() {
-        for block_index in [3_508, 3_510, 8_769, 8_810] {
+        for block_index in [3_508, 3_509, 3_510] {
             assert_eq!(
                 classify_record(sd_key(block_index)),
                 RecordClassification::unknown()
