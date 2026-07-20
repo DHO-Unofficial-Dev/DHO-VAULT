@@ -1025,6 +1025,7 @@ mod tests {
             (3_071, 3_288, &["전투"]),
             (3_289, 3_314, &["입항허가", "획득 이미지 (128×128)"]),
             (3_315, 3_507, &["도움말"]),
+            (3_511, 4_022, &["지도", "세계지도"]),
             (4_023, 4_026, &["클라이언트", "스플래시 UI"]),
             (4_027, 6_267, &["지도", "도시 지도 (378×294)"]),
             (6_268, 6_276, &["전투", "UI 이미지"]),
@@ -1091,7 +1092,7 @@ mod tests {
 
     #[test]
     fn sd_unverified_ranges_remain_unclassified() {
-        for block_index in [3_508, 4_022, 8_769, 8_810, 9_249, 9_290] {
+        for block_index in [3_508, 3_510, 8_769, 8_810, 9_249, 9_290] {
             assert_eq!(
                 classify_record(sd_key(block_index)),
                 RecordClassification::unknown()
@@ -1103,6 +1104,7 @@ mod tests {
     fn resolves_verified_sd_assembly_rule_boundaries() {
         for (start, end, image_count, columns, rows, width, height) in [
             (2_927, 3_070, 18, 4, 2, 512, 256),
+            (3_511, 4_022, 1, 32, 16, 4_096, 2_048),
             (4_027, 6_267, 249, 3, 3, 378, 294),
             (6_277, 7_932, 184, 3, 3, 384, 384),
             (7_933, 8_718, 131, 3, 2, 320, 220),

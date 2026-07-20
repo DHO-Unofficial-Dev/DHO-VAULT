@@ -70,6 +70,7 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
     in_game_range(3_071, 3_288, BATTLE),
     custom_range(3_289, 3_314, PORT_PERMIT_ACQUISITION),
     in_game_range(3_315, 3_507, HELP),
+    custom_range(3_511, 4_022, WORLD_MAP),
     custom_range(4_023, 4_026, CLIENT_SPLASH_UI),
     custom_range(4_027, 6_267, CITY_MAP_ASSEMBLED),
     custom_range(6_268, 6_276, BATTLE_UI_IMAGE),
