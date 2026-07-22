@@ -639,6 +639,40 @@ button:disabled {
   accent-color: var(--accent);
 }
 
+.app-update-release-notes {
+  margin-top: var(--space-3);
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.app-update-release-notes[hidden] {
+  display: none;
+}
+
+.app-update-release-notes summary {
+  padding: var(--space-2) var(--space-3);
+  color: var(--accent);
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.app-update-release-notes summary::marker {
+  color: var(--muted);
+}
+
+.app-update-release-notes-content {
+  max-height: 20rem;
+  overflow: auto;
+  padding: var(--space-3);
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .app-update-actions {
   display: flex;
   justify-content: flex-end;
