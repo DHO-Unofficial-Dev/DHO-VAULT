@@ -33,6 +33,12 @@ const archiveList = document.querySelector("#archive-list");
 const archiveStatus = document.querySelector("#archive-status");
 const appCurrentVersion = document.querySelector("#app-current-version");
 const appUpdateMessage = document.querySelector("#app-update-message");
+const appUpdateReleaseNotes = document.querySelector(
+  "#app-update-release-notes",
+);
+const appUpdateReleaseNotesContent = document.querySelector(
+  "#app-update-release-notes-content",
+);
 const appUpdateProgress = document.querySelector("#app-update-progress");
 const appUpdateProgressLabel = document.querySelector(
   "#app-update-progress-label",
@@ -1560,6 +1566,13 @@ function setAppUpdateBusy(busy) {
   renderStatusAppUpdate();
 }
 
+function showAppUpdateReleaseNotes(notes) {
+  const normalizedNotes = notes?.trim() ?? "";
+  appUpdateReleaseNotes.open = false;
+  appUpdateReleaseNotesContent.textContent = normalizedNotes;
+  appUpdateReleaseNotes.hidden = normalizedNotes.length === 0;
+}
+
 function showAvailableAppUpdate(result) {
   availableAppUpdate = result.update;
   appCurrentVersion.textContent = `현재 ${result.currentVersion}`;
@@ -1567,6 +1580,7 @@ function showAvailableAppUpdate(result) {
   if (availableAppUpdate === null) {
     appUpdateBanner.hidden = true;
     installAppUpdateButton.hidden = true;
+    showAppUpdateReleaseNotes(null);
     appUpdateMessage.textContent = "현재 최신 버전을 사용하고 있습니다.";
     renderStatusAppUpdate();
     return;
@@ -1576,8 +1590,9 @@ function showAvailableAppUpdate(result) {
   appUpdateBannerMessage.textContent = `현재 ${result.currentVersion}에서 새 버전으로 업데이트할 수 있습니다.`;
   appUpdateBanner.hidden = false;
   installAppUpdateButton.hidden = false;
+  showAppUpdateReleaseNotes(availableAppUpdate.notes);
   appUpdateMessage.textContent = availableAppUpdate.notes
-    ? `${availableAppUpdate.version} 버전이 있습니다. ${availableAppUpdate.notes}`
+    ? `${availableAppUpdate.version} 버전을 설치할 수 있습니다. 자세한 변경 사항은 릴리스 노트를 확인해 주세요.`
     : `${availableAppUpdate.version} 버전을 설치할 수 있습니다.`;
   renderStatusAppUpdate();
 }
@@ -1600,6 +1615,7 @@ async function checkForAppUpdate({ automatic = false } = {}) {
 
   appUpdateActivity = "checking";
   setAppUpdateBusy(true);
+  showAppUpdateReleaseNotes(null);
   appUpdateMessage.textContent = "새 버전이 있는지 확인하고 있습니다.";
   try {
     const result = await window.__TAURI__.core.invoke("check_app_update");
@@ -1669,6 +1685,7 @@ async function installAvailableAppUpdate() {
     availableAppUpdate = null;
     appUpdateBanner.hidden = true;
     installAppUpdateButton.hidden = true;
+    showAppUpdateReleaseNotes(null);
     appUpdateProgressLabel.textContent = "업데이트 설치 프로그램을 시작했습니다.";
     appUpdateMessage.textContent =
       "앱이 자동으로 종료되지 않았다면 창을 닫고 설치를 마쳐 주세요.";
