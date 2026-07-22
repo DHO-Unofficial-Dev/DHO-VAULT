@@ -38,6 +38,7 @@ const checkAppUpdateButton = document.querySelector("#check-app-update");
 const installAppUpdateButton = document.querySelector(
   "#install-app-update",
 );
+const imageExportMode = document.querySelector("#image-export-mode");
 const updatePanel = document.querySelector("#update-panel");
 const updateStatus = document.querySelector("#update-status");
 const updateMessage = document.querySelector("#update-message");
@@ -132,6 +133,28 @@ let appUpdateDownloadedBytes = 0;
 const CATEGORY_EXPORT_POLL_INTERVAL = 250;
 const VISIBLE_PAGE_BUTTON_COUNT = 9;
 const VISIBLE_PAGE_RADIUS = 4;
+const IMAGE_EXPORT_MODE_STORAGE_KEY = "dho-vault-image-export-mode";
+
+function loadImageExportMode() {
+  try {
+    const stored = window.localStorage.getItem(IMAGE_EXPORT_MODE_STORAGE_KEY);
+    if ([...imageExportMode.options].some((option) => option.value === stored)) {
+      imageExportMode.value = stored;
+    }
+  } catch {
+    imageExportMode.value = "service_upscaled";
+  }
+}
+
+function currentImageExportMode() {
+  return imageExportMode.value === "original"
+    ? "original"
+    : "service_upscaled";
+}
+
+function imageExportModeLabel(mode) {
+  return mode === "original" ? "원본 픽셀 유지" : "서비스용 선명 확대";
+}
 
 function selectionKey(path, item) {
   return JSON.stringify([
@@ -1017,6 +1040,7 @@ async function startAssetExport() {
     return;
   }
   const requestedPage = currentPage;
+  const exportMode = currentImageExportMode();
   hideCategoryExport();
   categoryExport.hidden = false;
   categoryExportStatus.textContent = "저장할 폴더를 선택해 주세요";
@@ -1030,8 +1054,8 @@ async function startAssetExport() {
         ? "start_verified_search_export"
         : "start_verified_category_export",
       searchMode
-        ? { query: requestedPage.query }
-        : { path: requestedPage.path },
+        ? { query: requestedPage.query, exportMode }
+        : { path: requestedPage.path, exportMode },
     );
     if (currentPage !== requestedPage) {
       return;
@@ -1044,7 +1068,7 @@ async function startAssetExport() {
     currentCategoryExport = started;
     categoryExportProgress.max = Math.max(1, started.totalCount);
     categoryExportProgress.value = 0;
-    categoryExportStatus.textContent = `0 / ${formatNumber(started.totalCount)}개 저장 중`;
+    categoryExportStatus.textContent = `0 / ${formatNumber(started.totalCount)}개 ${imageExportModeLabel(exportMode)}로 저장 중`;
     cancelCategoryExportButton.disabled = false;
     scheduleCategoryExportPoll();
   } catch (error) {
@@ -1064,11 +1088,12 @@ async function startSelectedAssetExport() {
   categoryExportStatus.textContent = "저장할 폴더를 선택해 주세요";
   cancelCategoryExportButton.disabled = true;
   setCategoryExportBusy(true);
+  const exportMode = currentImageExportMode();
 
   try {
     const started = await window.__TAURI__.core.invoke(
       "start_verified_selected_export",
-      { assets: [...selectedAssets.values()] },
+      { assets: [...selectedAssets.values()], exportMode },
     );
     if (started === null) {
       hideCategoryExport();
@@ -1078,7 +1103,7 @@ async function startSelectedAssetExport() {
     currentCategoryExport = started;
     categoryExportProgress.max = Math.max(1, started.totalCount);
     categoryExportProgress.value = 0;
-    categoryExportStatus.textContent = `0 / ${formatNumber(started.totalCount)}개 저장 중`;
+    categoryExportStatus.textContent = `0 / ${formatNumber(started.totalCount)}개 ${imageExportModeLabel(exportMode)}로 저장 중`;
     cancelCategoryExportButton.disabled = false;
     scheduleCategoryExportPoll();
   } catch (error) {
@@ -1195,7 +1220,7 @@ async function saveCurrentDetail() {
   try {
     const saved = await window.__TAURI__.core.invoke(
       "save_verified_asset_png",
-      requestedDetail,
+      { ...requestedDetail, exportMode: currentImageExportMode() },
     );
     if (currentDetail !== requestedDetail) {
       return;
@@ -1204,7 +1229,12 @@ async function saveCurrentDetail() {
       detailMessage.textContent = "저장을 취소했습니다.";
       return;
     }
-    detailMessage.textContent = `${saved.fileName} 파일로 저장했습니다.`;
+    const resized =
+      saved.sourceWidth !== saved.width || saved.sourceHeight !== saved.height;
+    const sizeSummary = resized
+      ? ` (${formatNumber(saved.sourceWidth)} × ${formatNumber(saved.sourceHeight)} → ${formatNumber(saved.width)} × ${formatNumber(saved.height)})`
+      : ` (${formatNumber(saved.width)} × ${formatNumber(saved.height)})`;
+    detailMessage.textContent = `${saved.fileName} 파일로 저장했습니다${sizeSummary}.`;
   } catch (error) {
     if (currentDetail === requestedDetail) {
       detailMessage.textContent = `저장하지 못했습니다: ${String(error)}`;
@@ -1782,6 +1812,16 @@ refreshUpdateBaselineButton.addEventListener(
 cancelCategoryExportButton.addEventListener("click", cancelCategoryExport);
 checkAppUpdateButton.addEventListener("click", () => checkForAppUpdate());
 installAppUpdateButton.addEventListener("click", installAvailableAppUpdate);
+imageExportMode.addEventListener("change", () => {
+  try {
+    window.localStorage.setItem(
+      IMAGE_EXPORT_MODE_STORAGE_KEY,
+      currentImageExportMode(),
+    );
+  } catch {
+    // The selected mode still applies for the current run when storage is unavailable.
+  }
+});
 appUpdateBannerInstallButton.addEventListener(
   "click",
   installAvailableAppUpdate,
@@ -1791,6 +1831,7 @@ detailDialog.addEventListener("close", () => {
   resetDetail();
 });
 
+loadImageExportMode();
 loadAppVersion();
 checkForAppUpdate({ automatic: true });
 loadSavedGameDirectory();

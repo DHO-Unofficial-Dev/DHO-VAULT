@@ -628,6 +628,7 @@ name = "dho-viewer"
 version = "0.1.0"
 dependencies = [
  "dho-client",
+ "dho-image",
  "serde",
  "serde_json",
  "tauri",

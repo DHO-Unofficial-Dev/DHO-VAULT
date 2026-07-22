@@ -273,6 +273,28 @@
             </div>
           </section>
 
+          <section class="catalog-card export-settings-card" aria-labelledby="export-settings-title">
+            <div class="section-heading settings-heading">
+              <div>
+                <p class="section-label">IMAGE EXPORT</p>
+                <h2 id="export-settings-title">PNG 저장 품질</h2>
+              </div>
+              <label class="export-mode-control" for="image-export-mode">
+                <span>저장 크기</span>
+                <select id="image-export-mode">
+                  <option value="service_upscaled" selected>서비스용 선명 확대 (권장)</option>
+                  <option value="original">원본 픽셀 유지 (무가공)</option>
+                </select>
+              </label>
+            </div>
+            <p class="section-description">
+              원본 픽셀 유지는 게임의 작은 크기를 그대로 저장하는 방식이며 더 고화질인
+              옵션은 아닙니다. 서비스용 선명 확대는 정사각형 64px 이하 이미지만 최소
+              192px까지 보기 좋게 확대하며, AI처럼 없던 세부 정보를 만들지는 않습니다.
+              지도·삽화·조립 이미지와 원본 데이터는 변경하지 않습니다.
+            </p>
+          </section>
+
           <section class="catalog-card settings-card" aria-labelledby="settings-title">
             <div class="section-heading settings-heading">
               <div>
