@@ -55,9 +55,19 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Viewer 빌드
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         shell: pwsh
         working-directory: apps/viewer/src-tauri
         run: npx --yes @tauri-apps/cli@2.11.4 build
+
+      - name: Viewer 릴리스 빌드
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        working-directory: apps/viewer/src-tauri
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npx --yes @tauri-apps/cli@2.11.4 build --config tauri.release.conf.json
 
       - name: 배포 파일 정리
         shell: pwsh
@@ -77,7 +87,33 @@ jobs:
           $setupName = "DHO-Vault_${version}_x64-setup.exe"
           Copy-Item $installers[0].FullName (Join-Path $dist $setupName)
 
-          $hashes = Get-ChildItem $dist -File -Filter "*.exe" |
+          if ($env:GITHUB_REF -like "refs/tags/v*") {
+            $signaturePath = "$($installers[0].FullName).sig"
+            if (-not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+              throw "업데이트 서명 파일을 찾지 못했습니다: $signaturePath"
+            }
+
+            Copy-Item $signaturePath (Join-Path $dist "$setupName.sig")
+
+            $signature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
+            $downloadUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$setupName"
+            $releaseNotes = Get-Content RELEASE_NOTES.md -Raw
+            $latest = [ordered]@{
+              version = $version
+              notes = $releaseNotes
+              pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+              platforms = [ordered]@{
+                "windows-x86_64" = [ordered]@{
+                  signature = $signature
+                  url = $downloadUrl
+                }
+              }
+            }
+            $latest | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $dist "latest.json") -Encoding utf8
+          }
+
+          $hashes = Get-ChildItem $dist -File |
+            Where-Object Name -NotIn @("SHA256SUMS.txt", "latest.json") |
             Sort-Object Name |
             ForEach-Object {
               $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLowerInvariant()

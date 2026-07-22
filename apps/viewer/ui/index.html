@@ -11,6 +11,19 @@
   </head>
   <body>
     <main class="shell">
+      <section
+        id="app-update-banner"
+        class="app-update-banner"
+        aria-live="polite"
+        hidden
+      >
+        <div>
+          <strong id="app-update-banner-title">새 버전을 사용할 수 있습니다.</strong>
+          <p id="app-update-banner-message"></p>
+        </div>
+        <button id="app-update-banner-install" type="button">업데이트 설치</button>
+      </section>
+
       <section id="connection-view" class="connection-view">
         <header class="hero">
           <p class="eyebrow">DHO RESOURCE VAULT</p>
@@ -237,6 +250,29 @@
         </section>
 
         <section id="settings-page" class="app-page" data-page="settings" hidden>
+          <section class="catalog-card app-update-card" aria-labelledby="app-update-title">
+            <div class="section-heading settings-heading">
+              <div>
+                <p class="section-label">APP UPDATE</p>
+                <h2 id="app-update-title">DHO Vault 업데이트</h2>
+              </div>
+              <span id="app-current-version" class="section-status">현재 버전 확인 중</span>
+            </div>
+            <p id="app-update-message" class="section-description" aria-live="polite">
+              새 버전이 있는지 자동으로 확인합니다.
+            </p>
+            <div id="app-update-progress" class="app-update-progress" hidden>
+              <span id="app-update-progress-label">업데이트를 내려받는 중입니다.</span>
+              <progress id="app-update-progress-bar" value="0" max="1"></progress>
+            </div>
+            <div class="app-update-actions">
+              <button id="check-app-update" class="secondary-button" type="button">
+                다시 확인
+              </button>
+              <button id="install-app-update" type="button" hidden>업데이트 설치</button>
+            </div>
+          </section>
+
           <section class="catalog-card settings-card" aria-labelledby="settings-title">
             <div class="section-heading settings-heading">
               <div>
