@@ -7,8 +7,18 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-const UPDATE_ENDPOINT: &str =
+const STABLE_UPDATE_ENDPOINT: &str =
     "https://github.com/DHO-Unofficial-Dev/DHO-VAULT/releases/latest/download/latest.json";
+const RC_UPDATE_ENDPOINT: &str =
+    "https://github.com/DHO-Unofficial-Dev/DHO-VAULT/releases/download/updater-rc/latest.json";
+
+fn update_endpoint(is_prerelease: bool) -> &'static str {
+    if is_prerelease {
+        RC_UPDATE_ENDPOINT
+    } else {
+        STABLE_UPDATE_ENDPOINT
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct AppUpdateState {
@@ -86,7 +96,7 @@ pub(crate) async fn check_app_update(
         return Err("앱 업데이트를 설치하는 동안에는 다시 확인할 수 없습니다.".to_owned());
     }
 
-    let endpoint = UPDATE_ENDPOINT
+    let endpoint = update_endpoint(!app.package_info().version.pre.is_empty())
         .parse()
         .map_err(|error| format!("업데이트 주소가 올바르지 않습니다: {error}"))?;
     let updater = app
@@ -169,6 +179,12 @@ mod tests {
         drop(guard);
         assert!(!flag.load(Ordering::Acquire));
         assert!(begin_operation(&flag, "busy").is_ok());
+    }
+
+    #[test]
+    fn selects_an_update_channel_from_the_installed_version() {
+        assert_eq!(update_endpoint(false), STABLE_UPDATE_ENDPOINT);
+        assert_eq!(update_endpoint(true), RC_UPDATE_ENDPOINT);
     }
 
     #[test]
