@@ -23,6 +23,8 @@
   --space-4: 1.5rem;
   --space-5: 2rem;
   --radius: 2px;
+  --titlebar-height: 3.5rem;
+  --statusbar-height: 2.25rem;
   --font-display:
     Fraunces, "Pretendard Variable", Pretendard, Inter, system-ui, sans-serif;
   --font-sans: "Pretendard Variable", Pretendard, Inter, system-ui, sans-serif;
@@ -41,12 +43,13 @@
 html,
 body {
   min-width: 20rem;
-  min-height: 100%;
+  height: 100%;
   margin: 0;
+  overflow: hidden;
 }
 
 body {
-  min-height: 100vh;
+  min-height: 100%;
   color: var(--ink);
   background:
     linear-gradient(rgba(30, 46, 62, 0.5) 1px, transparent 1px),
@@ -58,15 +61,207 @@ body {
   overflow-wrap: break-word;
 }
 
+body::after {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  border: 1px solid var(--rule);
+  content: "";
+  pointer-events: none;
+}
+
+.window-titlebar {
+  position: fixed;
+  z-index: 80;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: var(--titlebar-height);
+  display: flex;
+  align-items: center;
+  padding-left: var(--space-3);
+  border-bottom: 1px solid var(--rule);
+  background: rgba(18, 33, 46, 0.98);
+  user-select: none;
+}
+
+.window-brand {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.65rem;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  pointer-events: none;
+}
+
+.window-brand-mark {
+  width: 1.65rem;
+  height: 1.65rem;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.window-brand-mark path:first-of-type {
+  fill: currentColor;
+  stroke: none;
+}
+
+.window-brand-mark circle:last-of-type {
+  fill: var(--surface);
+  stroke: currentColor;
+}
+
+.window-brand-mark path:last-of-type {
+  fill: var(--bg);
+  stroke: currentColor;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+}
+
+.window-titlebar-actions {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  margin-left: auto;
+}
+
+.titlebar-version {
+  min-width: 4.5rem;
+  padding: 0 var(--space-2);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-align: center;
+}
+
+.window-control {
+  width: 2.75rem;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+}
+
+.window-control:hover {
+  color: var(--ink);
+  background: var(--bg);
+}
+
+.window-control-close:hover {
+  color: var(--ink);
+  background: var(--accent-2);
+}
+
+.window-control svg {
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+}
+
+.window-statusbar {
+  position: fixed;
+  z-index: 80;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: var(--statusbar-height);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-3);
+  border-top: 1px solid var(--rule);
+  background: rgba(18, 33, 46, 0.98);
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+.window-status {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-status[data-status="ready"] {
+  color: var(--accent);
+}
+
+.window-status[data-status="busy"] {
+  color: var(--ink);
+}
+
+.window-status[data-status="error"] {
+  color: var(--accent-2);
+}
+
+.status-app-update {
+  min-height: auto;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  color: var(--accent);
+  background: transparent;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.status-app-update:hover:not(:disabled) {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+.status-app-update:disabled {
+  color: var(--muted);
+  cursor: wait;
+}
+
 .shell {
-  width: min(54rem, calc(100% - 3rem));
-  margin: 0 auto;
-  padding: clamp(4rem, 12vh, 8rem) 0 4rem;
+  position: fixed;
+  top: var(--titlebar-height);
+  right: 0;
+  bottom: var(--statusbar-height);
+  left: 0;
+  width: 100%;
+  margin: 0;
+  padding: clamp(4rem, 12vh, 8rem)
+    max(1.5rem, calc((100% - 54rem) / 2)) 4rem;
+  overflow-y: auto;
+  scrollbar-color: #536779 var(--bg);
+  scrollbar-width: thin;
+}
+
+.shell::-webkit-scrollbar {
+  width: 0.65rem;
+}
+
+.shell::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+
+.shell::-webkit-scrollbar-thumb {
+  border: 2px solid var(--bg);
+  background: #536779;
+}
+
+.shell::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }
 
 body[data-view="workspace"] .shell {
-  width: min(82rem, calc(100% - 3rem));
-  padding-top: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) max(1.5rem, calc((100% - 82rem) / 2));
 }
 
 body[data-selection-active="true"] .shell {
@@ -101,35 +296,19 @@ body[data-selection-active="true"] .shell {
   max-width: 44rem;
 }
 
-.app-header {
-  position: sticky;
-  z-index: 10;
-  top: 0;
-  display: flex;
-  justify-content: space-between;
-  gap: var(--space-4);
-  align-items: center;
-  margin-bottom: var(--space-3);
-  padding: var(--space-2) 0 var(--space-3);
-  border-bottom: 1px solid var(--line);
-  background: var(--bg);
-}
-
-.app-brand .eyebrow {
-  margin-bottom: 0.2rem;
-  font-size: 0.62rem;
-}
-
-.app-brand h1 {
-  margin: 0;
-  font-size: 1.65rem;
-  line-height: 1;
-  letter-spacing: -0.025em;
-}
-
 .app-navigation {
   display: flex;
   gap: var(--space-1);
+}
+
+.titlebar-navigation {
+  margin-right: var(--space-2);
+}
+
+.titlebar-navigation .nav-button {
+  min-height: 2rem;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.75rem;
 }
 
 .nav-button {
@@ -160,7 +339,9 @@ body[data-selection-active="true"] .shell {
 .library-layout #category-panel {
   display: flex;
   flex-direction: column;
-  max-height: calc(100vh - 6.5rem);
+  max-height: calc(
+    100vh - var(--titlebar-height) - var(--statusbar-height) - 2rem
+  );
   overflow: hidden;
 }
 
@@ -964,7 +1145,7 @@ button:disabled {
   position: fixed;
   z-index: 30;
   right: max(1rem, calc((100vw - 82rem) / 2));
-  bottom: var(--space-3);
+  bottom: calc(var(--statusbar-height) + var(--space-3));
   left: max(1rem, calc((100vw - 82rem) / 2));
   display: flex;
   justify-content: space-between;
@@ -1128,19 +1309,32 @@ button:disabled {
 }
 
 @media (max-width: 36rem) {
+  .window-titlebar {
+    padding-left: var(--space-2);
+  }
+
+  .window-brand {
+    font-size: 0.95rem;
+  }
+
+  .titlebar-version {
+    min-width: auto;
+    padding-right: var(--space-1);
+    padding-left: var(--space-1);
+  }
+
+  .window-statusbar {
+    padding: 0 var(--space-2);
+  }
+
   .shell {
-    width: min(100% - 2rem, 54rem);
-    padding-top: 3rem;
+    width: 100%;
+    padding: 3rem 1rem 4rem;
   }
 
   body[data-view="workspace"] .shell {
-    width: calc(100% - 2rem);
-    padding-top: 0;
-  }
-
-  .app-header {
-    align-items: stretch;
-    flex-direction: column;
+    width: 100%;
+    padding: 0 1rem 1rem;
   }
 
   .app-navigation {

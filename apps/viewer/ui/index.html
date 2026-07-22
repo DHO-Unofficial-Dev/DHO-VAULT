@@ -10,6 +10,77 @@
     <script src="app.js" defer></script>
   </head>
   <body>
+    <header class="window-titlebar" data-tauri-drag-region>
+      <div class="window-brand" data-tauri-drag-region>
+        <svg
+          class="window-brand-mark"
+          viewBox="0 0 32 32"
+          role="img"
+          aria-label="DHO Vault"
+        >
+          <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" />
+          <path
+            d="M16 4l2.2 9.8L28 16l-9.8 2.2L16 28l-2.2-9.8L4 16l9.8-2.2L16 4z"
+          />
+          <circle cx="23.5" cy="23.5" r="5.5" />
+          <path d="M21.25 23.5v-1.25a2.25 2.25 0 014.5 0v1.25m-5.25 0h6v4h-6z" />
+        </svg>
+        <span data-tauri-drag-region>DHO Vault</span>
+      </div>
+      <div class="window-titlebar-actions">
+        <nav
+          id="titlebar-navigation"
+          class="app-navigation titlebar-navigation"
+          aria-label="주요 화면"
+          hidden
+        >
+          <button
+            class="nav-button"
+            type="button"
+            data-page="library"
+            aria-pressed="true"
+          >
+            라이브러리
+          </button>
+          <button
+            class="nav-button"
+            type="button"
+            data-page="update"
+            aria-pressed="false"
+          >
+            업데이트
+          </button>
+          <button
+            class="nav-button"
+            type="button"
+            data-page="settings"
+            aria-pressed="false"
+          >
+            설정
+          </button>
+        </nav>
+        <span id="titlebar-version" class="titlebar-version" aria-label="현재 앱 버전"></span>
+        <button
+          id="minimize-window"
+          class="window-control"
+          type="button"
+          aria-label="창 최소화"
+          title="최소화"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5h10" /></svg>
+        </button>
+        <button
+          id="close-window"
+          class="window-control window-control-close"
+          type="button"
+          aria-label="창 닫기"
+          title="닫기"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8m0-8l-8 8" /></svg>
+        </button>
+      </div>
+    </header>
+
     <main class="shell">
       <section
         id="app-update-banner"
@@ -53,24 +124,6 @@
       </section>
 
       <section id="workspace-view" class="workspace-view" hidden>
-        <header class="app-header">
-          <div class="app-brand">
-            <p class="eyebrow">DHO RESOURCE VAULT</p>
-            <h1>DHO Vault</h1>
-          </div>
-          <nav class="app-navigation" aria-label="주요 화면">
-            <button class="nav-button" type="button" data-page="library" aria-pressed="true">
-              라이브러리
-            </button>
-            <button class="nav-button" type="button" data-page="update" aria-pressed="false">
-              업데이트
-            </button>
-            <button class="nav-button" type="button" data-page="settings" aria-pressed="false">
-              설정
-            </button>
-          </nav>
-        </header>
-
         <section id="library-page" class="app-page library-layout" data-page="library">
           <section id="category-panel" class="catalog-card" aria-labelledby="category-title" hidden>
             <div class="section-heading">
@@ -323,6 +376,16 @@
         </section>
       </section>
     </main>
+
+    <footer class="window-statusbar" aria-live="polite">
+      <span id="window-status" class="window-status" data-status="idle">준비됨</span>
+      <button
+        id="status-app-update"
+        class="status-app-update"
+        type="button"
+        hidden
+      ></button>
+    </footer>
 
     <aside id="selection-bar" class="selection-bar" aria-label="선택한 이미지 작업" hidden>
       <strong id="selection-count" aria-live="polite">0개 선택</strong>

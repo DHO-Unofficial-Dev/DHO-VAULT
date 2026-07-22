@@ -4,6 +4,12 @@ const selectButton = document.querySelector("#select-game-directory");
 const changeDirectoryButton = document.querySelector("#change-game-directory");
 const connectionView = document.querySelector("#connection-view");
 const workspaceView = document.querySelector("#workspace-view");
+const titlebarNavigation = document.querySelector("#titlebar-navigation");
+const minimizeWindowButton = document.querySelector("#minimize-window");
+const closeWindowButton = document.querySelector("#close-window");
+const titlebarVersion = document.querySelector("#titlebar-version");
+const windowStatus = document.querySelector("#window-status");
+const statusAppUpdateButton = document.querySelector("#status-app-update");
 const navigationButtons = document.querySelectorAll(".nav-button");
 const appPages = document.querySelectorAll(".app-page");
 const statusCard = document.querySelector(".status-card");
@@ -129,6 +135,7 @@ let currentWorkspacePage = "library";
 let availableAppUpdate = null;
 let appUpdateBusy = false;
 let appUpdateDownloadedBytes = 0;
+let appUpdateActivity = null;
 
 const CATEGORY_EXPORT_POLL_INTERVAL = 250;
 const VISIBLE_PAGE_BUTTON_COUNT = 9;
@@ -374,6 +381,19 @@ function setStatus(kind, title, message) {
   statusCard.dataset.status = kind;
   statusTitle.textContent = title;
   statusMessage.textContent = message;
+  setWindowStatus(
+    kind === "loading" ? "busy" : kind === "error" ? "error" : "idle",
+    kind === "loading"
+      ? "게임 폴더 확인 중"
+      : kind === "error"
+        ? "게임 폴더 확인 필요"
+        : "준비됨",
+  );
+}
+
+function setWindowStatus(kind, message) {
+  windowStatus.dataset.status = kind;
+  windowStatus.textContent = message;
 }
 
 function setDirectorySelectionBusy(busy) {
@@ -383,6 +403,7 @@ function setDirectorySelectionBusy(busy) {
 
 function showConnectionView() {
   document.body.dataset.view = "connection";
+  titlebarNavigation.hidden = true;
   connectionView.hidden = false;
   workspaceView.hidden = true;
 }
@@ -390,6 +411,7 @@ function showConnectionView() {
 function showWorkspacePage(pageName) {
   currentWorkspacePage = pageName;
   document.body.dataset.view = "workspace";
+  titlebarNavigation.hidden = false;
   connectionView.hidden = true;
   workspaceView.hidden = false;
   for (const page of appPages) {
@@ -402,6 +424,50 @@ function showWorkspacePage(pageName) {
     );
   }
   updateSelectionControls();
+}
+
+function currentWindow() {
+  return window.__TAURI__.window.getCurrentWindow();
+}
+
+function focusAvailableAppUpdate() {
+  if (availableAppUpdate === null) {
+    return;
+  }
+  if (!workspaceView.hidden) {
+    showWorkspacePage("settings");
+    document
+      .querySelector(".app-update-card")
+      .scrollIntoView({ block: "start" });
+    installAppUpdateButton.focus();
+    return;
+  }
+  appUpdateBanner.scrollIntoView({ block: "start" });
+  appUpdateBannerInstallButton.focus();
+}
+
+function renderStatusAppUpdate() {
+  if (appUpdateActivity !== null) {
+    statusAppUpdateButton.hidden = false;
+    statusAppUpdateButton.disabled = true;
+    statusAppUpdateButton.textContent =
+      appUpdateActivity === "installing"
+        ? "업데이트 설치 중"
+        : "업데이트 확인 중";
+    return;
+  }
+  if (availableAppUpdate === null) {
+    statusAppUpdateButton.hidden = true;
+    statusAppUpdateButton.disabled = false;
+    statusAppUpdateButton.textContent = "";
+    return;
+  }
+  statusAppUpdateButton.hidden = false;
+  statusAppUpdateButton.disabled = categoryExportBusy;
+  statusAppUpdateButton.textContent = `v${availableAppUpdate.version} 업데이트`;
+  statusAppUpdateButton.title = categoryExportBusy
+    ? "이미지 저장이 끝나면 업데이트 화면을 열 수 있습니다."
+    : "업데이트 화면 열기";
 }
 
 function clearCategoryExportPoll() {
@@ -444,6 +510,7 @@ function setCategoryExportBusy(busy) {
   saveAllButton.disabled = busy || !hasPageItems;
   setPageNavigationBusy(busy);
   updateSelectionControls();
+  renderStatusAppUpdate();
 }
 
 function clearSummary() {
@@ -982,6 +1049,7 @@ function finishCategoryExport(message) {
   cancelCategoryExportButton.disabled = true;
   cancelCategoryExportButton.textContent = "저장 취소";
   setCategoryExportBusy(false);
+  setWindowStatus("ready", message);
 }
 
 async function pollCategoryExport() {
@@ -1005,6 +1073,12 @@ async function pollCategoryExport() {
       categoryExportStatus.textContent = categoryExportCancelRequested
         ? `${formatNumber(status.completedCount)} / ${formatNumber(status.totalCount)}개 · 취소 준비 중`
         : `${formatNumber(status.completedCount)} / ${formatNumber(status.totalCount)}개 저장 중`;
+      setWindowStatus(
+        "busy",
+        categoryExportCancelRequested
+          ? "이미지 저장 취소 준비 중"
+          : `이미지 ${formatNumber(status.completedCount)} / ${formatNumber(status.totalCount)}개 저장 중`,
+      );
       scheduleCategoryExportPoll();
       return;
     }
@@ -1044,6 +1118,7 @@ async function startAssetExport() {
   hideCategoryExport();
   categoryExport.hidden = false;
   categoryExportStatus.textContent = "저장할 폴더를 선택해 주세요";
+  setWindowStatus("busy", "저장할 폴더 선택 중");
   cancelCategoryExportButton.disabled = true;
   setCategoryExportBusy(true);
 
@@ -1063,12 +1138,14 @@ async function startAssetExport() {
     if (started === null) {
       hideCategoryExport();
       setCategoryExportBusy(false);
+      setWindowStatus("ready", "게임 폴더 연결됨");
       return;
     }
     currentCategoryExport = started;
     categoryExportProgress.max = Math.max(1, started.totalCount);
     categoryExportProgress.value = 0;
     categoryExportStatus.textContent = `0 / ${formatNumber(started.totalCount)}개 ${imageExportModeLabel(exportMode)}로 저장 중`;
+    setWindowStatus("busy", `이미지 0 / ${formatNumber(started.totalCount)}개 저장 중`);
     cancelCategoryExportButton.disabled = false;
     scheduleCategoryExportPoll();
   } catch (error) {
@@ -1076,6 +1153,7 @@ async function startAssetExport() {
     categoryExportStatus.textContent = `전체 저장을 시작하지 못했습니다: ${String(error)}`;
     cancelCategoryExportButton.disabled = true;
     setCategoryExportBusy(false);
+    setWindowStatus("error", "이미지 저장 실패");
   }
 }
 
@@ -1086,6 +1164,7 @@ async function startSelectedAssetExport() {
   hideCategoryExport();
   categoryExport.hidden = false;
   categoryExportStatus.textContent = "저장할 폴더를 선택해 주세요";
+  setWindowStatus("busy", "저장할 폴더 선택 중");
   cancelCategoryExportButton.disabled = true;
   setCategoryExportBusy(true);
   const exportMode = currentImageExportMode();
@@ -1098,12 +1177,14 @@ async function startSelectedAssetExport() {
     if (started === null) {
       hideCategoryExport();
       setCategoryExportBusy(false);
+      setWindowStatus("ready", "게임 폴더 연결됨");
       return;
     }
     currentCategoryExport = started;
     categoryExportProgress.max = Math.max(1, started.totalCount);
     categoryExportProgress.value = 0;
     categoryExportStatus.textContent = `0 / ${formatNumber(started.totalCount)}개 ${imageExportModeLabel(exportMode)}로 저장 중`;
+    setWindowStatus("busy", `이미지 0 / ${formatNumber(started.totalCount)}개 저장 중`);
     cancelCategoryExportButton.disabled = false;
     scheduleCategoryExportPoll();
   } catch (error) {
@@ -1111,6 +1192,7 @@ async function startSelectedAssetExport() {
     categoryExportStatus.textContent = `선택 이미지 저장을 시작하지 못했습니다: ${String(error)}`;
     cancelCategoryExportButton.disabled = true;
     setCategoryExportBusy(false);
+    setWindowStatus("error", "이미지 저장 실패");
   }
 }
 
@@ -1123,6 +1205,7 @@ async function cancelCategoryExport() {
   cancelCategoryExportButton.disabled = true;
   cancelCategoryExportButton.textContent = "취소 중…";
   categoryExportStatus.textContent = "현재 이미지 처리가 끝나면 취소합니다";
+  setWindowStatus("busy", "이미지 저장 취소 준비 중");
 
   try {
     await window.__TAURI__.core.invoke("cancel_verified_asset_export", {
@@ -1474,6 +1557,7 @@ function setAppUpdateBusy(busy) {
   checkAppUpdateButton.disabled = busy;
   installAppUpdateButton.disabled = busy;
   appUpdateBannerInstallButton.disabled = busy;
+  renderStatusAppUpdate();
 }
 
 function showAvailableAppUpdate(result) {
@@ -1484,6 +1568,7 @@ function showAvailableAppUpdate(result) {
     appUpdateBanner.hidden = true;
     installAppUpdateButton.hidden = true;
     appUpdateMessage.textContent = "현재 최신 버전을 사용하고 있습니다.";
+    renderStatusAppUpdate();
     return;
   }
 
@@ -1494,14 +1579,17 @@ function showAvailableAppUpdate(result) {
   appUpdateMessage.textContent = availableAppUpdate.notes
     ? `${availableAppUpdate.version} 버전이 있습니다. ${availableAppUpdate.notes}`
     : `${availableAppUpdate.version} 버전을 설치할 수 있습니다.`;
+  renderStatusAppUpdate();
 }
 
 async function loadAppVersion() {
   try {
     const version = await window.__TAURI__.core.invoke("get_app_version");
     appCurrentVersion.textContent = `현재 ${version}`;
+    titlebarVersion.textContent = `v${version}`;
   } catch {
     appCurrentVersion.textContent = "현재 버전 확인 불가";
+    titlebarVersion.textContent = "";
   }
 }
 
@@ -1510,6 +1598,7 @@ async function checkForAppUpdate({ automatic = false } = {}) {
     return;
   }
 
+  appUpdateActivity = "checking";
   setAppUpdateBusy(true);
   appUpdateMessage.textContent = "새 버전이 있는지 확인하고 있습니다.";
   try {
@@ -1523,6 +1612,7 @@ async function checkForAppUpdate({ automatic = false } = {}) {
         "자동 업데이트 확인을 완료하지 못했습니다. 인터넷 연결 후 다시 확인할 수 있습니다.";
     }
   } finally {
+    appUpdateActivity = null;
     setAppUpdateBusy(false);
   }
 }
@@ -1564,6 +1654,7 @@ async function installAvailableAppUpdate() {
     return;
   }
 
+  appUpdateActivity = "installing";
   setAppUpdateBusy(true);
   appUpdateProgress.hidden = false;
   appUpdateProgressBar.removeAttribute("value");
@@ -1585,6 +1676,7 @@ async function installAvailableAppUpdate() {
     appUpdateProgress.hidden = true;
     appUpdateMessage.textContent = `업데이트를 설치하지 못했습니다: ${String(error)}`;
   } finally {
+    appUpdateActivity = null;
     setAppUpdateBusy(false);
   }
 }
@@ -1631,6 +1723,7 @@ function renderOpenedGameDirectory(opened, automatic) {
   } else {
     settingsMessage.textContent = "게임 폴더가 연결되어 있습니다.";
   }
+  setWindowStatus("ready", "게임 폴더 연결됨");
   showWorkspacePage("library");
 }
 
@@ -1788,6 +1881,11 @@ assetSearchForm.addEventListener("submit", (event) => {
 });
 
 closeDetailButton.addEventListener("click", closeDetail);
+minimizeWindowButton.addEventListener("click", () =>
+  currentWindow().minimize(),
+);
+closeWindowButton.addEventListener("click", () => currentWindow().close());
+statusAppUpdateButton.addEventListener("click", focusAvailableAppUpdate);
 downloadDetailButton.addEventListener("click", saveCurrentDetail);
 toggleSelectionButton.addEventListener("click", () => {
   setSelectionMode(!selectionMode);
