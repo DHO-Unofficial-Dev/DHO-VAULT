@@ -152,8 +152,34 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
+          version="$(jq -r '.version' apps/viewer/src-tauri/tauri.conf.json)"
+          release_flags=()
+          if [[ "$version" == *-* ]]; then
+            release_flags+=(--prerelease --latest=false)
+          fi
+
           gh release create "$GITHUB_REF_NAME" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "DHO Vault $GITHUB_REF_NAME" \
-            --notes-file RELEASE_NOTES.md
+            --notes-file RELEASE_NOTES.md \
+            "${release_flags[@]}"
+
+      - name: RC 업데이트 채널 갱신
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view updater-rc --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload updater-rc dist/latest.json \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber
+          else
+            gh release create updater-rc dist/latest.json \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --latest=false \
+              --title "DHO Vault RC 업데이트 채널" \
+              --notes "RC 설치판의 자동 업데이트 검증에 사용하는 메타데이터 채널입니다."
+          fi
