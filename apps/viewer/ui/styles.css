@@ -465,6 +465,30 @@ button:disabled {
   margin-top: var(--space-3);
 }
 
+.export-mode-control {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 13rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.export-mode-control select {
+  min-height: 2.5rem;
+  padding: 0.55rem 2.25rem 0.55rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ink);
+  background: var(--bg);
+  font: inherit;
+}
+
+.export-mode-control select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
 .archive-heading {
   display: flex;
   justify-content: space-between;
@@ -1160,6 +1184,11 @@ button:disabled {
   }
 
   .settings-heading button {
+    width: 100%;
+  }
+
+  .export-mode-control,
+  .export-mode-control select {
     width: 100%;
   }
 

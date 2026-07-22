@@ -13,6 +13,7 @@ use dho_client::{
     VerifiedCategoryPage, VerifiedSearchAsset, VerifiedUpdatePage, ViewerSession,
     inspect_game_directory,
 };
+use dho_image::upscale_small_square_png_for_service;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -28,6 +29,7 @@ type SharedAssetUpdateCache = Arc<Mutex<AssetUpdateCache>>;
 type SharedCategoryExportManager = Arc<CategoryExportManager>;
 
 const VIEWER_PREFERENCES_FILE_NAME: &str = "viewer-preferences.json";
+const MAX_SERVICE_UPSCALE_DECODED_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 struct AssetUpdateCache {
@@ -82,9 +84,41 @@ struct OpenedGameDirectory {
 #[serde(rename_all = "camelCase")]
 struct SavedVerifiedAsset {
     file_name: String,
+    source_width: u32,
+    source_height: u32,
     width: u32,
     height: u32,
     assembled: bool,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ImageExportMode {
+    ServiceUpscaled,
+    Original,
+}
+
+fn apply_image_export_mode(
+    mut asset: VerifiedAssetPng,
+    mode: ImageExportMode,
+) -> Result<VerifiedAssetPng, String> {
+    if mode == ImageExportMode::Original {
+        return Ok(asset);
+    }
+
+    if let Some(upscaled) = upscale_small_square_png_for_service(
+        &asset.png,
+        asset.width,
+        asset.height,
+        MAX_SERVICE_UPSCALE_DECODED_BYTES,
+    )
+    .map_err(|error| format!("서비스용 PNG 확대에 실패했습니다: {error}"))?
+    {
+        asset.width = upscaled.width;
+        asset.height = upscaled.height;
+        asset.png = upscaled.png;
+    }
+    Ok(asset)
 }
 
 #[derive(Debug, Serialize)]
@@ -621,6 +655,7 @@ async fn save_verified_asset_png(
     path: Vec<String>,
     archive: String,
     block_index: u32,
+    export_mode: ImageExportMode,
     session: State<'_, SharedViewerSession>,
 ) -> Result<Option<SavedVerifiedAsset>, String> {
     let file_name = default_asset_file_name(&archive, block_index);
@@ -659,6 +694,9 @@ async fn save_verified_asset_png(
             .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?
             .asset_png(&path, &archive, block_index)
             .map_err(|error| error.to_string())?;
+        let source_width = asset.width;
+        let source_height = asset.height;
+        let asset = apply_image_export_mode(asset, export_mode)?;
         fs::write(&destination, &asset.png).map_err(|error| {
             format!(
                 "PNG 파일을 저장하지 못했습니다 ({}): {error}",
@@ -667,6 +705,8 @@ async fn save_verified_asset_png(
         })?;
         Ok::<_, String>(SavedVerifiedAsset {
             file_name: saved_file_name,
+            source_width,
+            source_height,
             width: asset.width,
             height: asset.height,
             assembled: asset.assembled,
@@ -683,6 +723,7 @@ async fn save_verified_category_page(
     app: tauri::AppHandle,
     path: Vec<String>,
     offset: usize,
+    export_mode: ImageExportMode,
     session: State<'_, SharedViewerSession>,
 ) -> Result<Option<SavedVerifiedPage>, String> {
     let selection = app
@@ -714,7 +755,7 @@ async fn save_verified_category_page(
                 assembled: asset.assembled,
             })
             .collect::<Vec<_>>();
-        save_verified_asset_page(&destination, &plans, |plan| {
+        save_verified_asset_page(&destination, &plans, export_mode, |plan| {
             session
                 .asset_png(&path, &plan.archive, plan.block_index)
                 .map_err(|error| error.to_string())
@@ -734,6 +775,7 @@ async fn save_verified_search_page(
     app: tauri::AppHandle,
     query: String,
     offset: usize,
+    export_mode: ImageExportMode,
     session: State<'_, SharedViewerSession>,
 ) -> Result<Option<SavedVerifiedPage>, String> {
     let selection = app
@@ -760,7 +802,7 @@ async fn save_verified_search_page(
             .iter()
             .map(SearchPageAssetPlan::from)
             .collect::<Vec<_>>();
-        save_verified_search_page_assets(&destination, &assets, |asset| {
+        save_verified_search_page_assets(&destination, &assets, export_mode, |asset| {
             session
                 .asset_png(&asset.path, &asset.asset.archive, asset.asset.block_index)
                 .map_err(|error| error.to_string())
@@ -779,6 +821,7 @@ async fn save_verified_search_page(
 async fn start_verified_category_export(
     app: tauri::AppHandle,
     path: Vec<String>,
+    export_mode: ImageExportMode,
     session: State<'_, SharedViewerSession>,
     exports: State<'_, SharedCategoryExportManager>,
 ) -> Result<Option<StartedCategoryExport>, String> {
@@ -823,6 +866,7 @@ async fn start_verified_category_export(
             destination,
             assets,
             plans,
+            export_mode,
             control.cancel,
             control.status,
         );
@@ -838,6 +882,7 @@ async fn start_verified_category_export(
 async fn start_verified_search_export(
     app: tauri::AppHandle,
     query: String,
+    export_mode: ImageExportMode,
     session: State<'_, SharedViewerSession>,
     exports: State<'_, SharedCategoryExportManager>,
 ) -> Result<Option<StartedCategoryExport>, String> {
@@ -882,6 +927,7 @@ async fn start_verified_search_export(
             destination,
             assets,
             plans,
+            export_mode,
             control.cancel,
             control.status,
         );
@@ -897,6 +943,7 @@ async fn start_verified_search_export(
 async fn start_verified_selected_export(
     app: tauri::AppHandle,
     assets: Vec<SelectedAssetRequest>,
+    export_mode: ImageExportMode,
     session: State<'_, SharedViewerSession>,
     exports: State<'_, SharedCategoryExportManager>,
 ) -> Result<Option<StartedCategoryExport>, String> {
@@ -949,6 +996,7 @@ async fn start_verified_selected_export(
             destination,
             assets,
             plans,
+            export_mode,
             control.cancel,
             control.status,
         );
@@ -1043,6 +1091,7 @@ fn save_asset_batch<F, P>(
     directory: &Path,
     assets: &[PageAssetPlan],
     cancel: &AtomicBool,
+    export_mode: ImageExportMode,
     mut load: F,
     mut progress: P,
 ) -> Result<BatchSaveOutcome, String>
@@ -1057,7 +1106,7 @@ where
             remove_created_files(&created);
             return Ok(BatchSaveOutcome::Cancelled);
         }
-        let asset = match load(plan) {
+        let asset = match load(plan).and_then(|asset| apply_image_export_mode(asset, export_mode)) {
             Ok(asset) => asset,
             Err(error) => {
                 remove_created_files(&created);
@@ -1095,13 +1144,21 @@ where
 fn save_verified_asset_page<F>(
     directory: &Path,
     assets: &[PageAssetPlan],
+    export_mode: ImageExportMode,
     mut load: F,
 ) -> Result<(), String>
 where
     F: FnMut(&PageAssetPlan) -> Result<VerifiedAssetPng, String>,
 {
     let cancel = AtomicBool::new(false);
-    match save_asset_batch(directory, assets, &cancel, &mut load, |_, _| Ok(()))? {
+    match save_asset_batch(
+        directory,
+        assets,
+        &cancel,
+        export_mode,
+        &mut load,
+        |_, _| Ok(()),
+    )? {
         BatchSaveOutcome::Completed => Ok(()),
         BatchSaveOutcome::Cancelled => {
             Err("현재 페이지 저장이 예기치 않게 취소되었습니다.".to_owned())
@@ -1112,6 +1169,7 @@ where
 fn save_verified_search_page_assets<F>(
     directory: &Path,
     assets: &[SearchPageAssetPlan],
+    export_mode: ImageExportMode,
     mut load: F,
 ) -> Result<(), String>
 where
@@ -1122,7 +1180,7 @@ where
         .map(|asset| asset.asset.clone())
         .collect::<Vec<_>>();
     let mut asset_index = 0;
-    save_verified_asset_page(directory, &plans, |plan| {
+    save_verified_asset_page(directory, &plans, export_mode, |plan| {
         let asset = assets
             .get(asset_index)
             .ok_or_else(|| "검색 결과 저장 순서가 일치하지 않습니다.".to_owned())?;
@@ -1139,6 +1197,7 @@ fn run_asset_export(
     destination: PathBuf,
     assets: Vec<ExportAsset>,
     plans: Vec<PageAssetPlan>,
+    export_mode: ImageExportMode,
     cancel: Arc<AtomicBool>,
     status: Arc<Mutex<CategoryExportStatus>>,
 ) {
@@ -1154,6 +1213,7 @@ fn run_asset_export(
             &destination,
             &plans,
             &cancel,
+            export_mode,
             |_| {
                 let asset = assets
                     .get(asset_index)
@@ -1443,14 +1503,19 @@ mod tests {
         fs::create_dir(&directory).expect("create test directory");
         let assets = [test_plan(1), test_plan(2)];
 
-        save_verified_asset_page(&directory, &assets, |plan| Ok(test_asset(plan)))
-            .expect("save verified asset page");
+        save_verified_asset_page(&directory, &assets, ImageExportMode::Original, |plan| {
+            Ok(test_asset(plan))
+        })
+        .expect("save verified asset page");
         assert_eq!(
             fs::read(directory.join(page_asset_file_name(&assets[0]))).expect("read saved PNG"),
             b"test-png"
         );
         assert!(
-            save_verified_asset_page(&directory, &assets, |plan| Ok(test_asset(plan))).is_err()
+            save_verified_asset_page(&directory, &assets, ImageExportMode::Original, |plan| {
+                Ok(test_asset(plan))
+            })
+            .is_err()
         );
 
         fs::remove_dir_all(directory).expect("remove test directory");
@@ -1466,7 +1531,7 @@ mod tests {
         ];
         let mut loaded_paths = Vec::new();
 
-        save_verified_search_page_assets(&directory, &assets, |asset| {
+        save_verified_search_page_assets(&directory, &assets, ImageExportMode::Original, |asset| {
             loaded_paths.push(asset.path.clone());
             Ok(test_asset(&asset.asset))
         })
@@ -1494,9 +1559,13 @@ mod tests {
         let asset = test_plan(1);
         let duplicate_assets = [test_plan(1), test_plan(1)];
 
-        let error =
-            save_verified_asset_page(&directory, &duplicate_assets, |plan| Ok(test_asset(plan)))
-                .unwrap_err();
+        let error = save_verified_asset_page(
+            &directory,
+            &duplicate_assets,
+            ImageExportMode::Original,
+            |plan| Ok(test_asset(plan)),
+        )
+        .unwrap_err();
 
         assert!(error.contains("중복된 파일 이름"));
         assert!(!directory.join(page_asset_file_name(&asset)).exists());
@@ -1509,14 +1578,15 @@ mod tests {
         fs::create_dir(&directory).expect("create test directory");
         let assets = [test_plan(1), test_plan(2)];
 
-        let error = save_verified_asset_page(&directory, &assets, |plan| {
-            if plan.block_index == 2 {
-                Err("두 번째 이미지 추출 실패".to_owned())
-            } else {
-                Ok(test_asset(plan))
-            }
-        })
-        .unwrap_err();
+        let error =
+            save_verified_asset_page(&directory, &assets, ImageExportMode::Original, |plan| {
+                if plan.block_index == 2 {
+                    Err("두 번째 이미지 추출 실패".to_owned())
+                } else {
+                    Ok(test_asset(plan))
+                }
+            })
+            .unwrap_err();
 
         assert_eq!(error, "두 번째 이미지 추출 실패");
         assert!(!directory.join(page_asset_file_name(&assets[0])).exists());
@@ -1534,6 +1604,7 @@ mod tests {
             &directory,
             &assets,
             &cancel,
+            ImageExportMode::Original,
             |plan| Ok(test_asset(plan)),
             |completed_count, _| {
                 if completed_count == 1 {
@@ -1551,6 +1622,33 @@ mod tests {
                 .all(|asset| !directory.join(page_asset_file_name(asset)).exists())
         );
         fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn applies_service_upscale_only_when_requested() {
+        let pixels = [20, 40, 60, 128].repeat(48 * 48);
+        let png = dho_image::RgbaImage::from_bgra(48, 48, &pixels)
+            .expect("create source image")
+            .encode_png()
+            .expect("encode source image");
+        let source = VerifiedAssetPng {
+            archive: "sb".to_owned(),
+            icon_id: Some(100_100),
+            block_index: 1,
+            width: 48,
+            height: 48,
+            assembled: false,
+            png,
+        };
+
+        let original = apply_image_export_mode(source.clone(), ImageExportMode::Original)
+            .expect("keep original image");
+        let upscaled = apply_image_export_mode(source.clone(), ImageExportMode::ServiceUpscaled)
+            .expect("upscale service image");
+
+        assert_eq!(original, source);
+        assert_eq!((upscaled.width, upscaled.height), (192, 192));
+        assert_ne!(upscaled.png, source.png);
     }
 
     #[test]

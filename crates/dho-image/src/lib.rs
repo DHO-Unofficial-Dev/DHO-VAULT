@@ -4,9 +4,105 @@
 
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
-use image::{ExtendedColorType, ImageEncoder};
+use image::{ExtendedColorType, ImageEncoder, ImageFormat};
 use std::error::Error;
 use std::fmt;
+
+/// Largest square source edge eligible for the service-oriented PNG export.
+pub const SERVICE_UPSCALE_MAX_SOURCE_EDGE: u32 = 64;
+
+/// Small images are enlarged by an integer factor until both edges reach this size.
+pub const SERVICE_UPSCALE_MIN_TARGET_EDGE: u32 = 192;
+
+/// A PNG produced by the service-oriented small-image export transform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceUpscaledPng {
+    pub width: u32,
+    pub height: u32,
+    pub png: Vec<u8>,
+}
+
+/// Enlarges an eligible square PNG with Lanczos3 and mild sharpening.
+///
+/// Images that are non-square, empty, or larger than 64 pixels are intentionally
+/// left untouched so UI fragments, maps, and assembled artwork retain their
+/// original dimensions.
+pub fn upscale_small_square_png_for_service(
+    png: &[u8],
+    declared_width: u32,
+    declared_height: u32,
+    max_output_size: usize,
+) -> Result<Option<ServiceUpscaledPng>, ServiceUpscaleError> {
+    if declared_width == 0
+        || declared_width != declared_height
+        || declared_width > SERVICE_UPSCALE_MAX_SOURCE_EDGE
+    {
+        return Ok(None);
+    }
+
+    let scale = SERVICE_UPSCALE_MIN_TARGET_EDGE.div_ceil(declared_width);
+    if scale <= 1 {
+        return Ok(None);
+    }
+    let output_width =
+        declared_width
+            .checked_mul(scale)
+            .ok_or(ServiceUpscaleError::DimensionOverflow {
+                width: declared_width,
+                height: declared_height,
+            })?;
+    let output_height =
+        declared_height
+            .checked_mul(scale)
+            .ok_or(ServiceUpscaleError::DimensionOverflow {
+                width: declared_width,
+                height: declared_height,
+            })?;
+    let required = pixel_byte_len(output_width, output_height).map_err(|_| {
+        ServiceUpscaleError::DimensionOverflow {
+            width: output_width,
+            height: output_height,
+        }
+    })?;
+    if required > max_output_size {
+        return Err(ServiceUpscaleError::OutputTooLarge {
+            required,
+            maximum: max_output_size,
+        });
+    }
+
+    let decoded = image::load_from_memory_with_format(png, ImageFormat::Png)
+        .map_err(|error| ServiceUpscaleError::Decode {
+            message: error.to_string(),
+        })?
+        .into_rgba8();
+    if decoded.dimensions() != (declared_width, declared_height) {
+        return Err(ServiceUpscaleError::DimensionMismatch {
+            declared: (declared_width, declared_height),
+            decoded: decoded.dimensions(),
+        });
+    }
+
+    let resized =
+        image::imageops::resize(&decoded, output_width, output_height, FilterType::Lanczos3);
+    let sharpened = image::imageops::unsharpen(&resized, 1.0, 1);
+    let image = RgbaImage {
+        width: output_width,
+        height: output_height,
+        pixels: sharpened.into_raw(),
+    };
+    let png = image
+        .encode_png()
+        .map_err(|error| ServiceUpscaleError::Encode {
+            message: error.to_string(),
+        })?;
+
+    Ok(Some(ServiceUpscaledPng {
+        width: output_width,
+        height: output_height,
+        png,
+    }))
+}
 
 /// An owned image in red, green, blue, alpha byte order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -492,6 +588,55 @@ impl fmt::Display for PngEncodeError {
 
 impl Error for PngEncodeError {}
 
+/// Failure while producing a service-oriented enlarged PNG.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceUpscaleError {
+    Decode {
+        message: String,
+    },
+    DimensionMismatch {
+        declared: (u32, u32),
+        decoded: (u32, u32),
+    },
+    DimensionOverflow {
+        width: u32,
+        height: u32,
+    },
+    OutputTooLarge {
+        required: usize,
+        maximum: usize,
+    },
+    Encode {
+        message: String,
+    },
+}
+
+impl fmt::Display for ServiceUpscaleError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Decode { message } => write!(formatter, "failed to decode source PNG: {message}"),
+            Self::DimensionMismatch { declared, decoded } => write!(
+                formatter,
+                "source PNG dimensions are {}x{}, expected {}x{}",
+                decoded.0, decoded.1, declared.0, declared.1
+            ),
+            Self::DimensionOverflow { width, height } => write!(
+                formatter,
+                "service upscale dimensions overflow this platform: {width}x{height}"
+            ),
+            Self::OutputTooLarge { required, maximum } => write!(
+                formatter,
+                "service upscale requires {required} decoded bytes, exceeding the limit of {maximum}"
+            ),
+            Self::Encode { message } => {
+                write!(formatter, "failed to encode enlarged PNG: {message}")
+            }
+        }
+    }
+}
+
+impl Error for ServiceUpscaleError {}
+
 /// A structural or resource-limit failure while joining decoded tiles.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageAssemblyError {
@@ -793,6 +938,55 @@ mod tests {
 
         assert_eq!(decoded.dimensions(), (1, 1));
         assert_eq!(decoded.as_raw(), &[0x30, 0x20, 0x10, 0x40]);
+    }
+
+    #[test]
+    fn upscales_small_square_pngs_to_an_integer_multiple_at_least_192_pixels() {
+        for (source_edge, expected_edge) in [(48, 192), (64, 192), (40, 200), (24, 192)] {
+            let source = solid_tile(source_edge, source_edge, [40, 80, 120, 160]);
+            let png = source.encode_png().expect("encode source PNG");
+
+            let upscaled =
+                upscale_small_square_png_for_service(&png, source_edge, source_edge, 200 * 200 * 4)
+                    .expect("upscale source PNG")
+                    .expect("eligible square image");
+
+            assert_eq!(
+                (upscaled.width, upscaled.height),
+                (expected_edge, expected_edge)
+            );
+            let decoded = image::load_from_memory_with_format(&upscaled.png, ImageFormat::Png)
+                .expect("decode enlarged PNG")
+                .into_rgba8();
+            assert_eq!(decoded.dimensions(), (expected_edge, expected_edge));
+            assert_eq!(decoded.get_pixel(0, 0).0[3], 160);
+        }
+    }
+
+    #[test]
+    fn service_upscale_skips_non_square_and_large_images_without_decoding() {
+        assert_eq!(
+            upscale_small_square_png_for_service(b"not-png", 48, 32, usize::MAX),
+            Ok(None)
+        );
+        assert_eq!(
+            upscale_small_square_png_for_service(b"not-png", 128, 128, usize::MAX),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn service_upscale_rejects_a_declared_dimension_mismatch() {
+        let source = solid_tile(48, 48, [1, 2, 3, 4]);
+        let png = source.encode_png().expect("encode source PNG");
+
+        assert_eq!(
+            upscale_small_square_png_for_service(&png, 40, 40, 200 * 200 * 4),
+            Err(ServiceUpscaleError::DimensionMismatch {
+                declared: (40, 40),
+                decoded: (48, 48),
+            })
+        );
     }
 
     fn solid_tile(width: u32, height: u32, rgba: [u8; 4]) -> RgbaImage {
