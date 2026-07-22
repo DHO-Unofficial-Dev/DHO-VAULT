@@ -2,8 +2,10 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_update;
 mod asset_baseline;
 
+use app_update::{AppUpdateState, check_app_update, get_app_version, install_app_update};
 use asset_baseline::{AssetUpdateReport, AssetUpdateStatus};
 use dho_client::{
     AssetSnapshotEntry, GameDirectorySummary, VIEWER_CATEGORY_PAGE_SIZE, VerifiedAssetDetail,
@@ -1197,11 +1199,16 @@ fn remove_created_files(created: &[PathBuf]) {
 
 fn main() {
     tauri::Builder::default()
+        .manage(AppUpdateState::default())
         .manage(Arc::new(Mutex::new(ViewerSession::default())))
         .manage(Arc::new(Mutex::new(AssetUpdateCache::default())))
         .manage(Arc::new(CategoryExportManager::default()))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
+            check_app_update,
+            get_app_version,
+            install_app_update,
             load_saved_game_directory,
             pick_game_directory,
             load_asset_update_status,

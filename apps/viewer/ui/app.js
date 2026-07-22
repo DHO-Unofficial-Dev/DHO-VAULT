@@ -9,12 +9,35 @@ const appPages = document.querySelectorAll(".app-page");
 const statusCard = document.querySelector(".status-card");
 const statusTitle = document.querySelector("#status-title");
 const statusMessage = document.querySelector("#status-message");
+const appUpdateBanner = document.querySelector("#app-update-banner");
+const appUpdateBannerTitle = document.querySelector(
+  "#app-update-banner-title",
+);
+const appUpdateBannerMessage = document.querySelector(
+  "#app-update-banner-message",
+);
+const appUpdateBannerInstallButton = document.querySelector(
+  "#app-update-banner-install",
+);
 const settingsMessage = document.querySelector("#settings-message");
 const directoryDetails = document.querySelector("#directory-details");
 const gameDirectory = document.querySelector("#game-directory");
 const resourceDirectory = document.querySelector("#resource-directory");
 const archiveList = document.querySelector("#archive-list");
 const archiveStatus = document.querySelector("#archive-status");
+const appCurrentVersion = document.querySelector("#app-current-version");
+const appUpdateMessage = document.querySelector("#app-update-message");
+const appUpdateProgress = document.querySelector("#app-update-progress");
+const appUpdateProgressLabel = document.querySelector(
+  "#app-update-progress-label",
+);
+const appUpdateProgressBar = document.querySelector(
+  "#app-update-progress-bar",
+);
+const checkAppUpdateButton = document.querySelector("#check-app-update");
+const installAppUpdateButton = document.querySelector(
+  "#install-app-update",
+);
 const updatePanel = document.querySelector("#update-panel");
 const updateStatus = document.querySelector("#update-status");
 const updateMessage = document.querySelector("#update-message");
@@ -102,6 +125,9 @@ const rememberedPageOffsets = new Map();
 const selectedAssets = new Map();
 let selectionMode = false;
 let currentWorkspacePage = "library";
+let availableAppUpdate = null;
+let appUpdateBusy = false;
+let appUpdateDownloadedBytes = 0;
 
 const CATEGORY_EXPORT_POLL_INTERVAL = 250;
 const VISIBLE_PAGE_BUTTON_COUNT = 9;
@@ -1398,6 +1424,141 @@ function formatNumber(value) {
   return new Intl.NumberFormat("ko-KR").format(value);
 }
 
+function formatBytes(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  const unitIndex = Math.min(
+    Math.floor(Math.log(value) / Math.log(1024)),
+    units.length - 1,
+  );
+  const scaled = value / 1024 ** unitIndex;
+  return `${scaled.toLocaleString("ko-KR", {
+    maximumFractionDigits: unitIndex === 0 ? 0 : 1,
+  })} ${units[unitIndex]}`;
+}
+
+function setAppUpdateBusy(busy) {
+  appUpdateBusy = busy;
+  checkAppUpdateButton.disabled = busy;
+  installAppUpdateButton.disabled = busy;
+  appUpdateBannerInstallButton.disabled = busy;
+}
+
+function showAvailableAppUpdate(result) {
+  availableAppUpdate = result.update;
+  appCurrentVersion.textContent = `현재 ${result.currentVersion}`;
+
+  if (availableAppUpdate === null) {
+    appUpdateBanner.hidden = true;
+    installAppUpdateButton.hidden = true;
+    appUpdateMessage.textContent = "현재 최신 버전을 사용하고 있습니다.";
+    return;
+  }
+
+  appUpdateBannerTitle.textContent = `DHO Vault ${availableAppUpdate.version} 업데이트`;
+  appUpdateBannerMessage.textContent = `현재 ${result.currentVersion}에서 새 버전으로 업데이트할 수 있습니다.`;
+  appUpdateBanner.hidden = false;
+  installAppUpdateButton.hidden = false;
+  appUpdateMessage.textContent = availableAppUpdate.notes
+    ? `${availableAppUpdate.version} 버전이 있습니다. ${availableAppUpdate.notes}`
+    : `${availableAppUpdate.version} 버전을 설치할 수 있습니다.`;
+}
+
+async function loadAppVersion() {
+  try {
+    const version = await window.__TAURI__.core.invoke("get_app_version");
+    appCurrentVersion.textContent = `현재 ${version}`;
+  } catch {
+    appCurrentVersion.textContent = "현재 버전 확인 불가";
+  }
+}
+
+async function checkForAppUpdate({ automatic = false } = {}) {
+  if (appUpdateBusy) {
+    return;
+  }
+
+  setAppUpdateBusy(true);
+  appUpdateMessage.textContent = "새 버전이 있는지 확인하고 있습니다.";
+  try {
+    const result = await window.__TAURI__.core.invoke("check_app_update");
+    showAvailableAppUpdate(result);
+  } catch (error) {
+    if (!automatic) {
+      appUpdateMessage.textContent = `업데이트를 확인하지 못했습니다: ${String(error)}`;
+    } else {
+      appUpdateMessage.textContent =
+        "자동 업데이트 확인을 완료하지 못했습니다. 인터넷 연결 후 다시 확인할 수 있습니다.";
+    }
+  } finally {
+    setAppUpdateBusy(false);
+  }
+}
+
+function renderAppUpdateDownloadEvent(message) {
+  if (message.event === "started") {
+    appUpdateDownloadedBytes = 0;
+    appUpdateProgress.hidden = false;
+    if (message.data.contentLength === null) {
+      appUpdateProgressBar.removeAttribute("value");
+      appUpdateProgressLabel.textContent = "업데이트를 내려받는 중입니다.";
+    } else {
+      appUpdateProgressBar.max = message.data.contentLength;
+      appUpdateProgressBar.value = 0;
+      appUpdateProgressLabel.textContent = `0 B / ${formatBytes(message.data.contentLength)}`;
+    }
+    return;
+  }
+
+  if (message.event === "progress") {
+    appUpdateDownloadedBytes += message.data.chunkLength;
+    if (appUpdateProgressBar.hasAttribute("value")) {
+      appUpdateProgressBar.value = appUpdateDownloadedBytes;
+      appUpdateProgressLabel.textContent = `${formatBytes(appUpdateDownloadedBytes)} / ${formatBytes(appUpdateProgressBar.max)}`;
+    } else {
+      appUpdateProgressLabel.textContent = `${formatBytes(appUpdateDownloadedBytes)} 내려받음`;
+    }
+    return;
+  }
+
+  if (message.event === "finished") {
+    appUpdateProgressLabel.textContent =
+      "다운로드를 마쳤습니다. 서명을 확인하고 설치를 시작합니다.";
+  }
+}
+
+async function installAvailableAppUpdate() {
+  if (appUpdateBusy || availableAppUpdate === null) {
+    return;
+  }
+
+  setAppUpdateBusy(true);
+  appUpdateProgress.hidden = false;
+  appUpdateProgressBar.removeAttribute("value");
+  appUpdateProgressLabel.textContent = "업데이트 다운로드를 준비하고 있습니다.";
+  appUpdateMessage.textContent =
+    "설치가 시작되면 DHO Vault가 자동으로 종료될 수 있습니다.";
+
+  try {
+    const onEvent = new window.__TAURI__.core.Channel();
+    onEvent.onmessage = renderAppUpdateDownloadEvent;
+    await window.__TAURI__.core.invoke("install_app_update", { onEvent });
+    availableAppUpdate = null;
+    appUpdateBanner.hidden = true;
+    installAppUpdateButton.hidden = true;
+    appUpdateProgressLabel.textContent = "업데이트 설치 프로그램을 시작했습니다.";
+    appUpdateMessage.textContent =
+      "앱이 자동으로 종료되지 않았다면 창을 닫고 설치를 마쳐 주세요.";
+  } catch (error) {
+    appUpdateProgress.hidden = true;
+    appUpdateMessage.textContent = `업데이트를 설치하지 못했습니다: ${String(error)}`;
+  } finally {
+    setAppUpdateBusy(false);
+  }
+}
+
 function formatBaselineDate(unixSeconds) {
   if (unixSeconds === null) {
     return "저장 시각 없음";
@@ -1619,9 +1780,17 @@ refreshUpdateBaselineButton.addEventListener(
   refreshAssetUpdateBaseline,
 );
 cancelCategoryExportButton.addEventListener("click", cancelCategoryExport);
+checkAppUpdateButton.addEventListener("click", () => checkForAppUpdate());
+installAppUpdateButton.addEventListener("click", installAvailableAppUpdate);
+appUpdateBannerInstallButton.addEventListener(
+  "click",
+  installAvailableAppUpdate,
+);
 detailDialog.addEventListener("close", () => {
   detailRequestId += 1;
   resetDetail();
 });
 
+loadAppVersion();
+checkForAppUpdate({ automatic: true });
 loadSavedGameDirectory();
