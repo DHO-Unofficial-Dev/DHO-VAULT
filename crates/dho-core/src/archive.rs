@@ -598,7 +598,6 @@ mod tests {
                 default_height: 1,
                 image_block_count,
                 archive_count,
-                reserved: 0,
             },
             records,
             trailing_index_bytes: 0,

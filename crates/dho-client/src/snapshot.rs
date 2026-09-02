@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::{
-    INDEXED_ARCHIVE_PREFIXES, RAW_IMAGE_ARCHIVES, raw_archive_path, resolve_archive_directory,
+    GM_ATLAS_FILE_NUMBERS, INDEXED_ARCHIVE_PREFIXES, RAW_IMAGE_ARCHIVES, gm_archive_path,
+    raw_archive_path, resolve_archive_directory, standalone_image_path,
 };
 use dho_core::{IndexParseError, IndexedArchive};
-use dho_extract::{ExtractError, LoadedRawImageArchive, RawResourceKey};
+use dho_extract::{
+    ExtractError, LoadedGmAtlasArchive, LoadedRawImageArchive, LoadedStandaloneImageArchive,
+    RawResourceKey,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -246,6 +250,46 @@ pub fn inspect_asset_snapshot(
             AssetSnapshotEntry::new_raw(definition.prefix, record.key, record.width, record.height)
         }));
     }
+    if gm_archive_path(resource_directory).is_file() {
+        archives += 1;
+        let archive = LoadedGmAtlasArchive::open_files(
+            resolve_archive_directory(resource_directory, "gm"),
+            GM_ATLAS_FILE_NUMBERS,
+            64 * 1024 * 1024,
+        )
+        .map_err(|source| AssetSnapshotError::OpenRawArchive {
+            archive: "gm".to_owned(),
+            source,
+        })?;
+        assets.extend(archive.atlas_records().map(|record| {
+            AssetSnapshotEntry::new_raw("gm", record.key, record.width, record.height)
+        }));
+        assets.extend(archive.records().map(|record| {
+            AssetSnapshotEntry::new_raw("gm", record.key, record.width, record.height)
+        }));
+    }
+    for prefix in ["cu", "ft", "wm"] {
+        let Some(path) = standalone_image_path(resource_directory, prefix) else {
+            continue;
+        };
+        if !path.is_file() {
+            continue;
+        }
+        archives += 1;
+        let archive = match prefix {
+            "cu" => LoadedStandaloneImageArchive::open_cursor(&path, 64 * 1024 * 1024),
+            "ft" => LoadedStandaloneImageArchive::open_font(&path, 64 * 1024 * 1024),
+            "wm" => LoadedStandaloneImageArchive::open_xftx(&path),
+            _ => unreachable!(),
+        }
+        .map_err(|source| AssetSnapshotError::OpenRawArchive {
+            archive: prefix.to_owned(),
+            source,
+        })?;
+        assets.extend(archive.records().map(|record| {
+            AssetSnapshotEntry::new_raw(prefix, record.key, record.width, record.height)
+        }));
+    }
 
     if archives == 0 {
         return Err(AssetSnapshotError::NoSupportedArchives {
@@ -434,11 +478,11 @@ mod tests {
 
     fn write_index(path: &Path, records: &[[u32; 5]]) {
         let mut bytes = Vec::new();
-        for value in [records.len() as u32, 1, 1, 1, records.len() as u32, 1, 0] {
+        for value in [records.len() as u32, 1, 1, 1, records.len() as u32, 1] {
             bytes.extend_from_slice(&value.to_le_bytes());
         }
         for record in records {
-            for value in record {
+            for value in [record[4], record[0], record[1], record[2], record[3]] {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
         }

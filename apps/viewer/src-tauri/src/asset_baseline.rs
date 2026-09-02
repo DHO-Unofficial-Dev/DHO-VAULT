@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use dho_client::{AssetSnapshot, inspect_asset_snapshot};
+use dho_client::{
+    AssetSnapshot, TextImageRelationSnapshot, TextImageRelationSnapshotEntry,
+    inspect_asset_snapshot, inspect_text_image_relation_snapshot,
+};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -18,6 +21,8 @@ struct AssetBaseline {
     resource_directory: PathBuf,
     created_at_unix_seconds: u64,
     snapshot: AssetSnapshot,
+    #[serde(default)]
+    relation_snapshot: Option<TextImageRelationSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -40,6 +45,9 @@ pub struct AssetUpdateStatus {
     removed_count: usize,
     changed_count: usize,
     unchanged_count: usize,
+    added_relation_count: usize,
+    removed_relation_count: usize,
+    removed_relations: Vec<TextImageRelationSnapshotEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,8 +59,16 @@ pub struct AssetUpdateReport {
 pub fn load_report(path: &Path, resource_directory: &Path) -> Result<AssetUpdateReport, String> {
     let current = inspect_asset_snapshot(resource_directory)
         .map_err(|error| format!("현재 자산 목록을 확인하지 못했습니다: {error}"))?;
+    let current_relations = inspect_relation_snapshot(resource_directory)?;
     let baseline = read(path)?;
-    compare_report(baseline.as_ref(), resource_directory, &current)
+    let mut report = compare_report(baseline.as_ref(), resource_directory, &current)?;
+    if let Some(baseline) = baseline.as_ref()
+        && baseline.resource_directory == resource_directory
+        && let Some(previous_relations) = baseline.relation_snapshot.as_ref()
+    {
+        apply_relation_diff(&mut report, previous_relations, &current_relations);
+    }
+    Ok(report)
 }
 
 pub fn create(path: &Path, resource_directory: &Path) -> Result<AssetUpdateStatus, String> {
@@ -62,6 +78,7 @@ pub fn create(path: &Path, resource_directory: &Path) -> Result<AssetUpdateStatu
         resource_directory: resource_directory.to_owned(),
         created_at_unix_seconds: current_unix_seconds()?,
         snapshot: current,
+        relation_snapshot: Some(inspect_relation_snapshot(resource_directory)?),
     };
     create_file(path, &baseline)?;
     compare_report(Some(&baseline), resource_directory, &baseline.snapshot)
@@ -75,6 +92,7 @@ pub fn refresh(path: &Path, resource_directory: &Path) -> Result<AssetUpdateStat
         resource_directory: resource_directory.to_owned(),
         created_at_unix_seconds: current_unix_seconds()?,
         snapshot: current,
+        relation_snapshot: Some(inspect_relation_snapshot(resource_directory)?),
     };
     replace_file(path, &baseline)?;
     compare_report(Some(&baseline), resource_directory, &baseline.snapshot)
@@ -196,6 +214,62 @@ fn current_unix_seconds() -> Result<u64, String> {
         .map_err(|error| format!("현재 시간을 확인하지 못했습니다: {error}"))
 }
 
+fn inspect_relation_snapshot(
+    resource_directory: &Path,
+) -> Result<TextImageRelationSnapshot, String> {
+    let game_directory = resource_directory
+        .parent()
+        .ok_or_else(|| "선택한 리소스 폴더에서 게임 폴더를 확인하지 못했습니다.".to_owned())?;
+    inspect_text_image_relation_snapshot(game_directory)
+        .map_err(|error| format!("현재 텍스트·이미지 연결을 확인하지 못했습니다: {error}"))
+}
+
+fn apply_relation_diff(
+    report: &mut AssetUpdateReport,
+    baseline: &TextImageRelationSnapshot,
+    current: &TextImageRelationSnapshot,
+) {
+    let previous = baseline
+        .relations
+        .iter()
+        .map(|entry| (relation_identity(entry), entry))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let current = current
+        .relations
+        .iter()
+        .map(|entry| (relation_identity(entry), entry))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    report.status.added_relation_count = current
+        .keys()
+        .filter(|identity| !previous.contains_key(*identity))
+        .count();
+    report.status.removed_relation_count = previous
+        .keys()
+        .filter(|identity| !current.contains_key(*identity))
+        .count();
+    report.status.removed_relations = previous
+        .iter()
+        .filter(|(identity, _)| !current.contains_key(*identity))
+        .take(100)
+        .map(|(_, entry)| (*entry).clone())
+        .collect();
+    if report.status.state == AssetUpdateState::Unchanged
+        && (report.status.added_relation_count > 0 || report.status.removed_relation_count > 0)
+    {
+        report.status.state = AssetUpdateState::ChangesDetected;
+    }
+}
+
+fn relation_identity(entry: &TextImageRelationSnapshotEntry) -> (String, u32, String, u32, u32) {
+    (
+        entry.source.to_ascii_lowercase(),
+        entry.text_id,
+        entry.archive.to_ascii_lowercase(),
+        entry.group_code,
+        entry.icon_id,
+    )
+}
+
 fn compare_report(
     baseline: Option<&AssetBaseline>,
     resource_directory: &Path,
@@ -213,6 +287,9 @@ fn compare_report(
                 removed_count: 0,
                 changed_count: 0,
                 unchanged_count: 0,
+                added_relation_count: 0,
+                removed_relation_count: 0,
+                removed_relations: Vec::new(),
             },
             added_assets: Vec::new(),
         });
@@ -229,6 +306,9 @@ fn compare_report(
                 removed_count: 0,
                 changed_count: 0,
                 unchanged_count: 0,
+                added_relation_count: 0,
+                removed_relation_count: 0,
+                removed_relations: Vec::new(),
             },
             added_assets: Vec::new(),
         });
@@ -253,6 +333,9 @@ fn compare_report(
             removed_count: diff.removed.len(),
             changed_count: diff.changed.len(),
             unchanged_count: diff.unchanged_count,
+            added_relation_count: 0,
+            removed_relation_count: 0,
+            removed_relations: Vec::new(),
         },
         added_assets: diff.added,
     })
@@ -291,6 +374,20 @@ mod tests {
         )
     }
 
+    fn relation(text_id: u32, icon_id: u32) -> TextImageRelationSnapshotEntry {
+        TextImageRelationSnapshotEntry {
+            source: "dt000001.bin:item".to_owned(),
+            source_label: "아이템".to_owned(),
+            text_id,
+            archive: "sa".to_owned(),
+            group_code: 1,
+            icon_id,
+            relation: "아이템 이미지".to_owned(),
+            evidence_type: dho_client::TextImageRelationEvidence::MasterTypeRule,
+            verification_status: dho_client::TextImageRelationVerification::HumanVerified,
+        }
+    }
+
     #[test]
     fn creates_and_reads_a_baseline_without_overwriting_it() {
         let directory = test_directory("asset-baseline-roundtrip");
@@ -299,11 +396,13 @@ mod tests {
             resource_directory: PathBuf::from(r"G:\Games\GV Online KR\0010\0001"),
             created_at_unix_seconds: 1_720_000_000,
             snapshot: snapshot(&[(10, 100, 0, 32, 32)]),
+            relation_snapshot: None,
         };
         let replacement = AssetBaseline {
             resource_directory: PathBuf::from(r"G:\Games\Replacement\0010\0001"),
             created_at_unix_seconds: 1_730_000_000,
             snapshot: snapshot(&[(20, 200, 1, 64, 64)]),
+            relation_snapshot: None,
         };
 
         create_file(&path, &original).expect("create asset baseline");
@@ -335,11 +434,13 @@ mod tests {
             resource_directory: PathBuf::from(r"G:\Games\Old\0010\0001"),
             created_at_unix_seconds: 1_720_000_000,
             snapshot: snapshot(&[(10, 100, 0, 32, 32)]),
+            relation_snapshot: None,
         };
         let replacement = AssetBaseline {
             resource_directory: PathBuf::from(r"G:\Games\Current\0010\0001"),
             created_at_unix_seconds: 1_730_000_000,
             snapshot: snapshot(&[(20, 200, 1, 64, 64), (20, 201, 2, 64, 64)]),
+            relation_snapshot: None,
         };
 
         assert!(replace_file(&path, &replacement).is_err());
@@ -377,6 +478,7 @@ mod tests {
                 (10, 101, 1, 32, 32),
                 (10, 102, 2, 32, 32),
             ]),
+            relation_snapshot: None,
         };
         let current = snapshot(&[
             (10, 100, 0, 32, 32),
@@ -397,6 +499,9 @@ mod tests {
                 removed_count: 1,
                 changed_count: 1,
                 unchanged_count: 1,
+                added_relation_count: 0,
+                removed_relation_count: 0,
+                removed_relations: Vec::new(),
             }
         );
         assert_eq!(report.added_assets.len(), 1);
@@ -417,6 +522,7 @@ mod tests {
             resource_directory: resource_directory.clone(),
             created_at_unix_seconds: 1_720_000_000,
             snapshot: current.clone(),
+            relation_snapshot: None,
         };
         let unchanged = compare_report(Some(&matching), &resource_directory, &current)
             .expect("unchanged baseline")
@@ -428,12 +534,61 @@ mod tests {
             resource_directory: PathBuf::from(r"G:\Games\Other\0010\0001"),
             created_at_unix_seconds: 1_710_000_000,
             snapshot: current.clone(),
+            relation_snapshot: None,
         };
         let different = compare_report(Some(&different), &resource_directory, &current)
             .expect("different directory")
             .status;
         assert_eq!(different.state, AssetUpdateState::DifferentDirectory);
         assert_eq!(different.added_count, 0);
+    }
+
+    #[test]
+    fn reports_only_previously_observed_relations_that_disappeared() {
+        let resource_directory = PathBuf::from(r"G:\Games\GV Online KR\0010");
+        let assets = snapshot(&[(10, 100, 0, 32, 32)]);
+        let baseline = AssetBaseline {
+            resource_directory: resource_directory.clone(),
+            created_at_unix_seconds: 1_720_000_000,
+            snapshot: assets.clone(),
+            relation_snapshot: None,
+        };
+        let mut report = compare_report(Some(&baseline), &resource_directory, &assets)
+            .expect("compare unchanged physical assets");
+        let previous = TextImageRelationSnapshot::new(vec![relation(1, 10), relation(2, 20)]);
+        let current = TextImageRelationSnapshot::new(vec![relation(2, 20), relation(3, 30)]);
+
+        apply_relation_diff(&mut report, &previous, &current);
+
+        assert_eq!(report.status.state, AssetUpdateState::ChangesDetected);
+        assert_eq!(report.status.added_relation_count, 1);
+        assert_eq!(report.status.removed_relation_count, 1);
+        assert_eq!(report.status.removed_relations, [relation(1, 10)]);
+    }
+
+    #[test]
+    fn ignores_display_label_changes_when_relation_identity_is_unchanged() {
+        let resource_directory = PathBuf::from(r"G:\Games\GV Online KR\0010");
+        let assets = snapshot(&[(10, 100, 0, 32, 32)]);
+        let baseline = AssetBaseline {
+            resource_directory: resource_directory.clone(),
+            created_at_unix_seconds: 1_720_000_000,
+            snapshot: assets.clone(),
+            relation_snapshot: None,
+        };
+        let mut report = compare_report(Some(&baseline), &resource_directory, &assets)
+            .expect("compare unchanged physical assets");
+        let previous = TextImageRelationSnapshot::new(vec![relation(1, 10)]);
+        let mut renamed = relation(1, 10);
+        renamed.source_label = "표시명 변경".to_owned();
+        renamed.relation = "표시 관계 변경".to_owned();
+        let current = TextImageRelationSnapshot::new(vec![renamed]);
+
+        apply_relation_diff(&mut report, &previous, &current);
+
+        assert_eq!(report.status.state, AssetUpdateState::Unchanged);
+        assert_eq!(report.status.added_relation_count, 0);
+        assert_eq!(report.status.removed_relation_count, 0);
     }
 
     #[test]

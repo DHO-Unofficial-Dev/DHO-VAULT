@@ -2,24 +2,40 @@
 
 //! Read-only discovery and inspection of a DHO game client installation.
 
+mod audio_catalog;
 mod snapshot;
+mod text_catalog;
+
+pub use audio_catalog::{
+    AUDIO_PAGE_SIZE, AudioCatalog, AudioCatalogError, AudioCatalogSummary, AudioTrackItem,
+    AudioTrackOgg, AudioTrackPage,
+};
 
 pub use snapshot::{
     ASSET_SNAPSHOT_FORMAT_VERSION, AssetSnapshot, AssetSnapshotChange, AssetSnapshotCompareError,
     AssetSnapshotDiff, AssetSnapshotEntry, AssetSnapshotError, AssetSourceKind,
     inspect_asset_snapshot,
 };
+pub use text_catalog::{
+    DEFAULT_TEXT_LANGUAGE_BLOCK, TEXT_IMAGE_RELATION_SNAPSHOT_FORMAT_VERSION, TEXT_PAGE_SIZE,
+    TEXT_SNAPSHOT_FORMAT_VERSION, TextAssetLink, TextCatalog, TextCatalogError,
+    TextCatalogPageError, TextCatalogSummary, TextImageLink, TextImageRelationEvidence,
+    TextImageRelationSnapshot, TextImageRelationSnapshotEntry, TextImageRelationVerification,
+    TextLanguageBlockSummary, TextRecordItem, TextRecordPage, TextSnapshot, TextSnapshotChange,
+    TextSnapshotCompareError, TextSnapshotDiff, TextSnapshotEntry, TextSourceSummary,
+    inspect_text_image_relation_snapshot, inspect_text_snapshot,
+};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use dho_catalog::{
-    CatalogRecordKey, LayeredAssemblyRule, VerificationStatus, assembly_plan, classify_record,
-    composite_assembly_rule, layered_assembly_rule,
-};
+use dho_catalog::{LayeredAssemblyRule, layered_assembly_rule};
+#[cfg(test)]
+use dho_catalog::{assembly_plan, composite_assembly_rule};
 use dho_core::{IndexParseError, IndexedArchive};
 use dho_extract::{
-    ExtractError, LoadedArchive, LoadedRawImageArchive, RawArchiveLayout, RawImageSpec,
-    RawImageVariant, RawPixelFormat, RawResourceKey, ResourceKey,
+    ExtractError, IndexedAssemblyLayout, LoadedArchive, LoadedGmAtlasArchive,
+    LoadedRawImageArchive, LoadedStandaloneImageArchive, RawArchiveLayout, RawImageSpec,
+    RawImageVariant, RawPixelFormat, RawResourceKey, ResourceKey, resolve_indexed_assembly_layout,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -32,10 +48,13 @@ use std::path::{Path, PathBuf};
 pub const INDEXED_ARCHIVE_PREFIXES: [&str; 13] = [
     "im", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sw", "sx", "sy", "sz", "is",
 ];
-pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 16] = [
-    "im", "kp", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sh", "tm", "sw", "sx", "sy", "sz", "is",
+pub const SUPPORTED_ARCHIVE_PREFIXES: [&str; 20] = [
+    "cu", "ft", "gm", "im", "kp", "sa", "sb", "sc", "sd", "se", "sf", "sg", "sh", "tm", "wm", "sw",
+    "sx", "sy", "sz", "is",
 ];
-pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 32;
+pub const VIEWER_CATEGORY_PAGE_SIZE: usize = 64;
+const GM_ATLAS_FILE_NUMBERS: &[u32] = &[0, 1, 2, 3];
+const GM_ATLAS_IDENTITY_GROUP: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RawArchiveDefinition {
@@ -121,11 +140,26 @@ pub fn resolve_archive_directory(resource_root: impl AsRef<Path>, prefix: &str) 
     }
 
     let subdirectory = match prefix.to_ascii_lowercase().as_str() {
-        "kp" | "tm" => "0000",
+        "gm" => "local",
+        "cu" | "ft" | "kp" | "tm" | "wm" => "0000",
         "sw" | "sx" | "sy" | "sz" => "0002",
         _ => "0001",
     };
     resource_root.join(subdirectory)
+}
+
+fn gm_archive_path(resource_root: &Path) -> PathBuf {
+    resolve_archive_directory(resource_root, "gm").join("gm000000.bin")
+}
+
+fn standalone_image_path(resource_root: &Path, prefix: &str) -> Option<PathBuf> {
+    let filename = match prefix {
+        "cu" => "00000001.bin",
+        "ft" => "00000000.bin",
+        "wm" => "10000000.bin",
+        _ => return None,
+    };
+    Some(resolve_archive_directory(resource_root, prefix).join(filename))
 }
 
 fn raw_archive_path(resource_root: &Path, definition: RawArchiveDefinition) -> Option<PathBuf> {
@@ -145,6 +179,7 @@ fn raw_canonical_block(prefix: &str, key: RawResourceKey) -> u32 {
     raw_layered_rule(prefix, key).map_or(key.block_index, |rule| rule.canonical_block)
 }
 
+#[cfg(test)]
 fn indexed_canonical_block(prefix: &str, block_index: u32) -> u32 {
     composite_assembly_rule(prefix, block_index).map_or_else(
         || assembly_plan(prefix, block_index).map_or(block_index, |plan| plan.first_block),
@@ -152,9 +187,134 @@ fn indexed_canonical_block(prefix: &str, block_index: u32) -> u32 {
     )
 }
 
+#[cfg(test)]
 fn indexed_assembled(prefix: &str, block_index: u32) -> bool {
     composite_assembly_rule(prefix, block_index).is_some()
         || assembly_plan(prefix, block_index).is_some()
+}
+
+const EQUIPMENT_CATEGORY_NAMES: [&str; 6] = ["몸", "머리", "다리", "팔", "무기·도구", "장신구"];
+
+fn equipment_category_path(prefix: &str, group_code: u32) -> Option<Vec<String>> {
+    if !prefix.eq_ignore_ascii_case("sb") {
+        return None;
+    }
+    EQUIPMENT_CATEGORY_NAMES
+        .get(usize::try_from(group_code).ok()?)
+        .map(|category| vec!["장비".to_owned(), (*category).to_owned()])
+}
+
+fn user_verified_group_category_path(prefix: &str, group_code: u32) -> Option<Vec<String>> {
+    let category = if prefix.eq_ignore_ascii_case("sa") {
+        match group_code {
+            2 => Some("선박 그레이드 보너스"),
+            _ => None,
+        }
+    } else if prefix.eq_ignore_ascii_case("sb") {
+        match group_code {
+            25 => Some("선박데코"),
+            26 => Some("선원장비"),
+            _ => None,
+        }
+    } else if prefix.eq_ignore_ascii_case("sc") {
+        match group_code {
+            4 => Some("돛 무늬"),
+            5 => Some("주점 메뉴"),
+            6 => Some("포커"),
+            7 => Some("이벤트"),
+            8 => Some("부관"),
+            10 => Some("아팔타멘토 타입"),
+            14 => Some("개인농장 시설"),
+            16 => Some("테크닉"),
+            20 => Some("대학·학술협회"),
+            26 => Some("트레져헌트 테마"),
+            31 => Some("전승(획득)"),
+            32 => Some("트레져헌트 렐릭"),
+            33 => Some("레거시 테마"),
+            34 => Some("추구 생산"),
+            35 => Some("위인의 장 테마"),
+            36 => Some("잠재능력"),
+            _ => None,
+        }
+    } else if prefix.eq_ignore_ascii_case("sd") {
+        match group_code {
+            4 => Some("입항허가"),
+            29 => Some("전승(획득/큰이미지)"),
+            _ => None,
+        }
+    } else if prefix.eq_ignore_ascii_case("sf") && group_code == 1 {
+        Some("레거시")
+    } else if prefix.eq_ignore_ascii_case("sy") && group_code == 0 {
+        Some("역사적 사건")
+    } else {
+        None
+    };
+    category.map(|category| vec![category.to_owned()])
+}
+
+fn master_category_path(source_label: &str, prefix: &str, group_code: u32) -> Vec<String> {
+    equipment_category_path(prefix, group_code)
+        .or_else(|| user_verified_group_category_path(prefix, group_code))
+        .unwrap_or_else(|| vec![source_label.to_owned()])
+}
+
+fn linked_category_path(source_label: &str, prefix: &str, group_code: u32) -> Vec<String> {
+    master_category_path(source_label, prefix, group_code)
+}
+
+fn gm_sprite_category_path(atlas_block_index: u32) -> Vec<String> {
+    vec![
+        "UI 리소스".to_owned(),
+        "GM".to_owned(),
+        "원시 렌더링 조각".to_owned(),
+        format!("아틀라스 ID {atlas_block_index:02}"),
+    ]
+}
+
+fn gm_atlas_category_path() -> Vec<String> {
+    vec![
+        "UI 리소스".to_owned(),
+        "GM".to_owned(),
+        "원본 아틀라스".to_owned(),
+    ]
+}
+
+fn physical_category_path(
+    source_label: Option<&str>,
+    prefix: &str,
+    group_code: u32,
+    assembled: bool,
+    has_groups: bool,
+) -> Vec<String> {
+    if assembled {
+        return vec!["조립 이미지".to_owned(), prefix.to_ascii_uppercase()];
+    }
+    if prefix.eq_ignore_ascii_case("tm") {
+        return vec!["지도".to_owned(), "도시 미니맵".to_owned()];
+    }
+    if prefix.eq_ignore_ascii_case("gm") {
+        return vec!["UI 리소스".to_owned(), "GM".to_owned()];
+    }
+    if prefix.eq_ignore_ascii_case("cu") {
+        return vec!["UI 리소스".to_owned(), "커서".to_owned()];
+    }
+    if prefix.eq_ignore_ascii_case("ft") {
+        return vec!["글꼴".to_owned(), "게임 글리프".to_owned()];
+    }
+    if prefix.eq_ignore_ascii_case("wm") {
+        return vec!["지도".to_owned(), "축소 세계지도 리소스".to_owned()];
+    }
+    if let Some(path) = user_verified_group_category_path(prefix, group_code) {
+        return path;
+    }
+    if let Some(source_label) = source_label {
+        return master_category_path(source_label, prefix, group_code);
+    }
+    let mut path = vec!["미분류".to_owned(), prefix.to_ascii_uppercase()];
+    if has_groups {
+        path.push(format!("그룹 {group_code}"));
+    }
+    path
 }
 
 const THUMBNAIL_MAX_WIDTH: u32 = 160;
@@ -187,6 +347,7 @@ pub struct GameDirectorySummary {
     pub resource_directory: String,
     pub archives: Vec<ArchiveSummary>,
     pub verified_categories: Vec<VerifiedCategorySummary>,
+    pub catalog_diagnostics: CatalogDiagnosticsSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -194,6 +355,27 @@ pub struct GameDirectorySummary {
 pub struct VerifiedCategorySummary {
     pub path: Vec<String>,
     pub asset_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogDiagnosticsSummary {
+    pub total_asset_count: usize,
+    pub categorized_asset_count: usize,
+    pub unclassified_asset_count: usize,
+    pub multiple_category_asset_count: usize,
+    pub unclassified_categories: Vec<VerifiedCategorySummary>,
+    pub multiple_category_assets: Vec<CatalogMultipleCategoryAsset>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogMultipleCategoryAsset {
+    pub archive: String,
+    pub identity_kind: String,
+    pub primary_id: u32,
+    pub secondary_id: u32,
+    pub category_paths: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -246,6 +428,7 @@ pub struct VerifiedAssetThumbnail {
     pub thumbnail_height: u32,
     pub assembled: bool,
     pub thumbnail_data_url: String,
+    pub text_links: Vec<TextAssetLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -260,6 +443,22 @@ pub struct VerifiedAssetDetail {
     pub preview_width: u32,
     pub preview_height: u32,
     pub assembled: bool,
+    pub preview_data_url: String,
+    pub gm_source: Option<GmSpriteSourceDetail>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GmSpriteSourceDetail {
+    pub atlas_id: u32,
+    pub atlas_width: u32,
+    pub atlas_height: u32,
+    pub preview_width: u32,
+    pub preview_height: u32,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
     pub preview_data_url: String,
 }
 
@@ -325,8 +524,13 @@ pub struct ViewerSession {
     resource_directory: Option<PathBuf>,
     archives: HashMap<String, LoadedArchive>,
     raw_archives: HashMap<String, LoadedRawImageArchive>,
+    gm_archive: Option<LoadedGmAtlasArchive>,
+    standalone_archives: HashMap<String, LoadedStandaloneImageArchive>,
     search_assets: Option<Vec<VerifiedSearchAssetRef>>,
     thumbnail_cache: ThumbnailCache,
+    text_catalog: Option<TextCatalog>,
+    browse_text_catalog: Option<(usize, TextCatalog)>,
+    active_text_language_block: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -338,9 +542,48 @@ struct VerifiedAssetRef {
     assembled: bool,
 }
 
+type AssetIdentityKey = (String, u8, u32, u32);
+
+fn asset_identity_key(asset: &VerifiedAssetRef) -> AssetIdentityKey {
+    if asset.assembled {
+        return (asset.prefix.clone(), 0, asset.canonical_block, 0);
+    }
+    if let Some(raw_key) = asset.raw_key {
+        if asset.prefix == "gm" {
+            return if asset.key.group_code == GM_ATLAS_IDENTITY_GROUP {
+                (
+                    asset.prefix.clone(),
+                    3,
+                    raw_key.file_number,
+                    asset.key.icon_id,
+                )
+            } else {
+                (
+                    asset.prefix.clone(),
+                    4,
+                    asset.key.group_code,
+                    asset.key.icon_id,
+                )
+            };
+        }
+        return (
+            asset.prefix.clone(),
+            1,
+            raw_key.file_number,
+            raw_key.file_block_index,
+        );
+    }
+    (
+        asset.prefix.clone(),
+        2,
+        asset.key.group_code,
+        asset.key.icon_id,
+    )
+}
+
 impl VerifiedAssetRef {
     fn icon_id(&self) -> Option<u32> {
-        self.raw_key.is_none().then_some(self.key.icon_id)
+        (self.raw_key.is_none() || self.prefix == "gm").then_some(self.key.icon_id)
     }
 }
 
@@ -348,6 +591,8 @@ impl VerifiedAssetRef {
 struct VerifiedSearchAssetRef {
     path: Vec<String>,
     asset: VerifiedAssetRef,
+    search_text: String,
+    search_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -466,10 +711,123 @@ impl ViewerSession {
         if self.resource_directory.as_ref() != Some(&path) {
             self.archives.clear();
             self.raw_archives.clear();
+            self.gm_archive = None;
+            self.standalone_archives.clear();
             self.search_assets = None;
             self.thumbnail_cache.clear();
+            self.text_catalog = None;
+            self.browse_text_catalog = None;
+            self.active_text_language_block = None;
             self.resource_directory = Some(path);
         }
+    }
+
+    pub fn text_catalog_summary(
+        &mut self,
+        language_block: usize,
+    ) -> Result<TextCatalogSummary, ViewerSessionError> {
+        Ok(self.text_catalog_for_language(language_block)?.summary())
+    }
+
+    pub fn set_text_language_block(
+        &mut self,
+        language_block: usize,
+    ) -> Result<(), ViewerSessionError> {
+        self.text_catalog_for_language(language_block)?;
+        if self.active_text_language_block != Some(language_block) {
+            self.active_text_language_block = Some(language_block);
+            self.search_assets = None;
+            self.thumbnail_cache.clear();
+        }
+        Ok(())
+    }
+
+    pub fn text_page(
+        &mut self,
+        language_block: usize,
+        source: Option<&str>,
+        query: &str,
+        offset: usize,
+        page_size: usize,
+    ) -> Result<TextRecordPage, ViewerSessionError> {
+        self.text_catalog_for_language(language_block)?
+            .page(source, query, offset, page_size)
+            .map_err(ViewerSessionError::TextPage)
+    }
+
+    pub fn text_records_for_keys(
+        &mut self,
+        keys: &[(String, u32)],
+    ) -> Result<Vec<TextRecordItem>, ViewerSessionError> {
+        Ok(self.text_catalog()?.records_for_keys(keys))
+    }
+
+    fn text_catalog(&mut self) -> Result<&TextCatalog, ViewerSessionError> {
+        if self.text_catalog.is_none() {
+            let resource_directory = self
+                .resource_directory
+                .as_deref()
+                .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
+            let game_directory = resource_directory
+                .parent()
+                .ok_or(ViewerSessionError::GameDirectoryNotFound)?;
+            self.text_catalog = Some(
+                TextCatalog::load(game_directory).map_err(ViewerSessionError::OpenTextCatalog)?,
+            );
+        }
+        Ok(self
+            .text_catalog
+            .as_ref()
+            .expect("text catalog initialized"))
+    }
+
+    fn text_catalog_for_language(
+        &mut self,
+        language_block: usize,
+    ) -> Result<&TextCatalog, ViewerSessionError> {
+        if language_block == DEFAULT_TEXT_LANGUAGE_BLOCK {
+            return self.text_catalog();
+        }
+        let needs_load = self
+            .browse_text_catalog
+            .as_ref()
+            .is_none_or(|(loaded_block, _)| *loaded_block != language_block);
+        if needs_load {
+            let resource_directory = self
+                .resource_directory
+                .as_deref()
+                .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
+            let game_directory = resource_directory
+                .parent()
+                .ok_or(ViewerSessionError::GameDirectoryNotFound)?;
+            let catalog = TextCatalog::load_language_block(game_directory, language_block)
+                .map_err(ViewerSessionError::OpenTextCatalog)?;
+            self.browse_text_catalog = Some((language_block, catalog));
+        }
+        Ok(&self
+            .browse_text_catalog
+            .as_ref()
+            .expect("browse text catalog initialized")
+            .1)
+    }
+
+    fn active_text_catalog(&mut self) -> Result<&TextCatalog, ViewerSessionError> {
+        let language_block = self
+            .active_text_language_block
+            .unwrap_or(DEFAULT_TEXT_LANGUAGE_BLOCK);
+        self.text_catalog_for_language(language_block)
+    }
+
+    fn text_links_for_asset(&mut self, asset: &VerifiedAssetRef) -> Vec<TextAssetLink> {
+        if asset.raw_key.is_some() {
+            return Vec::new();
+        }
+        self.active_text_catalog()
+            .ok()
+            .map(|catalog| {
+                catalog.links_for_image(&asset.prefix, asset.key.group_code, asset.key.icon_id)
+            })
+            .unwrap_or_default()
     }
 
     pub fn category_page(
@@ -547,69 +905,131 @@ impl ViewerSession {
         }
 
         let mut review_required_count = 0;
-        let mut unique =
-            BTreeMap::<(Vec<String>, String, u32), (ResourceKey, Option<RawResourceKey>)>::new();
+        let mut unique = BTreeMap::<
+            (Vec<String>, AssetIdentityKey),
+            (ResourceKey, Option<RawResourceKey>, u32, bool),
+        >::new();
+        let _ = self.active_text_catalog();
         for asset in added_assets {
             let raw_key = asset.raw_resource_key();
             if asset.source_kind == AssetSourceKind::RawBlock && raw_key.is_none() {
                 review_required_count += 1;
                 continue;
             }
-            let classification = classify_record(CatalogRecordKey {
-                archive: &asset.archive,
-                group_code: asset.group_code,
-                icon_id: asset.icon_id,
-                block_index: asset.block_index,
-            });
-            if classification.boundary_status != VerificationStatus::HumanVerified
-                || classification.meaning_status != VerificationStatus::HumanVerified
-            {
-                review_required_count += 1;
-                continue;
-            }
-            let Some(category) = classification.category else {
-                review_required_count += 1;
-                continue;
+            let prefix = asset.archive.to_ascii_lowercase();
+            let (canonical_block, indexed_is_assembled) = if let Some(key) = raw_key {
+                (raw_canonical_block(&asset.archive, key), false)
+            } else {
+                let archive = self.archive(&prefix)?;
+                (
+                    archive
+                        .assembly_canonical_block(asset.block_index)
+                        .unwrap_or(asset.block_index),
+                    archive.is_assembled(asset.block_index),
+                )
             };
-            let canonical_block = raw_key.map_or_else(
-                || indexed_canonical_block(&asset.archive, asset.block_index),
-                |key| raw_canonical_block(&asset.archive, key),
-            );
-            let path = category
-                .segments()
-                .iter()
-                .map(|segment| (*segment).to_owned())
-                .collect::<Vec<_>>();
-            unique
-                .entry((path, asset.archive.to_ascii_lowercase(), canonical_block))
-                .or_insert((
+            let paths = if let Some(raw_key) = raw_key {
+                vec![physical_category_path(
+                    None,
+                    &prefix,
+                    0,
+                    raw_layered_rule(&prefix, raw_key).is_some(),
+                    false,
+                )]
+            } else {
+                let mut paths = self
+                    .active_text_catalog()
+                    .ok()
+                    .map(|catalog| {
+                        catalog
+                            .links_for_image(&prefix, asset.group_code, asset.icon_id)
+                            .into_iter()
+                            .map(|link| {
+                                linked_category_path(&link.source_label, &prefix, asset.group_code)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if indexed_is_assembled {
+                    paths.push(physical_category_path(
+                        None,
+                        &prefix,
+                        asset.group_code,
+                        true,
+                        true,
+                    ));
+                }
+                if paths.is_empty() {
+                    let source_label = self
+                        .active_text_catalog()
+                        .ok()
+                        .and_then(|catalog| {
+                            catalog.source_label_for_image_group(&prefix, asset.group_code)
+                        })
+                        .map(str::to_owned);
+                    paths.push(physical_category_path(
+                        source_label.as_deref(),
+                        &prefix,
+                        asset.group_code,
+                        false,
+                        true,
+                    ));
+                }
+                paths
+            };
+            for path in paths {
+                let identity = asset_identity_key(&VerifiedAssetRef {
+                    prefix: prefix.clone(),
+                    key: ResourceKey {
+                        group_code: asset.group_code,
+                        icon_id: asset.icon_id,
+                        block_index: asset.block_index,
+                    },
+                    raw_key,
+                    canonical_block,
+                    assembled: raw_key
+                        .and_then(|key| raw_layered_rule(&prefix, key))
+                        .is_some()
+                        || indexed_is_assembled,
+                });
+                unique.entry((path, identity)).or_insert((
                     ResourceKey {
                         group_code: asset.group_code,
                         icon_id: asset.icon_id,
                         block_index: asset.block_index,
                     },
                     raw_key,
+                    canonical_block,
+                    indexed_is_assembled,
                 ));
+            }
         }
 
         let assets = unique
             .into_iter()
-            .map(|((path, prefix, canonical_block), (key, raw_key))| {
-                let assembled = raw_key
-                    .and_then(|key| raw_layered_rule(&prefix, key))
-                    .is_some()
-                    || indexed_assembled(&prefix, canonical_block);
-                VerifiedSearchAssetRef {
-                    path,
-                    asset: VerifiedAssetRef {
-                        prefix,
-                        key,
-                        raw_key,
-                        canonical_block,
-                        assembled,
-                    },
-                }
-            })
+            .map(
+                |(
+                    (path, (prefix, _, _, _)),
+                    (key, raw_key, canonical_block, indexed_is_assembled),
+                )| {
+                    let assembled = raw_key
+                        .and_then(|key| raw_layered_rule(&prefix, key))
+                        .is_some()
+                        || indexed_is_assembled;
+                    VerifiedSearchAssetRef {
+                        path,
+                        asset: VerifiedAssetRef {
+                            prefix,
+                            key,
+                            raw_key,
+                            canonical_block,
+                            assembled,
+                        },
+                        search_text: String::new(),
+                        search_names: Vec::new(),
+                    }
+                },
+            )
             .collect::<Vec<_>>();
         let total_count = assets.len();
         if offset > 0 && offset >= total_count {
@@ -672,6 +1092,8 @@ impl ViewerSession {
         Ok(VerifiedSearchAsset(VerifiedSearchAssetRef {
             path: path.to_vec(),
             asset,
+            search_text: path.join(" "),
+            search_names: Vec::new(),
         }))
     }
 
@@ -696,7 +1118,141 @@ impl ViewerSession {
         block_index: u32,
     ) -> Result<VerifiedAssetDetail, ViewerSessionError> {
         let asset = self.verified_asset(path, prefix, block_index)?;
+        self.asset_detail_from_ref(path, asset)
+    }
+
+    pub fn text_image_detail(
+        &mut self,
+        archive: &str,
+        group_code: u32,
+        icon_id: u32,
+        relation: &str,
+    ) -> Result<VerifiedAssetDetail, ViewerSessionError> {
+        let prefix = archive.to_ascii_lowercase();
+        let record = self
+            .archive(&prefix)?
+            .records()
+            .iter()
+            .find(|record| record.group_code == group_code && record.icon_id == icon_id)
+            .copied()
+            .ok_or_else(|| ViewerSessionError::TextImageNotFound {
+                prefix: prefix.clone(),
+                group_code,
+                icon_id,
+            })?;
+        let archive = self.archive(&prefix)?;
+        let canonical_block = archive
+            .assembly_canonical_block(record.block_index)
+            .unwrap_or(record.block_index);
+        let assembled = archive.is_assembled(record.block_index);
+        let asset = VerifiedAssetRef {
+            prefix,
+            key: ResourceKey {
+                group_code,
+                icon_id,
+                block_index: record.block_index,
+            },
+            raw_key: None,
+            canonical_block,
+            assembled,
+        };
+        self.asset_detail_from_ref(&["텍스트 자료".to_owned(), relation.to_owned()], asset)
+    }
+
+    fn asset_detail_from_ref(
+        &mut self,
+        path: &[String],
+        asset: VerifiedAssetRef,
+    ) -> Result<VerifiedAssetDetail, ViewerSessionError> {
         if let Some(raw_key) = asset.raw_key {
+            if matches!(asset.prefix.as_str(), "cu" | "ft" | "wm") {
+                let extracted = self
+                    .standalone_archive(&asset.prefix)?
+                    .extract_thumbnail_png(
+                        raw_key,
+                        MAX_IMAGE_DECODE_SIZE,
+                        DETAIL_MAX_WIDTH,
+                        DETAIL_MAX_HEIGHT,
+                        MAX_DETAIL_DECODE_SIZE,
+                    )
+                    .map_err(|source| ViewerSessionError::Extract {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                        source,
+                    })?;
+                return Ok(VerifiedAssetDetail {
+                    path: path.to_vec(),
+                    archive: asset.prefix,
+                    icon_id: Some(raw_key.file_block_index),
+                    block_index: asset.canonical_block,
+                    source_width: extracted.source_width,
+                    source_height: extracted.source_height,
+                    preview_width: extracted.width,
+                    preview_height: extracted.height,
+                    assembled: false,
+                    preview_data_url: png_data_url(&extracted.png),
+                    gm_source: None,
+                });
+            }
+            if asset.prefix == "gm" {
+                let icon_id = asset.key.icon_id;
+                let archive = self.gm_archive()?;
+                let extracted = archive
+                    .extract_thumbnail_png(
+                        raw_key,
+                        MAX_IMAGE_DECODE_SIZE,
+                        DETAIL_MAX_WIDTH,
+                        DETAIL_MAX_HEIGHT,
+                        MAX_DETAIL_DECODE_SIZE,
+                    )
+                    .map_err(|source| ViewerSessionError::Extract {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                        source,
+                    })?;
+                let gm_source = if let Some(source) = archive.sprite_source(raw_key) {
+                    let preview = archive
+                        .extract_thumbnail_png(
+                            source.atlas_key,
+                            MAX_IMAGE_DECODE_SIZE,
+                            DETAIL_MAX_WIDTH,
+                            DETAIL_MAX_HEIGHT,
+                            MAX_DETAIL_DECODE_SIZE,
+                        )
+                        .map_err(|source| ViewerSessionError::Extract {
+                            prefix: asset.prefix.clone(),
+                            block_index: asset.canonical_block,
+                            source,
+                        })?;
+                    Some(GmSpriteSourceDetail {
+                        atlas_id: source.atlas_block_index,
+                        atlas_width: source.atlas_width,
+                        atlas_height: source.atlas_height,
+                        preview_width: preview.width,
+                        preview_height: preview.height,
+                        x: source.x,
+                        y: source.y,
+                        width: source.width,
+                        height: source.height,
+                        preview_data_url: png_data_url(&preview.png),
+                    })
+                } else {
+                    None
+                };
+                return Ok(VerifiedAssetDetail {
+                    path: path.to_vec(),
+                    archive: asset.prefix,
+                    icon_id: Some(icon_id),
+                    block_index: asset.canonical_block,
+                    source_width: extracted.source_width,
+                    source_height: extracted.source_height,
+                    preview_width: extracted.width,
+                    preview_height: extracted.height,
+                    assembled: false,
+                    preview_data_url: png_data_url(&extracted.png),
+                    gm_source,
+                });
+            }
             if asset.assembled {
                 let rule = raw_layered_rule(&asset.prefix, raw_key).ok_or_else(|| {
                     ViewerSessionError::AssemblyRuleMissing {
@@ -730,6 +1286,7 @@ impl ViewerSession {
                     preview_height: extracted.height,
                     assembled: true,
                     preview_data_url: png_data_url(&extracted.png),
+                    gm_source: None,
                 });
             }
             let extracted = self
@@ -757,6 +1314,7 @@ impl ViewerSession {
                 preview_height: extracted.height,
                 assembled: false,
                 preview_data_url: png_data_url(&extracted.png),
+                gm_source: None,
             });
         }
         let archive = self.archive(&asset.prefix)?;
@@ -791,6 +1349,7 @@ impl ViewerSession {
                 preview_height: extracted.height,
                 assembled: true,
                 preview_data_url: png_data_url(&extracted.png),
+                gm_source: None,
             })
         } else {
             let extracted = archive
@@ -817,6 +1376,7 @@ impl ViewerSession {
                 preview_height: extracted.height,
                 assembled: false,
                 preview_data_url: png_data_url(&extracted.png),
+                gm_source: None,
             })
         }
     }
@@ -836,6 +1396,45 @@ impl ViewerSession {
         asset: VerifiedAssetRef,
     ) -> Result<VerifiedAssetPng, ViewerSessionError> {
         if let Some(raw_key) = asset.raw_key {
+            if matches!(asset.prefix.as_str(), "cu" | "ft" | "wm") {
+                let extracted = self
+                    .standalone_archive(&asset.prefix)?
+                    .extract_png(raw_key, MAX_IMAGE_DECODE_SIZE)
+                    .map_err(|source| ViewerSessionError::Extract {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                        source,
+                    })?;
+                return Ok(VerifiedAssetPng {
+                    archive: asset.prefix,
+                    icon_id: Some(raw_key.file_block_index),
+                    block_index: asset.canonical_block,
+                    width: extracted.width,
+                    height: extracted.height,
+                    assembled: false,
+                    png: extracted.png,
+                });
+            }
+            if asset.prefix == "gm" {
+                let icon_id = asset.key.icon_id;
+                let extracted = self
+                    .gm_archive()?
+                    .extract_png(raw_key, MAX_IMAGE_DECODE_SIZE)
+                    .map_err(|source| ViewerSessionError::Extract {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                        source,
+                    })?;
+                return Ok(VerifiedAssetPng {
+                    archive: asset.prefix,
+                    icon_id: Some(icon_id),
+                    block_index: asset.canonical_block,
+                    width: extracted.width,
+                    height: extracted.height,
+                    assembled: false,
+                    png: extracted.png,
+                });
+            }
             if asset.assembled {
                 let rule = raw_layered_rule(&asset.prefix, raw_key).ok_or_else(|| {
                     ViewerSessionError::AssemblyRuleMissing {
@@ -938,8 +1537,70 @@ impl ViewerSession {
         if let Some(thumbnail) = self.thumbnail_cache.get(&cache_key) {
             return Ok(thumbnail);
         }
+        let text_links = self.text_links_for_asset(&asset);
 
         if let Some(raw_key) = asset.raw_key {
+            if matches!(asset.prefix.as_str(), "cu" | "ft" | "wm") {
+                let extracted = self
+                    .standalone_archive(&asset.prefix)?
+                    .extract_thumbnail_png(
+                        raw_key,
+                        MAX_IMAGE_DECODE_SIZE,
+                        THUMBNAIL_MAX_WIDTH,
+                        THUMBNAIL_MAX_HEIGHT,
+                        MAX_THUMBNAIL_DECODE_SIZE,
+                    )
+                    .map_err(|source| ViewerSessionError::Extract {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                        source,
+                    })?;
+                let thumbnail = VerifiedAssetThumbnail {
+                    archive: asset.prefix,
+                    icon_id: Some(raw_key.file_block_index),
+                    block_index: asset.canonical_block,
+                    source_width: extracted.source_width,
+                    source_height: extracted.source_height,
+                    thumbnail_width: extracted.width,
+                    thumbnail_height: extracted.height,
+                    assembled: false,
+                    thumbnail_data_url: png_data_url(&extracted.png),
+                    text_links,
+                };
+                self.thumbnail_cache.insert(cache_key, thumbnail.clone());
+                return Ok(thumbnail);
+            }
+            if asset.prefix == "gm" {
+                let icon_id = asset.key.icon_id;
+                let extracted = self
+                    .gm_archive()?
+                    .extract_thumbnail_png(
+                        raw_key,
+                        MAX_IMAGE_DECODE_SIZE,
+                        THUMBNAIL_MAX_WIDTH,
+                        THUMBNAIL_MAX_HEIGHT,
+                        MAX_THUMBNAIL_DECODE_SIZE,
+                    )
+                    .map_err(|source| ViewerSessionError::Extract {
+                        prefix: asset.prefix.clone(),
+                        block_index: asset.canonical_block,
+                        source,
+                    })?;
+                let thumbnail = VerifiedAssetThumbnail {
+                    archive: asset.prefix,
+                    icon_id: Some(icon_id),
+                    block_index: asset.canonical_block,
+                    source_width: extracted.source_width,
+                    source_height: extracted.source_height,
+                    thumbnail_width: extracted.width,
+                    thumbnail_height: extracted.height,
+                    assembled: false,
+                    thumbnail_data_url: png_data_url(&extracted.png),
+                    text_links,
+                };
+                self.thumbnail_cache.insert(cache_key, thumbnail.clone());
+                return Ok(thumbnail);
+            }
             if asset.assembled {
                 let rule = raw_layered_rule(&asset.prefix, raw_key).ok_or_else(|| {
                     ViewerSessionError::AssemblyRuleMissing {
@@ -972,6 +1633,7 @@ impl ViewerSession {
                     thumbnail_height: extracted.height,
                     assembled: true,
                     thumbnail_data_url: png_data_url(&extracted.png),
+                    text_links: text_links.clone(),
                 };
                 self.thumbnail_cache.insert(cache_key, thumbnail.clone());
                 return Ok(thumbnail);
@@ -1000,6 +1662,7 @@ impl ViewerSession {
                 thumbnail_height: extracted.height,
                 assembled: false,
                 thumbnail_data_url: png_data_url(&extracted.png),
+                text_links: text_links.clone(),
             };
             self.thumbnail_cache.insert(cache_key, thumbnail.clone());
             return Ok(thumbnail);
@@ -1035,6 +1698,7 @@ impl ViewerSession {
                 thumbnail_height: extracted.height,
                 assembled: true,
                 thumbnail_data_url: png_data_url(&extracted.png),
+                text_links: text_links.clone(),
             }
         } else {
             let extracted = archive
@@ -1060,6 +1724,7 @@ impl ViewerSession {
                 thumbnail_height: extracted.height,
                 assembled: false,
                 thumbnail_data_url: png_data_url(&extracted.png),
+                text_links,
             }
         };
         self.thumbnail_cache.insert(cache_key, thumbnail.clone());
@@ -1124,6 +1789,358 @@ impl ViewerSession {
         &mut self,
         path: &[String],
     ) -> Result<Vec<VerifiedAssetRef>, ViewerSessionError> {
+        let mut assets = self.physical_assets_for_path(path)?;
+        let records = self
+            .active_text_catalog()
+            .map(TextCatalog::linked_images)
+            .unwrap_or_default();
+        for record in records.into_iter().filter(|record| {
+            linked_category_path(
+                &record.source_label,
+                &record.image.archive,
+                record.image.group_code,
+            ) == path
+        }) {
+            let prefix = record.image.archive.to_ascii_lowercase();
+            let canonical_block = self
+                .archive(&prefix)?
+                .assembly_canonical_block(record.image.block_index)
+                .unwrap_or(record.image.block_index);
+            let assembled = self
+                .archive(&prefix)?
+                .is_assembled(record.image.block_index);
+            let asset = VerifiedAssetRef {
+                prefix: prefix.clone(),
+                key: ResourceKey {
+                    group_code: record.image.group_code,
+                    icon_id: record.image.icon_id,
+                    block_index: record.image.block_index,
+                },
+                raw_key: None,
+                canonical_block,
+                assembled,
+            };
+            assets.entry(asset_identity_key(&asset)).or_insert(asset);
+        }
+        Ok(assets.into_values().collect())
+    }
+
+    fn physical_assets_for_path(
+        &mut self,
+        requested_path: &[String],
+    ) -> Result<BTreeMap<AssetIdentityKey, VerifiedAssetRef>, ViewerSessionError> {
+        let resource_directory = self
+            .resource_directory
+            .clone()
+            .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
+        let mut assets = BTreeMap::<AssetIdentityKey, VerifiedAssetRef>::new();
+        for prefix in INDEXED_ARCHIVE_PREFIXES {
+            if !resolve_archive_directory(&resource_directory, prefix)
+                .join(format!("{prefix}000000.bin"))
+                .is_file()
+            {
+                continue;
+            }
+            let records = self.archive(prefix)?.records().to_vec();
+            for record in records {
+                let archive = self.archive(prefix)?;
+                let canonical_block = archive
+                    .assembly_canonical_block(record.block_index)
+                    .unwrap_or(record.block_index);
+                let assembled = archive.is_assembled(record.block_index);
+                let source_label = self
+                    .active_text_catalog()
+                    .ok()
+                    .and_then(|catalog| {
+                        catalog.source_label_for_image_group(prefix, record.group_code)
+                    })
+                    .map(str::to_owned);
+                let category_path = physical_category_path(
+                    source_label.as_deref(),
+                    prefix,
+                    record.group_code,
+                    assembled,
+                    true,
+                );
+                if category_path != requested_path {
+                    continue;
+                }
+                let asset = VerifiedAssetRef {
+                    prefix: prefix.to_owned(),
+                    key: ResourceKey {
+                        group_code: record.group_code,
+                        icon_id: record.icon_id,
+                        block_index: record.block_index,
+                    },
+                    raw_key: None,
+                    canonical_block,
+                    assembled,
+                };
+                assets.entry(asset_identity_key(&asset)).or_insert(asset);
+            }
+        }
+
+        for definition in RAW_IMAGE_ARCHIVES {
+            if !raw_archive_path(&resource_directory, definition).is_some_and(|path| path.is_file())
+            {
+                continue;
+            }
+            let records = self
+                .raw_archive(definition.prefix)?
+                .records()
+                .collect::<Vec<_>>();
+            for record in records {
+                let canonical_block = raw_canonical_block(definition.prefix, record.key);
+                let assembled = raw_layered_rule(definition.prefix, record.key).is_some();
+                let category_path =
+                    physical_category_path(None, definition.prefix, 0, assembled, false);
+                if category_path != requested_path {
+                    continue;
+                }
+                let asset = VerifiedAssetRef {
+                    prefix: definition.prefix.to_owned(),
+                    key: ResourceKey {
+                        group_code: 0,
+                        icon_id: record.key.block_index,
+                        block_index: record.key.block_index,
+                    },
+                    raw_key: Some(record.key),
+                    canonical_block,
+                    assembled,
+                };
+                assets.entry(asset_identity_key(&asset)).or_insert(asset);
+            }
+        }
+        if gm_archive_path(&resource_directory).is_file() {
+            let atlas_records = self.gm_archive()?.atlas_records().collect::<Vec<_>>();
+            if gm_atlas_category_path() == requested_path {
+                for record in atlas_records {
+                    let asset = VerifiedAssetRef {
+                        prefix: "gm".to_owned(),
+                        key: ResourceKey {
+                            group_code: GM_ATLAS_IDENTITY_GROUP,
+                            icon_id: record.atlas_block_index,
+                            block_index: record.key.block_index,
+                        },
+                        raw_key: Some(record.key),
+                        canonical_block: record.key.block_index,
+                        assembled: false,
+                    };
+                    assets.insert(asset_identity_key(&asset), asset);
+                }
+            }
+            let sprite_records = self.gm_archive()?.records().collect::<Vec<_>>();
+            for record in sprite_records {
+                let category_path = gm_sprite_category_path(record.atlas_block_index);
+                if category_path != requested_path {
+                    continue;
+                }
+                let asset = VerifiedAssetRef {
+                    prefix: "gm".to_owned(),
+                    key: ResourceKey {
+                        group_code: record.atlas_block_index,
+                        icon_id: record.sprite_index,
+                        block_index: record.key.block_index,
+                    },
+                    raw_key: Some(record.key),
+                    canonical_block: record.key.block_index,
+                    assembled: false,
+                };
+                assets.insert(asset_identity_key(&asset), asset);
+            }
+        }
+        for prefix in ["cu", "ft", "wm"] {
+            if !standalone_image_path(&resource_directory, prefix)
+                .is_some_and(|path| path.is_file())
+            {
+                continue;
+            }
+            let records = self
+                .standalone_archive(prefix)?
+                .records()
+                .collect::<Vec<_>>();
+            for record in records {
+                let category_path = physical_category_path(None, prefix, 0, false, false);
+                if category_path != requested_path {
+                    continue;
+                }
+                let asset = VerifiedAssetRef {
+                    prefix: prefix.to_owned(),
+                    key: ResourceKey {
+                        group_code: 0,
+                        icon_id: record.key.file_block_index,
+                        block_index: record.key.block_index,
+                    },
+                    raw_key: Some(record.key),
+                    canonical_block: record.key.block_index,
+                    assembled: false,
+                };
+                assets.insert(asset_identity_key(&asset), asset);
+            }
+        }
+        Ok(assets)
+    }
+
+    fn unlinked_assets(
+        &mut self,
+        requested_prefix: &str,
+    ) -> Result<Vec<VerifiedAssetRef>, ViewerSessionError> {
+        let prefix = requested_prefix.to_ascii_lowercase();
+        let resource_directory = self
+            .resource_directory
+            .clone()
+            .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
+        if INDEXED_ARCHIVE_PREFIXES.contains(&prefix.as_str()) {
+            return self.unlinked_indexed_assets(&prefix);
+        }
+
+        if prefix == "gm" {
+            if !gm_archive_path(&resource_directory).is_file() {
+                return Ok(Vec::new());
+            }
+            let atlas_records = self.gm_archive()?.atlas_records().collect::<Vec<_>>();
+            let sprite_records = self.gm_archive()?.records().collect::<Vec<_>>();
+            let mut assets = atlas_records
+                .into_iter()
+                .map(|record| VerifiedAssetRef {
+                    prefix: prefix.clone(),
+                    key: ResourceKey {
+                        group_code: GM_ATLAS_IDENTITY_GROUP,
+                        icon_id: record.atlas_block_index,
+                        block_index: record.key.block_index,
+                    },
+                    raw_key: Some(record.key),
+                    canonical_block: record.key.block_index,
+                    assembled: false,
+                })
+                .collect::<Vec<_>>();
+            assets.extend(sprite_records.into_iter().map(|record| VerifiedAssetRef {
+                prefix: prefix.clone(),
+                key: ResourceKey {
+                    group_code: record.atlas_block_index,
+                    icon_id: record.sprite_index,
+                    block_index: record.key.block_index,
+                },
+                raw_key: Some(record.key),
+                canonical_block: record.key.block_index,
+                assembled: false,
+            }));
+            return Ok(assets);
+        }
+
+        if matches!(prefix.as_str(), "cu" | "ft" | "wm") {
+            if !standalone_image_path(&resource_directory, &prefix)
+                .is_some_and(|path| path.is_file())
+            {
+                return Ok(Vec::new());
+            }
+            let records = self
+                .standalone_archive(&prefix)?
+                .records()
+                .collect::<Vec<_>>();
+            return Ok(records
+                .into_iter()
+                .map(|record| VerifiedAssetRef {
+                    prefix: prefix.clone(),
+                    key: ResourceKey {
+                        group_code: 0,
+                        icon_id: record.key.file_block_index,
+                        block_index: record.key.block_index,
+                    },
+                    raw_key: Some(record.key),
+                    canonical_block: record.key.block_index,
+                    assembled: false,
+                })
+                .collect());
+        }
+
+        let Some(definition) = RAW_IMAGE_ARCHIVES
+            .iter()
+            .find(|definition| definition.prefix == prefix)
+            .copied()
+        else {
+            return Ok(Vec::new());
+        };
+        if !raw_archive_path(&resource_directory, definition).is_some_and(|path| path.is_file()) {
+            return Ok(Vec::new());
+        }
+        let records = self.raw_archive(&prefix)?.records().collect::<Vec<_>>();
+        let mut assets = BTreeMap::<u32, RawResourceKey>::new();
+        for record in records {
+            if raw_layered_rule(&prefix, record.key).is_some() {
+                continue;
+            }
+            assets
+                .entry(raw_canonical_block(&prefix, record.key))
+                .or_insert(record.key);
+        }
+        Ok(assets
+            .into_iter()
+            .map(|(canonical_block, raw_key)| VerifiedAssetRef {
+                prefix: prefix.clone(),
+                key: ResourceKey {
+                    group_code: 0,
+                    icon_id: raw_key.block_index,
+                    block_index: raw_key.block_index,
+                },
+                raw_key: Some(raw_key),
+                canonical_block,
+                assembled: false,
+            })
+            .collect())
+    }
+
+    fn unlinked_indexed_assets(
+        &mut self,
+        prefix: &str,
+    ) -> Result<Vec<VerifiedAssetRef>, ViewerSessionError> {
+        let prefix = prefix.to_ascii_lowercase();
+        let resource_directory = self
+            .resource_directory
+            .clone()
+            .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
+        if !resolve_archive_directory(&resource_directory, &prefix)
+            .join(format!("{prefix}000000.bin"))
+            .is_file()
+        {
+            return Ok(Vec::new());
+        }
+        let _ = self.active_text_catalog();
+        let records = self.archive(&prefix)?.records().to_vec();
+        let mut unique = BTreeMap::<u32, ResourceKey>::new();
+        for record in records {
+            let archive = self.archive(&prefix)?;
+            let canonical_block = archive
+                .assembly_canonical_block(record.block_index)
+                .unwrap_or(record.block_index);
+            let assembled = archive.is_assembled(record.block_index);
+            let linked = self.active_text_catalog().ok().is_some_and(|catalog| {
+                !catalog
+                    .links_for_image(&prefix, record.group_code, record.icon_id)
+                    .is_empty()
+            });
+            if linked || assembled {
+                continue;
+            }
+            unique.entry(canonical_block).or_insert(ResourceKey {
+                group_code: record.group_code,
+                icon_id: record.icon_id,
+                block_index: record.block_index,
+            });
+        }
+        Ok(unique
+            .into_iter()
+            .map(|(canonical_block, key)| VerifiedAssetRef {
+                prefix: prefix.clone(),
+                key,
+                raw_key: None,
+                canonical_block,
+                assembled: false,
+            })
+            .collect())
+    }
+
+    fn assembled_assets(&mut self) -> Result<Vec<VerifiedAssetRef>, ViewerSessionError> {
         let resource_directory = self
             .resource_directory
             .clone()
@@ -1140,21 +2157,12 @@ impl ViewerSession {
             let archive = self.archive(prefix)?;
             let mut unique = BTreeMap::<u32, ResourceKey>::new();
             for record in archive.records() {
-                let classification = classify_record(CatalogRecordKey {
-                    archive: prefix,
-                    group_code: record.group_code,
-                    icon_id: record.icon_id,
-                    block_index: record.block_index,
-                });
-                if classification.boundary_status != VerificationStatus::HumanVerified
-                    || classification.meaning_status != VerificationStatus::HumanVerified
-                    || !classification
-                        .category
-                        .is_some_and(|category| category_matches(category.segments(), path))
-                {
+                let canonical_block = archive
+                    .assembly_canonical_block(record.block_index)
+                    .unwrap_or(record.block_index);
+                if !archive.is_assembled(record.block_index) {
                     continue;
                 }
-                let canonical_block = indexed_canonical_block(prefix, record.block_index);
                 unique.entry(canonical_block).or_insert(ResourceKey {
                     group_code: record.group_code,
                     icon_id: record.icon_id,
@@ -1169,7 +2177,7 @@ impl ViewerSession {
                         key,
                         raw_key: None,
                         canonical_block,
-                        assembled: indexed_assembled(prefix, canonical_block),
+                        assembled: true,
                     }),
             );
         }
@@ -1182,20 +2190,9 @@ impl ViewerSession {
             let archive = self.raw_archive(definition.prefix)?;
             let mut matching = BTreeMap::<u32, (RawResourceKey, bool)>::new();
             for record in archive.records() {
-                let classification = classify_record(CatalogRecordKey {
-                    archive: definition.prefix,
-                    group_code: 0,
-                    icon_id: record.key.block_index,
-                    block_index: record.key.block_index,
-                });
-                if classification.boundary_status == VerificationStatus::HumanVerified
-                    && classification.meaning_status == VerificationStatus::HumanVerified
-                    && classification
-                        .category
-                        .is_some_and(|category| category_matches(category.segments(), path))
-                {
+                let assembled = raw_layered_rule(definition.prefix, record.key).is_some();
+                if assembled {
                     let canonical_block = raw_canonical_block(definition.prefix, record.key);
-                    let assembled = raw_layered_rule(definition.prefix, record.key).is_some();
                     matching
                         .entry(canonical_block)
                         .or_insert((record.key, assembled));
@@ -1233,125 +2230,196 @@ impl ViewerSession {
             .split_whitespace()
             .map(str::to_lowercase)
             .collect::<Vec<_>>();
-        let assets = self
+        let mut assets = self
             .verified_search_assets()?
             .iter()
             .filter(|asset| search_asset_matches(asset, &terms))
             .cloned()
-            .collect();
+            .collect::<Vec<_>>();
+        let normalized_query = query.to_lowercase();
+        assets.sort_by(|left, right| {
+            search_asset_rank(left, &normalized_query)
+                .cmp(&search_asset_rank(right, &normalized_query))
+                .then_with(|| left.path.cmp(&right.path))
+                .then_with(|| left.asset.prefix.cmp(&right.asset.prefix))
+                .then_with(|| left.asset.canonical_block.cmp(&right.asset.canonical_block))
+        });
         Ok((query.to_owned(), assets))
     }
 
     fn verified_search_assets(&mut self) -> Result<&[VerifiedSearchAssetRef], ViewerSessionError> {
         if self.search_assets.is_none() {
-            let resource_directory = self
-                .resource_directory
-                .clone()
-                .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
-            let mut assets = Vec::new();
-
-            for prefix in INDEXED_ARCHIVE_PREFIXES {
-                if !resolve_archive_directory(&resource_directory, prefix)
-                    .join(format!("{prefix}000000.bin"))
+            let records = self
+                .active_text_catalog()
+                .map(TextCatalog::linked_images)
+                .unwrap_or_default();
+            let mut unique =
+                BTreeMap::<(Vec<String>, AssetIdentityKey), VerifiedSearchAssetRef>::new();
+            for record in records {
+                let prefix = record.image.archive.to_ascii_lowercase();
+                let archive = self.archive(&prefix)?;
+                let canonical_block = archive
+                    .assembly_canonical_block(record.image.block_index)
+                    .unwrap_or(record.image.block_index);
+                let assembled = archive.is_assembled(record.image.block_index);
+                let path =
+                    linked_category_path(&record.source_label, &prefix, record.image.group_code);
+                let search_text = format!(
+                    "{} {} {} {} {} {}",
+                    record.source,
+                    record.source_label,
+                    record.id,
+                    record.fields.join(" "),
+                    record.image.relation,
+                    prefix
+                );
+                let search_names = record
+                    .fields
+                    .iter()
+                    .find(|field| !field.is_empty())
+                    .cloned()
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                let asset = VerifiedAssetRef {
+                    prefix: prefix.clone(),
+                    key: ResourceKey {
+                        group_code: record.image.group_code,
+                        icon_id: record.image.icon_id,
+                        block_index: record.image.block_index,
+                    },
+                    raw_key: None,
+                    canonical_block,
+                    assembled,
+                };
+                unique
+                    .entry((path.clone(), asset_identity_key(&asset)))
+                    .and_modify(|existing| {
+                        existing.search_text.push(' ');
+                        existing.search_text.push_str(&search_text);
+                        existing.search_names.extend(search_names.clone());
+                    })
+                    .or_insert(VerifiedSearchAssetRef {
+                        path,
+                        asset,
+                        search_text,
+                        search_names,
+                    });
+            }
+            for asset in self.assembled_assets()? {
+                let path = physical_category_path(
+                    None,
+                    &asset.prefix,
+                    asset.key.group_code,
+                    true,
+                    asset.raw_key.is_none(),
+                );
+                let search_text = format!("{} {}", path.join(" "), asset.prefix);
+                unique
+                    .entry((path.clone(), asset_identity_key(&asset)))
+                    .or_insert(VerifiedSearchAssetRef {
+                        path,
+                        search_text,
+                        search_names: Vec::new(),
+                        asset,
+                    });
+            }
+            for prefix in SUPPORTED_ARCHIVE_PREFIXES {
+                if prefix == "gm"
+                    && gm_archive_path(
+                        self.resource_directory
+                            .as_deref()
+                            .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?,
+                    )
                     .is_file()
                 {
+                    let atlas_records = self.gm_archive()?.atlas_records().collect::<Vec<_>>();
+                    for record in atlas_records {
+                        let path = gm_atlas_category_path();
+                        let asset = VerifiedAssetRef {
+                            prefix: "gm".to_owned(),
+                            key: ResourceKey {
+                                group_code: GM_ATLAS_IDENTITY_GROUP,
+                                icon_id: record.atlas_block_index,
+                                block_index: record.key.block_index,
+                            },
+                            raw_key: Some(record.key),
+                            canonical_block: record.key.block_index,
+                            assembled: false,
+                        };
+                        unique.insert(
+                            (path.clone(), asset_identity_key(&asset)),
+                            VerifiedSearchAssetRef {
+                                search_text: format!(
+                                    "{} gm atlas {}",
+                                    path.join(" "),
+                                    record.atlas_block_index
+                                ),
+                                path,
+                                search_names: Vec::new(),
+                                asset,
+                            },
+                        );
+                    }
+                    let sprite_records = self.gm_archive()?.records().collect::<Vec<_>>();
+                    for record in sprite_records {
+                        let path = gm_sprite_category_path(record.atlas_block_index);
+                        let asset = VerifiedAssetRef {
+                            prefix: "gm".to_owned(),
+                            key: ResourceKey {
+                                group_code: record.atlas_block_index,
+                                icon_id: record.sprite_index,
+                                block_index: record.key.block_index,
+                            },
+                            raw_key: Some(record.key),
+                            canonical_block: record.key.block_index,
+                            assembled: false,
+                        };
+                        unique.insert(
+                            (path.clone(), asset_identity_key(&asset)),
+                            VerifiedSearchAssetRef {
+                                search_text: format!(
+                                    "{} gm sprite {} atlas {}",
+                                    path.join(" "),
+                                    record.sprite_index,
+                                    record.atlas_block_index
+                                ),
+                                path,
+                                search_names: Vec::new(),
+                                asset,
+                            },
+                        );
+                    }
                     continue;
                 }
-                let archive = self.archive(prefix)?;
-                let mut unique = BTreeMap::<(Vec<String>, u32), ResourceKey>::new();
-                for record in archive.records() {
-                    let classification = classify_record(CatalogRecordKey {
-                        archive: prefix,
-                        group_code: record.group_code,
-                        icon_id: record.icon_id,
-                        block_index: record.block_index,
-                    });
-                    if classification.boundary_status != VerificationStatus::HumanVerified
-                        || classification.meaning_status != VerificationStatus::HumanVerified
-                    {
-                        continue;
-                    }
-                    let Some(category) = classification.category else {
-                        continue;
-                    };
-                    let canonical_block = indexed_canonical_block(prefix, record.block_index);
-                    let path = category
-                        .segments()
-                        .iter()
-                        .map(|segment| (*segment).to_owned())
-                        .collect();
+                for asset in self.unlinked_assets(prefix)? {
+                    let source_label = self
+                        .active_text_catalog()
+                        .ok()
+                        .and_then(|catalog| {
+                            catalog
+                                .source_label_for_image_group(&asset.prefix, asset.key.group_code)
+                        })
+                        .map(str::to_owned);
+                    let path = physical_category_path(
+                        source_label.as_deref(),
+                        &asset.prefix,
+                        asset.key.group_code,
+                        false,
+                        asset.raw_key.is_none(),
+                    );
+                    let search_text =
+                        format!("{} {} {}", path.join(" "), prefix, asset.key.icon_id);
                     unique
-                        .entry((path, canonical_block))
-                        .or_insert(ResourceKey {
-                            group_code: record.group_code,
-                            icon_id: record.icon_id,
-                            block_index: record.block_index,
+                        .entry((path.clone(), asset_identity_key(&asset)))
+                        .or_insert(VerifiedSearchAssetRef {
+                            path,
+                            search_text,
+                            search_names: Vec::new(),
+                            asset,
                         });
                 }
-                assets.extend(unique.into_iter().map(|((path, canonical_block), key)| {
-                    VerifiedSearchAssetRef {
-                        path,
-                        asset: VerifiedAssetRef {
-                            prefix: prefix.to_owned(),
-                            key,
-                            raw_key: None,
-                            canonical_block,
-                            assembled: indexed_assembled(prefix, canonical_block),
-                        },
-                    }
-                }));
             }
-            for definition in RAW_IMAGE_ARCHIVES {
-                if !raw_archive_path(&resource_directory, definition)
-                    .is_some_and(|path| path.is_file())
-                {
-                    continue;
-                }
-                let archive = self.raw_archive(definition.prefix)?;
-                let mut raw_assets = BTreeMap::<(Vec<String>, u32), (RawResourceKey, bool)>::new();
-                for record in archive.records() {
-                    let classification = classify_record(CatalogRecordKey {
-                        archive: definition.prefix,
-                        group_code: 0,
-                        icon_id: record.key.block_index,
-                        block_index: record.key.block_index,
-                    });
-                    if classification.boundary_status != VerificationStatus::HumanVerified
-                        || classification.meaning_status != VerificationStatus::HumanVerified
-                    {
-                        continue;
-                    }
-                    let Some(category) = classification.category else {
-                        continue;
-                    };
-                    let path = category
-                        .segments()
-                        .iter()
-                        .map(|segment| (*segment).to_owned())
-                        .collect::<Vec<_>>();
-                    let canonical_block = raw_canonical_block(definition.prefix, record.key);
-                    let assembled = raw_layered_rule(definition.prefix, record.key).is_some();
-                    raw_assets
-                        .entry((path, canonical_block))
-                        .or_insert((record.key, assembled));
-                }
-                assets.extend(raw_assets.into_iter().map(
-                    |((path, canonical_block), (raw_key, assembled))| VerifiedSearchAssetRef {
-                        path,
-                        asset: VerifiedAssetRef {
-                            prefix: definition.prefix.to_owned(),
-                            key: ResourceKey {
-                                group_code: 0,
-                                icon_id: raw_key.block_index,
-                                block_index: raw_key.block_index,
-                            },
-                            raw_key: Some(raw_key),
-                            canonical_block,
-                            assembled,
-                        },
-                    },
-                ));
-            }
+            let mut assets = unique.into_values().collect::<Vec<_>>();
             assets.sort_by(|left, right| {
                 left.path
                     .cmp(&right.path)
@@ -1418,18 +2486,69 @@ impl ViewerSession {
             .get(&normalized)
             .expect("raw archive was inserted before lookup"))
     }
-}
 
-fn category_matches(segments: &[&str], path: &[String]) -> bool {
-    segments.len() == path.len()
-        && segments
-            .iter()
-            .zip(path)
-            .all(|(segment, expected)| *segment == expected)
+    fn gm_archive(&mut self) -> Result<&LoadedGmAtlasArchive, ViewerSessionError> {
+        let resource_directory = self
+            .resource_directory
+            .clone()
+            .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
+        if self.gm_archive.is_none() {
+            let archive = LoadedGmAtlasArchive::open_files(
+                resolve_archive_directory(&resource_directory, "gm"),
+                GM_ATLAS_FILE_NUMBERS,
+                MAX_IMAGE_DECODE_SIZE,
+            )
+            .map_err(|source| ViewerSessionError::OpenArchive {
+                prefix: "gm".to_owned(),
+                source,
+            })?;
+            self.gm_archive = Some(archive);
+        }
+        Ok(self.gm_archive.as_ref().expect("GM archive initialized"))
+    }
+
+    fn standalone_archive(
+        &mut self,
+        prefix: &str,
+    ) -> Result<&LoadedStandaloneImageArchive, ViewerSessionError> {
+        let normalized = prefix.to_ascii_lowercase();
+        let resource_directory = self
+            .resource_directory
+            .clone()
+            .ok_or(ViewerSessionError::ResourceDirectoryNotSelected)?;
+        let path = standalone_image_path(&resource_directory, &normalized).ok_or_else(|| {
+            ViewerSessionError::RawArchiveDefinitionMissing {
+                prefix: normalized.clone(),
+            }
+        })?;
+        if !self.standalone_archives.contains_key(&normalized) {
+            let archive = match normalized.as_str() {
+                "cu" => LoadedStandaloneImageArchive::open_cursor(path, MAX_IMAGE_DECODE_SIZE),
+                "ft" => LoadedStandaloneImageArchive::open_font(path, MAX_IMAGE_DECODE_SIZE),
+                "wm" => LoadedStandaloneImageArchive::open_xftx(path),
+                _ => unreachable!("standalone prefix was validated"),
+            }
+            .map_err(|source| ViewerSessionError::OpenArchive {
+                prefix: normalized.clone(),
+                source,
+            })?;
+            self.standalone_archives.insert(normalized.clone(), archive);
+        }
+        Ok(self
+            .standalone_archives
+            .get(&normalized)
+            .expect("standalone archive initialized"))
+    }
 }
 
 fn search_asset_matches(asset: &VerifiedSearchAssetRef, terms: &[String]) -> bool {
-    let text = format!("{} {}", asset.path.join(" "), asset.asset.prefix).to_lowercase();
+    let text = format!(
+        "{} {} {}",
+        asset.path.join(" "),
+        asset.asset.prefix,
+        asset.search_text
+    )
+    .to_lowercase();
     let icon_id = asset.asset.key.icon_id.to_string();
     let block_index = asset.asset.canonical_block.to_string();
     terms.iter().all(|term| {
@@ -1439,6 +2558,23 @@ fn search_asset_matches(asset: &VerifiedSearchAssetRef, terms: &[String]) -> boo
             text.contains(term)
         }
     })
+}
+
+fn search_asset_rank(asset: &VerifiedSearchAssetRef, query: &str) -> u8 {
+    let names = asset
+        .search_names
+        .iter()
+        .map(|name| name.to_lowercase())
+        .collect::<Vec<_>>();
+    if names.iter().any(|name| name == query) {
+        0
+    } else if names.iter().any(|name| name.starts_with(query)) {
+        1
+    } else if names.iter().any(|name| name.contains(query)) {
+        2
+    } else {
+        3
+    }
 }
 
 fn png_data_url(png: &[u8]) -> String {
@@ -1468,7 +2604,9 @@ pub fn inspect_game_directory(
     }
 
     let mut archives = Vec::new();
-    let mut verified_assets = BTreeMap::<Vec<&'static str>, BTreeSet<(String, u32)>>::new();
+    let mut verified_assets = BTreeMap::<Vec<String>, BTreeSet<AssetIdentityKey>>::new();
+    let mut indexed_assembly_layouts = BTreeMap::<String, IndexedAssemblyLayout>::new();
+    let text_catalog = TextCatalog::load(game_directory).ok();
     for prefix in INDEXED_ARCHIVE_PREFIXES {
         let path = resolve_archive_directory(&resource_directory, prefix)
             .join(format!("{prefix}000000.bin"));
@@ -1487,26 +2625,25 @@ pub fn inspect_game_directory(
                 source,
             })?;
         let header = index.header;
+        let assemblies = resolve_indexed_assembly_layout(prefix, &index.records);
         for record in &index.records {
-            let classification = classify_record(CatalogRecordKey {
-                archive: prefix,
-                group_code: record.group_code,
-                icon_id: record.icon_id,
-                block_index: record.block_index,
+            let canonical_block = assemblies
+                .canonical_block(record.block_index)
+                .unwrap_or(record.block_index);
+            let assembled = assemblies.is_assembled(record.block_index);
+            let source_label = text_catalog.as_ref().and_then(|catalog| {
+                catalog.source_label_for_image_group(prefix, record.group_code)
             });
-            if classification.boundary_status != VerificationStatus::HumanVerified
-                || classification.meaning_status != VerificationStatus::HumanVerified
-            {
-                continue;
-            }
-            let Some(category) = classification.category else {
-                continue;
-            };
-            let canonical_block = indexed_canonical_block(prefix, record.block_index);
+            let category_path =
+                physical_category_path(source_label, prefix, record.group_code, assembled, true);
             verified_assets
-                .entry(category.segments().to_vec())
+                .entry(category_path)
                 .or_default()
-                .insert((prefix.to_owned(), canonical_block));
+                .insert(if assembled {
+                    (prefix.to_owned(), 0, canonical_block, 0)
+                } else {
+                    (prefix.to_owned(), 2, record.group_code, record.icon_id)
+                });
         }
         archives.push(ArchiveSummary {
             prefix: prefix.to_owned(),
@@ -1516,6 +2653,7 @@ pub fn inspect_game_directory(
             image_block_count: header.image_block_count,
             archive_count: header.archive_count,
         });
+        indexed_assembly_layouts.insert(prefix.to_owned(), assemblies);
     }
 
     for definition in RAW_IMAGE_ARCHIVES {
@@ -1536,24 +2674,23 @@ pub fn inspect_game_directory(
         })?;
         let records = archive.records().collect::<Vec<_>>();
         for record in &records {
-            let classification = classify_record(CatalogRecordKey {
-                archive: definition.prefix,
-                group_code: 0,
-                icon_id: record.key.block_index,
-                block_index: record.key.block_index,
-            });
-            if classification.boundary_status != VerificationStatus::HumanVerified
-                || classification.meaning_status != VerificationStatus::HumanVerified
-            {
-                continue;
-            }
-            if let Some(category) = classification.category {
-                let canonical_block = raw_canonical_block(definition.prefix, record.key);
-                verified_assets
-                    .entry(category.segments().to_vec())
-                    .or_default()
-                    .insert((definition.prefix.to_owned(), canonical_block));
-            }
+            let canonical_block = raw_canonical_block(definition.prefix, record.key);
+            let assembled = raw_layered_rule(definition.prefix, record.key).is_some();
+            let category_path =
+                physical_category_path(None, definition.prefix, 0, assembled, false);
+            verified_assets
+                .entry(category_path)
+                .or_default()
+                .insert(if assembled {
+                    (definition.prefix.to_owned(), 0, canonical_block, 0)
+                } else {
+                    (
+                        definition.prefix.to_owned(),
+                        1,
+                        record.key.file_number,
+                        record.key.file_block_index,
+                    )
+                });
         }
         archives.push(ArchiveSummary {
             prefix: definition.prefix.to_owned(),
@@ -1562,6 +2699,92 @@ pub fn inspect_game_directory(
             group_count: 0,
             image_block_count: u32::try_from(records.len()).unwrap_or(u32::MAX),
             archive_count: archive.archive_count(),
+        });
+    }
+    if gm_archive_path(&resource_directory).is_file() {
+        let archive = LoadedGmAtlasArchive::open_files(
+            resolve_archive_directory(&resource_directory, "gm"),
+            GM_ATLAS_FILE_NUMBERS,
+            MAX_IMAGE_DECODE_SIZE,
+        )
+        .map_err(|source| GameDirectoryError::OpenArchive {
+            prefix: "gm".to_owned(),
+            source,
+        })?;
+        let atlas_records = archive.atlas_records().collect::<Vec<_>>();
+        for record in &atlas_records {
+            verified_assets
+                .entry(gm_atlas_category_path())
+                .or_default()
+                .insert((
+                    "gm".to_owned(),
+                    3,
+                    record.key.file_number,
+                    record.atlas_block_index,
+                ));
+        }
+        let sprite_records = archive.records().collect::<Vec<_>>();
+        for record in &sprite_records {
+            verified_assets
+                .entry(gm_sprite_category_path(record.atlas_block_index))
+                .or_default()
+                .insert((
+                    "gm".to_owned(),
+                    4,
+                    record.atlas_block_index,
+                    record.sprite_index,
+                ));
+        }
+        archives.push(ArchiveSummary {
+            prefix: "gm".to_owned(),
+            has_index: false,
+            record_count: u32::try_from(atlas_records.len().saturating_add(sprite_records.len()))
+                .unwrap_or(u32::MAX),
+            group_count: 0,
+            image_block_count: u32::try_from(
+                atlas_records.len().saturating_add(sprite_records.len()),
+            )
+            .unwrap_or(u32::MAX),
+            archive_count: archive.archive_count(),
+        });
+    }
+    for prefix in ["cu", "ft", "wm"] {
+        let Some(path) = standalone_image_path(&resource_directory, prefix) else {
+            continue;
+        };
+        if !path.is_file() {
+            continue;
+        }
+        let archive = match prefix {
+            "cu" => LoadedStandaloneImageArchive::open_cursor(&path, MAX_IMAGE_DECODE_SIZE),
+            "ft" => LoadedStandaloneImageArchive::open_font(&path, MAX_IMAGE_DECODE_SIZE),
+            "wm" => LoadedStandaloneImageArchive::open_xftx(&path),
+            _ => unreachable!(),
+        }
+        .map_err(|source| GameDirectoryError::OpenArchive {
+            prefix: prefix.to_owned(),
+            source,
+        })?;
+        let records = archive.records().collect::<Vec<_>>();
+        let category_path = physical_category_path(None, prefix, 0, false, false);
+        for record in &records {
+            verified_assets
+                .entry(category_path.clone())
+                .or_default()
+                .insert((
+                    prefix.to_owned(),
+                    1,
+                    record.key.file_number,
+                    record.key.file_block_index,
+                ));
+        }
+        archives.push(ArchiveSummary {
+            prefix: prefix.to_owned(),
+            has_index: false,
+            record_count: u32::try_from(records.len()).unwrap_or(u32::MAX),
+            group_count: 0,
+            image_block_count: u32::try_from(records.len()).unwrap_or(u32::MAX),
+            archive_count: 1,
         });
     }
     archives.sort_by_key(|archive| {
@@ -1577,6 +2800,32 @@ pub fn inspect_game_directory(
         });
     }
 
+    if let Some(catalog) = text_catalog.as_ref() {
+        for record in catalog.linked_images() {
+            let prefix = record.image.archive.to_ascii_lowercase();
+            let canonical_block = indexed_assembly_layouts
+                .get(&prefix)
+                .and_then(|layout| layout.canonical_block(record.image.block_index))
+                .unwrap_or(record.image.block_index);
+            let assembled = indexed_assembly_layouts
+                .get(&prefix)
+                .is_some_and(|layout| layout.is_assembled(record.image.block_index));
+            verified_assets
+                .entry(linked_category_path(
+                    &record.source_label,
+                    &prefix,
+                    record.image.group_code,
+                ))
+                .or_default()
+                .insert(if assembled {
+                    (prefix, 0, canonical_block, 0)
+                } else {
+                    (prefix, 2, record.image.group_code, record.image.icon_id)
+                });
+        }
+    }
+
+    let catalog_diagnostics = catalog_diagnostics(&verified_assets);
     Ok(GameDirectorySummary {
         game_directory: game_directory.to_string_lossy().into_owned(),
         resource_directory: resource_directory.to_string_lossy().into_owned(),
@@ -1584,16 +2833,83 @@ pub fn inspect_game_directory(
         verified_categories: verified_assets
             .into_iter()
             .map(|(path, assets)| VerifiedCategorySummary {
-                path: path.into_iter().map(str::to_owned).collect(),
+                path,
                 asset_count: assets.len(),
             })
             .collect(),
+        catalog_diagnostics,
     })
+}
+
+fn catalog_diagnostics(
+    categories: &BTreeMap<Vec<String>, BTreeSet<AssetIdentityKey>>,
+) -> CatalogDiagnosticsSummary {
+    let mut asset_paths = BTreeMap::<AssetIdentityKey, BTreeSet<Vec<String>>>::new();
+    let unclassified_categories = categories
+        .iter()
+        .filter(|(path, _)| path.first().is_some_and(|segment| segment == "미분류"))
+        .map(|(path, assets)| VerifiedCategorySummary {
+            path: path.clone(),
+            asset_count: assets.len(),
+        })
+        .collect::<Vec<_>>();
+    for (path, assets) in categories {
+        for asset in assets {
+            asset_paths
+                .entry(asset.clone())
+                .or_default()
+                .insert(path.clone());
+        }
+    }
+
+    let categorized_asset_count = asset_paths
+        .values()
+        .filter(|paths| {
+            paths.iter().any(|path| {
+                path.first()
+                    .is_none_or(|segment| segment.as_str() != "미분류")
+            })
+        })
+        .count();
+    let unclassified_asset_count = asset_paths.len().saturating_sub(categorized_asset_count);
+    let multiple_category_asset_count =
+        asset_paths.values().filter(|paths| paths.len() > 1).count();
+    let multiple_category_assets = asset_paths
+        .iter()
+        .filter(|(_, paths)| paths.len() > 1)
+        .take(100)
+        .map(
+            |((archive, kind, primary_id, secondary_id), paths)| CatalogMultipleCategoryAsset {
+                archive: archive.clone(),
+                identity_kind: match kind {
+                    0 => "조립 이미지",
+                    1 => "원시 블록",
+                    3 => "GM 원본 아틀라스",
+                    4 => "GM 스프라이트",
+                    _ => "인덱스 이미지",
+                }
+                .to_owned(),
+                primary_id: *primary_id,
+                secondary_id: *secondary_id,
+                category_paths: paths.iter().cloned().collect(),
+            },
+        )
+        .collect();
+
+    CatalogDiagnosticsSummary {
+        total_asset_count: asset_paths.len(),
+        categorized_asset_count,
+        unclassified_asset_count,
+        multiple_category_asset_count,
+        unclassified_categories,
+        multiple_category_assets,
+    }
 }
 
 #[derive(Debug)]
 pub enum ViewerSessionError {
     ResourceDirectoryNotSelected,
+    GameDirectoryNotFound,
     EmptyCategoryPath,
     EmptySearchQuery,
     InvalidPageSize {
@@ -1628,6 +2944,13 @@ pub enum ViewerSessionError {
         prefix: String,
         block_index: u32,
     },
+    OpenTextCatalog(TextCatalogError),
+    TextPage(TextCatalogPageError),
+    TextImageNotFound {
+        prefix: String,
+        group_code: u32,
+        icon_id: u32,
+    },
 }
 
 impl fmt::Display for ViewerSessionError {
@@ -1635,6 +2958,12 @@ impl fmt::Display for ViewerSessionError {
         match self {
             Self::ResourceDirectoryNotSelected => {
                 write!(formatter, "먼저 게임 폴더를 선택해 주세요.")
+            }
+            Self::GameDirectoryNotFound => {
+                write!(
+                    formatter,
+                    "선택한 리소스 폴더에서 게임 폴더를 확인하지 못했습니다."
+                )
             }
             Self::EmptyCategoryPath => write!(formatter, "카테고리 경로가 비어 있습니다."),
             Self::EmptySearchQuery => write!(formatter, "검색어를 입력해 주세요."),
@@ -1690,6 +3019,20 @@ impl fmt::Display for ViewerSessionError {
                 formatter,
                 "{prefix} 이미지 {block_index}의 검증된 조립 규칙을 찾지 못했습니다."
             ),
+            Self::OpenTextCatalog(source) => {
+                write!(formatter, "텍스트 자료를 열지 못했습니다: {source}")
+            }
+            Self::TextPage(source) => {
+                write!(formatter, "텍스트 자료를 불러오지 못했습니다: {source}")
+            }
+            Self::TextImageNotFound {
+                prefix,
+                group_code,
+                icon_id,
+            } => write!(
+                formatter,
+                "연결된 이미지를 찾지 못했습니다: {prefix} 그룹 {group_code}, ID {icon_id}"
+            ),
         }
     }
 }
@@ -1698,7 +3041,10 @@ impl Error for ViewerSessionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::OpenArchive { source, .. } | Self::Extract { source, .. } => Some(source),
+            Self::OpenTextCatalog(source) => Some(source),
+            Self::TextPage(source) => Some(source),
             Self::ResourceDirectoryNotSelected
+            | Self::GameDirectoryNotFound
             | Self::EmptyCategoryPath
             | Self::EmptySearchQuery
             | Self::InvalidPageSize { .. }
@@ -1707,6 +3053,7 @@ impl Error for ViewerSessionError {
             | Self::AssetNotFound { .. }
             | Self::OffsetOutOfRange { .. }
             | Self::AssemblyRuleMissing { .. } => None,
+            Self::TextImageNotFound { .. } => None,
         }
     }
 }
@@ -1812,6 +3159,70 @@ mod tests {
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
+    fn maps_user_verified_logical_groups_without_block_ranges() {
+        for (archive, group_code, expected) in [
+            ("sa", 2, "선박 그레이드 보너스"),
+            ("sb", 25, "선박데코"),
+            ("sb", 26, "선원장비"),
+            ("sc", 4, "돛 무늬"),
+            ("sc", 5, "주점 메뉴"),
+            ("sc", 6, "포커"),
+            ("sc", 7, "이벤트"),
+            ("sc", 8, "부관"),
+            ("sc", 10, "아팔타멘토 타입"),
+            ("sc", 14, "개인농장 시설"),
+            ("sc", 16, "테크닉"),
+            ("sc", 20, "대학·학술협회"),
+            ("sc", 26, "트레져헌트 테마"),
+            ("sc", 31, "전승(획득)"),
+            ("sc", 32, "트레져헌트 렐릭"),
+            ("sc", 33, "레거시 테마"),
+            ("sc", 34, "추구 생산"),
+            ("sc", 35, "위인의 장 테마"),
+            ("sc", 36, "잠재능력"),
+            ("sd", 4, "입항허가"),
+            ("sd", 29, "전승(획득/큰이미지)"),
+            ("sf", 1, "레거시"),
+            ("sy", 0, "역사적 사건"),
+        ] {
+            assert_eq!(
+                user_verified_group_category_path(archive, group_code),
+                Some(vec![expected.to_owned()])
+            );
+        }
+        assert_eq!(user_verified_group_category_path("sc", 3), None);
+    }
+
+    #[test]
+    fn reports_unclassified_and_multiple_category_assets_from_reverse_index() {
+        let categorized = ("sa".to_owned(), 2, 0, 1);
+        let unclassified = ("sb".to_owned(), 2, 21, 42);
+        let multiple = ("sc".to_owned(), 2, 16, 7);
+        let mut categories = BTreeMap::<Vec<String>, BTreeSet<AssetIdentityKey>>::new();
+        categories.insert(
+            vec!["스킬".to_owned()],
+            BTreeSet::from([categorized, multiple.clone()]),
+        );
+        categories.insert(vec!["테크닉".to_owned()], BTreeSet::from([multiple]));
+        categories.insert(
+            vec!["미분류".to_owned(), "SB".to_owned(), "그룹 21".to_owned()],
+            BTreeSet::from([unclassified]),
+        );
+
+        let diagnostics = catalog_diagnostics(&categories);
+        assert_eq!(diagnostics.total_asset_count, 3);
+        assert_eq!(diagnostics.categorized_asset_count, 2);
+        assert_eq!(diagnostics.unclassified_asset_count, 1);
+        assert_eq!(diagnostics.multiple_category_asset_count, 1);
+        assert_eq!(diagnostics.unclassified_categories[0].asset_count, 1);
+        assert_eq!(diagnostics.multiple_category_assets.len(), 1);
+        assert_eq!(
+            diagnostics.multiple_category_assets[0].category_paths,
+            [vec!["스킬".to_owned()], vec!["테크닉".to_owned()]]
+        );
+    }
+
+    #[test]
     fn maps_only_world_clock_body_sources_to_the_composite_asset() {
         for block_index in [8_815, 8_818, 8_826, 8_829] {
             assert_eq!(indexed_canonical_block("sd", block_index), 8_815);
@@ -1872,13 +3283,12 @@ mod tests {
             48,
             image_block_count,
             1,
-            0,
         ] {
             push_u32(&mut bytes, value);
         }
         for record in records {
-            for value in record {
-                push_u32(&mut bytes, *value);
+            for value in [record[4], record[0], record[1], record[2], record[3]] {
+                push_u32(&mut bytes, value);
             }
         }
         fs::write(path, bytes).expect("write test index");
@@ -1949,6 +3359,7 @@ mod tests {
             thumbnail_height: 1,
             assembled: false,
             thumbnail_data_url: "x".repeat(data_url_bytes),
+            text_links: Vec::new(),
         }
     }
 
@@ -2089,57 +3500,38 @@ mod tests {
         assert_eq!(summary.archives[0].group_count, 1);
         assert_eq!(summary.archives[0].image_block_count, 1);
         assert_eq!(summary.archives[0].archive_count, 1);
+        assert_eq!(summary.verified_categories.len(), 12);
         assert_eq!(
-            summary.verified_categories,
-            [
-                VerifiedCategorySummary {
-                    path: ["UI 아이콘", "원형 아이콘"].map(str::to_owned).to_vec(),
-                    asset_count: 1,
-                },
-                VerifiedCategorySummary {
-                    path: ["UI 이미지", "버튼"].map(str::to_owned).to_vec(),
-                    asset_count: 2,
-                },
-                VerifiedCategorySummary {
-                    path: ["UI 이미지", "텍스트 라벨"].map(str::to_owned).to_vec(),
-                    asset_count: 1,
-                },
-                VerifiedCategorySummary {
-                    path: ["이벤트", "삽화"].map(str::to_owned).to_vec(),
-                    asset_count: 1,
-                },
-                VerifiedCategorySummary {
-                    path: ["이벤트", "포트레잇"].map(str::to_owned).to_vec(),
-                    asset_count: 2,
-                },
-                VerifiedCategorySummary {
-                    path: ["인물", "부관 스킬"].map(str::to_owned).to_vec(),
-                    asset_count: 1,
-                },
-                VerifiedCategorySummary {
-                    path: ["인물", "캐릭터 얼굴"].map(str::to_owned).to_vec(),
-                    asset_count: 1,
-                },
-                VerifiedCategorySummary {
-                    path: ["장비", "방어구", "몸"].map(str::to_owned).to_vec(),
-                    asset_count: 1,
-                },
-                VerifiedCategorySummary {
-                    path: ["지도", "국가 선택 지도"].map(str::to_owned).to_vec(),
-                    asset_count: 1,
-                },
-                VerifiedCategorySummary {
-                    path: ["클라이언트", "로딩·스플래시 이미지"]
-                        .map(str::to_owned)
-                        .to_vec(),
-                    asset_count: 1,
-                },
-            ]
+            summary
+                .verified_categories
+                .iter()
+                .map(|category| category.asset_count)
+                .sum::<usize>(),
+            13
         );
+        for expected in [
+            ["미분류", "SA", "그룹 0"].as_slice(),
+            ["미분류", "SB", "그룹 10"].as_slice(),
+            ["레거시"].as_slice(),
+            ["미분류", "IS", "그룹 20"].as_slice(),
+        ] {
+            assert!(
+                summary
+                    .verified_categories
+                    .iter()
+                    .any(|category| category.path == expected)
+            );
+        }
+        assert!(!summary.verified_categories.iter().any(|category| {
+            matches!(
+                category.path.first().map(String::as_str),
+                Some("UI 이미지" | "이벤트" | "인물" | "클라이언트")
+            )
+        }));
     }
 
     #[test]
-    fn loads_verified_thumbnails_from_the_secondary_resource_directory() {
+    fn loads_uncategorized_thumbnails_from_the_secondary_resource_directory() {
         let directory = TestDirectory::new();
         let primary_resources = directory.prepare_game();
         let resource_root = primary_resources.parent().expect("0010 directory");
@@ -2157,7 +3549,7 @@ mod tests {
 
         let mut session = ViewerSession::default();
         session.set_resource_directory(resource_root);
-        let category = ["인물", "캐릭터 얼굴"].map(str::to_owned);
+        let category = ["미분류", "SW", "그룹 0"].map(str::to_owned);
         let page = session
             .category_page(&category, 0, 1)
             .expect("load SW thumbnail page");
@@ -2176,16 +3568,16 @@ mod tests {
     }
 
     #[test]
-    fn summarizes_only_verified_unique_and_assembled_assets() {
+    fn summarizes_every_logical_asset_without_legacy_block_categories() {
         let directory = TestDirectory::new();
         let resources = directory.prepare_game();
         write_index_records(
             &resources.join("sb000000.bin"),
             &[
                 [100_100, 0, 48, 48, 1],
-                [100_101, 0, 48, 48, 2],
+                [100_101, 0, 48, 48, 1],
                 [100_102, 1, 48, 48, 1],
-                [1_200_002, 2, 48, 48, 1],
+                [1_200_002, 2, 48, 48, 16],
             ],
             3,
         );
@@ -2195,40 +3587,43 @@ mod tests {
         write_index_records(&resources.join("sd000000.bin"), &sd_records, 10_396);
 
         let summary = inspect_game_directory(&directory.0).expect("inspect categorized game");
-        let head = summary
+        let sb_group_one = summary
             .verified_categories
             .iter()
-            .find(|category| category.path == ["장비", "방어구", "머리"])
-            .expect("head equipment category");
-        let book = summary
+            .find(|category| category.path == ["미분류", "SB", "그룹 1"])
+            .expect("unclassified SB group 1");
+        let assembled = summary
             .verified_categories
             .iter()
-            .find(|category| category.path == ["UI 이미지", "예지의 서", "표지"])
-            .expect("Book of Wisdom category");
+            .find(|category| category.path == ["조립 이미지", "SD"])
+            .expect("generic assembled image category");
 
-        assert_eq!(head.asset_count, 2);
-        assert_eq!(book.asset_count, 1);
+        assert_eq!(sb_group_one.asset_count, 3);
+        assert_eq!(assembled.asset_count, 1);
         assert_eq!(
             summary
                 .verified_categories
                 .iter()
                 .map(|category| category.asset_count)
                 .sum::<usize>(),
-            3
+            5
         );
+        assert!(!summary.verified_categories.iter().any(|category| {
+            category.path == ["장비", "머리"] || category.path == ["UI 이미지", "예지의 서", "표지"]
+        }));
     }
 
     #[test]
-    fn pages_verified_category_thumbnails_without_duplicate_blocks() {
+    fn pages_group_fallback_thumbnails_for_each_logical_icon_id() {
         let directory = TestDirectory::new();
         let resources = directory.prepare_game();
         write_index_records(
             &resources.join("sb000000.bin"),
             &[
                 [100_100, 0, 2, 1, 1],
-                [100_101, 0, 2, 1, 2],
+                [100_101, 0, 2, 1, 1],
                 [100_102, 1, 1, 2, 1],
-                [1_200_002, 2, 1, 1, 1],
+                [1_200_002, 2, 1, 1, 16],
             ],
             3,
         );
@@ -2242,7 +3637,7 @@ mod tests {
         );
         let mut session = ViewerSession::default();
         session.set_resource_directory(&resources);
-        let category = ["장비", "방어구", "머리"].map(str::to_owned);
+        let category = ["미분류", "SB", "그룹 1"].map(str::to_owned);
 
         let first = session
             .category_page(&category, 0, 1)
@@ -2250,10 +3645,14 @@ mod tests {
         let second = session
             .category_page(&category, 1, 1)
             .expect("load second thumbnail page");
+        let third = session
+            .category_page(&category, 2, 1)
+            .expect("load third thumbnail page");
 
-        assert_eq!(first.total_count, 2);
+        assert_eq!(first.total_count, 3);
         assert_eq!(first.items.len(), 1);
         assert_eq!(first.items[0].block_index, 0);
+        assert_eq!(first.items[0].icon_id, Some(100_100));
         assert_eq!(
             (first.items[0].source_width, first.items[0].source_height),
             (2, 1)
@@ -2264,7 +3663,10 @@ mod tests {
                 .thumbnail_data_url
                 .starts_with("data:image/png;base64,")
         );
-        assert_eq!(second.items[0].block_index, 1);
+        assert_eq!(second.items[0].block_index, 0);
+        assert_eq!(second.items[0].icon_id, Some(100_101));
+        assert_eq!(third.items[0].block_index, 1);
+        assert_eq!(third.items[0].icon_id, Some(100_102));
 
         let detail = session
             .asset_detail(&category, "SB", 0)
@@ -2289,13 +3691,17 @@ mod tests {
         let category_assets = session
             .category_assets(&category)
             .expect("load verified category assets");
-        assert_eq!(category_assets.len(), 2);
+        assert_eq!(category_assets.len(), 3);
         assert_eq!(category_assets[0].archive(), "sb");
         assert_eq!(category_assets[0].icon_id(), Some(100_100));
         assert_eq!(category_assets[0].block_index(), 0);
         assert!(!category_assets[0].assembled());
+        assert_eq!(category_assets[1].icon_id(), Some(100_101));
+        assert_eq!(category_assets[1].block_index(), 0);
+        assert_eq!(category_assets[2].icon_id(), Some(100_102));
+        assert_eq!(category_assets[2].block_index(), 1);
         let category_png = session
-            .category_asset_png(&category_assets[1])
+            .category_asset_png(&category_assets[2])
             .expect("extract category asset directly");
         assert_eq!(category_png.block_index, 1);
         assert_eq!(&category_png.png[..8], b"\x89PNG\r\n\x1a\n");
@@ -2327,18 +3733,18 @@ mod tests {
             ViewerSessionError::AssetNotFound { block_index: 2, .. }
         ));
 
-        let error = session.category_page(&category, 2, 1).unwrap_err();
+        let error = session.category_page(&category, 3, 1).unwrap_err();
         assert!(matches!(
             error,
             ViewerSessionError::OffsetOutOfRange {
-                offset: 2,
-                total_count: 2,
+                offset: 3,
+                total_count: 3,
             }
         ));
     }
 
     #[test]
-    fn searches_only_verified_assets_and_pages_thumbnails() {
+    fn searches_all_assets_and_pages_thumbnails() {
         let directory = TestDirectory::new();
         let resources = directory.prepare_game();
         write_index_records(
@@ -2362,16 +3768,16 @@ mod tests {
         session.set_resource_directory(&resources);
 
         let category_page = session
-            .search_page("SB 방어구 머리", 0, 1)
+            .search_page("SB", 0, 1)
             .expect("search verified category");
-        assert_eq!(category_page.total_count, 2);
+        assert_eq!(category_page.total_count, 3);
         assert_eq!(category_page.items.len(), 1);
-        assert_eq!(category_page.items[0].path, ["장비", "방어구", "머리"]);
+        assert_eq!(category_page.items[0].path, ["미분류", "SB", "그룹 1"]);
         assert_eq!(category_page.items[0].thumbnail.icon_id, Some(100_100));
         assert!(session.search_assets.is_some());
 
         let second_page = session
-            .search_page("머리", 1, 1)
+            .search_page("SB", 1, 1)
             .expect("reuse the search index for the next page");
         assert_eq!(second_page.items[0].thumbnail.icon_id, Some(100_101));
 
@@ -2382,10 +3788,10 @@ mod tests {
         assert_eq!(id_page.items[0].thumbnail.block_index, 0);
 
         let search_assets = session
-            .search_assets("머리")
+            .search_assets("SB")
             .expect("list matching search assets without thumbnails");
-        assert_eq!(search_assets.len(), 2);
-        assert_eq!(search_assets[0].path(), ["장비", "방어구", "머리"]);
+        assert_eq!(search_assets.len(), 3);
+        assert_eq!(search_assets[0].path(), ["미분류", "SB", "그룹 1"]);
         assert_eq!(search_assets[1].icon_id(), Some(100_101));
         let search_png = session
             .search_asset_png(&search_assets[1])
@@ -2403,10 +3809,10 @@ mod tests {
             .update_page(&added_assets, 0, 1)
             .expect("page verified newly added assets");
         assert_eq!(update_page.detected_record_count, 4);
-        assert_eq!(update_page.review_required_count, 1);
-        assert_eq!(update_page.total_count, 2);
+        assert_eq!(update_page.review_required_count, 0);
+        assert_eq!(update_page.total_count, 3);
         assert_eq!(update_page.items.len(), 1);
-        assert_eq!(update_page.items[0].path, ["장비", "방어구", "머리"]);
+        assert_eq!(update_page.items[0].path, ["미분류", "SB", "그룹 1"]);
         assert_eq!(update_page.items[0].thumbnail.icon_id, Some(100_100));
         let second_update_page = session
             .update_page(&added_assets, 1, 1)
@@ -2421,12 +3827,12 @@ mod tests {
 
         let empty_query = session.search_page("  ", 0, 1).unwrap_err();
         assert!(matches!(empty_query, ViewerSessionError::EmptySearchQuery));
-        let offset_error = session.search_page("머리", 2, 1).unwrap_err();
+        let offset_error = session.search_page("SB", 3, 1).unwrap_err();
         assert!(matches!(
             offset_error,
             ViewerSessionError::OffsetOutOfRange {
-                offset: 2,
-                total_count: 2,
+                offset: 3,
+                total_count: 3,
             }
         ));
 
@@ -2435,7 +3841,7 @@ mod tests {
     }
 
     #[test]
-    fn displays_and_extracts_verified_sh_raw_blocks_without_an_icon_id() {
+    fn displays_and_extracts_uncategorized_sh_raw_blocks_without_an_icon_id() {
         let directory = TestDirectory::new();
         let resources = directory.prepare_game();
         write_data_file(
@@ -2444,7 +3850,7 @@ mod tests {
         );
         let mut session = ViewerSession::default();
         session.set_resource_directory(&resources);
-        let category = ["UI 이미지", "별자리 조사", "별자리 선화 (256×256)"].map(str::to_owned);
+        let category = ["미분류", "SH"].map(str::to_owned);
 
         let page = session
             .category_page(&category, 0, VIEWER_CATEGORY_PAGE_SIZE)
@@ -2473,7 +3879,7 @@ mod tests {
         assert_eq!(&png.png[..8], b"\x89PNG\r\n\x1a\n");
 
         let search = session
-            .search_page("SH 별자리 1", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .search_page("SH 1", 0, VIEWER_CATEGORY_PAGE_SIZE)
             .expect("search SH raw block");
         assert_eq!(search.total_count, 1);
         assert_eq!(search.items[0].thumbnail.block_index, 1);
@@ -2515,10 +3921,7 @@ mod tests {
         assert_eq!(summary.archives[0].image_block_count, 2);
         assert_eq!(summary.archives[0].archive_count, 1);
         assert_eq!(summary.verified_categories.len(), 1);
-        assert_eq!(
-            summary.verified_categories[0].path,
-            ["UI 이미지", "별자리 조사", "별자리 선화 (256×256)"]
-        );
+        assert_eq!(summary.verified_categories[0].path, ["미분류", "SH"]);
         assert_eq!(summary.verified_categories[0].asset_count, 2);
     }
 
@@ -2535,7 +3938,7 @@ mod tests {
         );
         let mut session = ViewerSession::default();
         session.set_resource_directory(resource_root);
-        let category = ["지도", "도시·항구 미니맵 (180×139~141)"].map(str::to_owned);
+        let category = ["지도", "도시 미니맵"].map(str::to_owned);
 
         let page = session
             .category_page(&category, 0, VIEWER_CATEGORY_PAGE_SIZE)
@@ -2564,7 +3967,7 @@ mod tests {
         assert_eq!(&png.png[..8], b"\x89PNG\r\n\x1a\n");
 
         let search = session
-            .search_page("TM 미니맵 1", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .search_page("TM 1", 0, VIEWER_CATEGORY_PAGE_SIZE)
             .expect("search TM minimap");
         assert_eq!(search.total_count, 1);
         assert_eq!(search.items[0].thumbnail.block_index, 1);
@@ -2599,6 +4002,366 @@ mod tests {
     }
 
     #[test]
+    fn displays_extracts_and_snapshots_gm_atlases_and_sprite_records() {
+        let directory = TestDirectory::new();
+        let primary = directory.prepare_game();
+        let resource_root = primary.parent().expect("resource root");
+        let gm_directory = resource_root.join("local");
+        fs::create_dir(&gm_directory).expect("create GM resource directory");
+        for file_number in GM_ATLAS_FILE_NUMBERS {
+            let mut decoded = Vec::new();
+            decoded.extend_from_slice(&1_u32.to_le_bytes());
+            decoded.extend_from_slice(&1_u32.to_le_bytes());
+            decoded.extend_from_slice(&40_u32.to_le_bytes());
+            decoded.extend_from_slice(&0_u32.to_le_bytes());
+            decoded.extend_from_slice(&0.5_f32.to_le_bytes());
+            decoded.extend_from_slice(&0.5_f32.to_le_bytes());
+            decoded.extend_from_slice(&1.0_f32.to_le_bytes());
+            decoded.extend_from_slice(&1.0_f32.to_le_bytes());
+            decoded.extend_from_slice(&1_u32.to_le_bytes());
+            decoded.extend_from_slice(&1_u32.to_le_bytes());
+            decoded.extend_from_slice(&1_u16.to_le_bytes());
+            decoded.extend_from_slice(&1_u16.to_le_bytes());
+            decoded.extend_from_slice(&21_u32.to_le_bytes());
+            decoded.extend_from_slice(file_number.to_le_bytes().as_slice());
+            decoded.extend_from_slice(&4_u32.to_le_bytes());
+            decoded.extend_from_slice(&4_u32.to_le_bytes());
+            decoded.extend_from_slice(&[0x11, 0x22, 0x33, 0xff]);
+            fs::write(
+                gm_directory.join(format!("gm{file_number:06}.bin")),
+                zlib_block(&decoded),
+            )
+            .expect("write GM fixture");
+        }
+
+        let summary = inspect_game_directory(&directory.0).expect("inspect GM fixture");
+        let gm = summary
+            .archives
+            .iter()
+            .find(|archive| archive.prefix == "gm")
+            .expect("GM archive summary");
+        assert_eq!(gm.record_count, 8);
+        assert_eq!(gm.archive_count, 4);
+        let original_category = gm_atlas_category_path();
+        assert!(
+            summary.verified_categories.iter().any(|category| {
+                category.path == original_category && category.asset_count == 4
+            })
+        );
+        assert_eq!(
+            summary
+                .verified_categories
+                .iter()
+                .filter(|category| category.path.starts_with(&[
+                    "UI 리소스".to_owned(),
+                    "GM".to_owned(),
+                    "원시 렌더링 조각".to_owned(),
+                ]))
+                .count(),
+            4
+        );
+
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(resource_root);
+        let atlas_page = session
+            .category_page(&original_category, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("load GM original atlas page");
+        assert_eq!(atlas_page.total_count, 4);
+        assert_eq!(atlas_page.items[0].block_index, 0);
+        assert_eq!(
+            (
+                atlas_page.items[0].source_width,
+                atlas_page.items[0].source_height
+            ),
+            (1, 1)
+        );
+
+        let category = ["UI 리소스", "GM", "원시 렌더링 조각", "아틀라스 ID 00"].map(str::to_owned);
+        let page = session
+            .category_page(&category, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("load GM sprite page");
+        assert_eq!(page.total_count, 1);
+        assert_eq!(page.items[0].archive, "gm");
+        assert_eq!(page.items[0].block_index, 4);
+        assert_eq!(page.items[0].icon_id, Some(0));
+        assert_eq!(
+            (page.items[0].source_width, page.items[0].source_height),
+            (1, 1)
+        );
+        let detail = session
+            .asset_detail(&category, "gm", 4)
+            .expect("load GM sprite detail");
+        let source = detail.gm_source.expect("GM sprite source context");
+        assert_eq!(source.atlas_id, 0);
+        assert_eq!(
+            (source.x, source.y, source.width, source.height),
+            (0, 0, 1, 1)
+        );
+
+        let fourth_category =
+            ["UI 리소스", "GM", "원시 렌더링 조각", "아틀라스 ID 03"].map(str::to_owned);
+        let png = session
+            .asset_png(&fourth_category, "gm", 7)
+            .expect("extract GM sprite PNG");
+        assert_eq!((png.width, png.height), (1, 1));
+        assert_eq!(&png.png[..8], b"\x89PNG\r\n\x1a\n");
+
+        let snapshot = inspect_asset_snapshot(
+            session
+                .resource_directory()
+                .expect("selected resource directory"),
+        )
+        .expect("snapshot GM fixture");
+        assert_eq!(
+            snapshot
+                .assets
+                .iter()
+                .filter(|asset| asset.archive == "gm")
+                .count(),
+            8
+        );
+    }
+
+    #[test]
+    #[ignore = "requires DHO_GAME_DIRECTORY pointing to an installed client"]
+    fn matches_real_treasure_hunt_theme_text_to_sc_group_26_images() {
+        let game_directory = std::env::var_os("DHO_GAME_DIRECTORY")
+            .map(PathBuf::from)
+            .expect("DHO_GAME_DIRECTORY must point to an installed client");
+        let summary = inspect_game_directory(&game_directory).expect("inspect installed client");
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(&summary.resource_directory);
+
+        let shining_hill = session
+            .search_page("빛나는 언덕", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("search shining hill treasure hunt theme")
+            .items
+            .into_iter()
+            .find(|item| item.thumbnail.archive == "sc" && item.thumbnail.icon_id == Some(1))
+            .expect("SC group 26 treasure hunt theme ID 1");
+
+        assert_eq!(shining_hill.path, ["트레져헌트 테마"]);
+        assert_eq!(shining_hill.thumbnail.block_index, 5_229);
+        assert!(shining_hill.thumbnail.text_links.iter().any(|link| {
+            link.source == "dt000001.bin:treasure_category"
+                && link.id == 1
+                && link.name == "빛나는 언덕"
+        }));
+    }
+
+    #[test]
+    #[ignore = "requires DHO_GAME_DIRECTORY pointing to an installed client"]
+    fn matches_real_legacy_theme_text_to_sc_group_33_images() {
+        let game_directory = std::env::var_os("DHO_GAME_DIRECTORY")
+            .map(PathBuf::from)
+            .expect("DHO_GAME_DIRECTORY must point to an installed client");
+        let summary = inspect_game_directory(&game_directory).expect("inspect installed client");
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(&summary.resource_directory);
+
+        let mathematics = session
+            .search_page("수의 예지 세계의 계산기", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("search mathematics legacy theme")
+            .items
+            .into_iter()
+            .find(|item| item.thumbnail.archive == "sc" && item.thumbnail.icon_id == Some(3))
+            .expect("SC group 33 legacy theme ID 3");
+
+        assert_eq!(mathematics.path, ["레거시 테마"]);
+        assert_eq!(mathematics.thumbnail.block_index, 5_586);
+        assert!(mathematics.thumbnail.text_links.iter().any(|link| {
+            link.source == "dt000001.bin:legacy_theme"
+                && link.id == 3
+                && link.name == "수의 예지 세계의 계산기"
+        }));
+    }
+
+    #[test]
+    #[ignore = "requires DHO_GAME_DIRECTORY pointing to an installed client"]
+    fn preserves_distinct_item_entries_that_share_one_real_image_block() {
+        let game_directory = std::env::var_os("DHO_GAME_DIRECTORY")
+            .map(PathBuf::from)
+            .expect("DHO_GAME_DIRECTORY must point to an installed client");
+        let summary = inspect_game_directory(&game_directory).expect("inspect installed client");
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(&summary.resource_directory);
+
+        let true_britain = session
+            .search_page("트루 브리튼 교환권", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("search True Britain exchange ticket")
+            .items
+            .into_iter()
+            .find(|item| item.thumbnail.icon_id == Some(1_561_327))
+            .expect("True Britain logical item entry");
+        let cutty_sark = session
+            .search_page("카티사크 선박 교환권", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("search Cutty Sark exchange ticket")
+            .items
+            .into_iter()
+            .find(|item| item.thumbnail.icon_id == Some(1_500_871))
+            .expect("Cutty Sark logical item entry");
+
+        assert_eq!(true_britain.thumbnail.block_index, 7_402);
+        assert_eq!(cutty_sark.thumbnail.block_index, 7_402);
+        assert_ne!(true_britain.thumbnail.icon_id, cutty_sark.thumbnail.icon_id);
+        assert!(
+            true_britain
+                .thumbnail
+                .text_links
+                .iter()
+                .any(|link| link.name.trim() == "트루 브리튼 교환권")
+        );
+        assert!(
+            cutty_sark
+                .thumbnail
+                .text_links
+                .iter()
+                .any(|link| link.name.trim() == "카티사크 선박 교환권")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires DHO_GAME_DIRECTORY pointing to an installed client"]
+    fn opens_gm_and_rebased_sd_assemblies_from_a_real_client() {
+        let game_directory = std::env::var_os("DHO_GAME_DIRECTORY")
+            .map(PathBuf::from)
+            .expect("DHO_GAME_DIRECTORY must point to an installed client");
+        let summary = inspect_game_directory(&game_directory).expect("inspect installed client");
+        let gm = summary
+            .archives
+            .iter()
+            .find(|archive| archive.prefix == "gm")
+            .expect("installed GM archive");
+        assert_eq!(gm.record_count, 1_769);
+        for atlas_id in 2..=15 {
+            assert!(summary.verified_categories.iter().any(|category| {
+                category.path == gm_sprite_category_path(atlas_id) && category.asset_count > 0
+            }));
+        }
+        assert_eq!(
+            summary
+                .archives
+                .iter()
+                .find(|archive| archive.prefix == "cu")
+                .expect("installed cursor archive")
+                .record_count,
+            12
+        );
+        assert_eq!(
+            summary
+                .archives
+                .iter()
+                .find(|archive| archive.prefix == "ft")
+                .expect("installed bitmap font archive")
+                .record_count,
+            7_486
+        );
+        assert_eq!(
+            summary
+                .archives
+                .iter()
+                .find(|archive| archive.prefix == "wm")
+                .expect("installed XFTX world-map archive")
+                .record_count,
+            13
+        );
+
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(&summary.resource_directory);
+        let gm_atlas_path = gm_atlas_category_path();
+        let gm_atlas_page = session
+            .category_page(&gm_atlas_path, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("installed GM original atlas category page");
+        assert_eq!(gm_atlas_page.total_count, 60);
+        let atlas_detail = session
+            .asset_detail(&gm_atlas_path, "gm", gm_atlas_page.items[0].block_index)
+            .expect("installed GM original atlas detail");
+        assert!(atlas_detail.gm_source.is_none());
+        assert!(
+            atlas_detail
+                .preview_data_url
+                .starts_with("data:image/png;base64,")
+        );
+
+        let gm_path = ["UI 리소스", "GM", "원시 렌더링 조각", "아틀라스 ID 02"].map(str::to_owned);
+        let gm_page = session
+            .category_page(&gm_path, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("installed GM sprite category page");
+        assert!(gm_page.total_count > 1);
+        assert!(gm_page.items.iter().all(|item| item.source_width <= 128));
+        let sprite_detail = session
+            .asset_detail(&gm_path, "gm", gm_page.items[0].block_index)
+            .expect("installed GM sprite detail");
+        let source = sprite_detail
+            .gm_source
+            .expect("installed GM sprite source context");
+        assert_eq!(source.atlas_id, 2);
+        assert!(source.atlas_width > 0 && source.atlas_height > 0);
+        assert!(source.x < source.atlas_width && source.y < source.atlas_height);
+        assert!(source.preview_width > 0 && source.preview_height > 0);
+        assert!(
+            source
+                .preview_data_url
+                .starts_with("data:image/png;base64,")
+        );
+
+        let gm_five_path =
+            ["UI 리소스", "GM", "원시 렌더링 조각", "아틀라스 ID 05"].map(str::to_owned);
+        let gm_five_page = session
+            .category_page(&gm_five_path, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("installed GM atlas 05 sprite category page");
+        assert_eq!(gm_five_page.total_count, 63);
+        assert_eq!(gm_five_page.items.len(), 63);
+        assert_eq!(gm_five_page.items[0].icon_id, Some(463));
+        assert_eq!(gm_five_page.items[62].icon_id, Some(525));
+        assert!(gm_five_page.items.iter().all(|item| {
+            (item.source_width, item.source_height) == (16, 16) && !item.assembled
+        }));
+
+        let cursor_path = ["UI 리소스", "커서"].map(str::to_owned);
+        let cursor_page = session
+            .category_page(&cursor_path, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("installed cursor category page");
+        assert_eq!(cursor_page.total_count, 12);
+        assert!(
+            cursor_page
+                .items
+                .iter()
+                .all(|item| (item.source_width, item.source_height) == (32, 32))
+        );
+
+        let font_path = ["글꼴", "게임 글리프"].map(str::to_owned);
+        let font_page = session
+            .category_page(&font_path, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("installed bitmap font category page");
+        assert_eq!(font_page.total_count, 7_486);
+        assert!(
+            font_page.items.iter().all(|item| {
+                matches!((item.source_width, item.source_height), (8, 16) | (16, 16))
+            })
+        );
+
+        let world_map_path = ["지도", "축소 세계지도 리소스"].map(str::to_owned);
+        let world_map_page = session
+            .category_page(&world_map_path, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("installed XFTX world-map category page");
+        assert_eq!(world_map_page.total_count, 13);
+        assert!(
+            world_map_page
+                .items
+                .iter()
+                .any(|item| { (item.source_width, item.source_height) == (128, 128) })
+        );
+
+        let sd_path = ["조립 이미지", "SD"].map(str::to_owned);
+        let sd_page = session
+            .category_page(&sd_path, 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("rebased installed SD assembly page");
+        assert!(sd_page.total_count > 0);
+        assert!(sd_page.items.iter().all(|item| item.assembled));
+    }
+
+    #[test]
     fn displays_one_assembled_kp_world_map_and_five_overviews() {
         let directory = TestDirectory::new();
         let primary = directory.prepare_game();
@@ -2621,8 +4384,8 @@ mod tests {
         );
         let mut session = ViewerSession::default();
         session.set_resource_directory(resource_root);
-        let world_map = ["지도", "세계지도 (3072×1536)"].map(str::to_owned);
-        let overviews = ["지도", "미분류 오버뷰 (256×256)"].map(str::to_owned);
+        let world_map = ["조립 이미지", "KP"].map(str::to_owned);
+        let overviews = ["미분류", "KP"].map(str::to_owned);
 
         let world_page = session
             .category_page(&world_map, 0, VIEWER_CATEGORY_PAGE_SIZE)
@@ -2664,7 +4427,7 @@ mod tests {
         );
 
         let search = session
-            .search_page("KP 세계지도", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .search_page("KP 조립 이미지", 0, VIEWER_CATEGORY_PAGE_SIZE)
             .expect("search KP world map");
         assert_eq!(search.total_count, 1);
         assert_eq!(search.items[0].thumbnail.block_index, 0);
@@ -2742,7 +4505,7 @@ mod tests {
         write_data_file(&resources.join("sd000001.bin"), &blocks);
         let mut session = ViewerSession::default();
         session.set_resource_directory(&resources);
-        let category = ["UI 이미지", "예지의 서", "표지"].map(str::to_owned);
+        let category = ["조립 이미지", "SD"].map(str::to_owned);
 
         let png = session
             .asset_png(&category, "sd", 10_368)

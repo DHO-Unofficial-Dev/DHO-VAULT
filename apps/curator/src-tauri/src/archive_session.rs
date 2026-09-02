@@ -2,7 +2,7 @@
 
 use dho_catalog::{
     CatalogRecordKey, RecordClassification, VerificationStatus, assembly_candidate_plan,
-    assembly_plan, classify_record,
+    assembly_plan, legacy_manual::classify_record,
 };
 use dho_client::{INDEXED_ARCHIVE_PREFIXES, resolve_archive_directory};
 use dho_extract::{ExtractError, LoadedArchive, ResourceKey};
@@ -893,12 +893,12 @@ mod tests {
             .map(|record| record[4])
             .collect::<HashSet<_>>()
             .len() as u32;
-        for value in [records.len() as u32, group_count, 1, 1, block_count, 1, 0] {
+        for value in [records.len() as u32, group_count, 1, 1, block_count, 1] {
             push_u32(&mut index, value);
         }
         for record in records {
-            for value in record {
-                push_u32(&mut index, *value);
+            for value in [record[4], record[0], record[1], record[2], record[3]] {
+                push_u32(&mut index, value);
             }
         }
         fs::write(directory.join("sb000000.bin"), index).expect("write test index");

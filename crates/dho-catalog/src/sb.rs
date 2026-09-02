@@ -2,12 +2,12 @@
 
 use crate::{CategoryPath, CategorySource, RecordRule, ReservationRule, RuleScope};
 
-const EQUIPMENT_BODY: CategoryPath = CategoryPath::new(&["장비", "방어구", "몸"]);
-const EQUIPMENT_HEAD: CategoryPath = CategoryPath::new(&["장비", "방어구", "머리"]);
-const EQUIPMENT_LEGS: CategoryPath = CategoryPath::new(&["장비", "방어구", "다리"]);
-const EQUIPMENT_ARMS: CategoryPath = CategoryPath::new(&["장비", "방어구", "팔"]);
-const EQUIPMENT_WEAPON: CategoryPath = CategoryPath::new(&["장비", "무기"]);
-const EQUIPMENT_TOOL: CategoryPath = CategoryPath::new(&["장비", "도구"]);
+const EQUIPMENT_BODY: CategoryPath = CategoryPath::new(&["장비", "몸"]);
+const EQUIPMENT_HEAD: CategoryPath = CategoryPath::new(&["장비", "머리"]);
+const EQUIPMENT_LEGS: CategoryPath = CategoryPath::new(&["장비", "다리"]);
+const EQUIPMENT_ARMS: CategoryPath = CategoryPath::new(&["장비", "팔"]);
+const EQUIPMENT_WEAPON_TOOL: CategoryPath = CategoryPath::new(&["장비", "무기·도구"]);
+const EQUIPMENT_ACCESSORY: CategoryPath = CategoryPath::new(&["장비", "장신구"]);
 const SHIP_AUXILIARY_SAIL: CategoryPath = CategoryPath::new(&["선박", "선박 장비", "보조돛"]);
 const SHIP_CANNON: CategoryPath = CategoryPath::new(&["선박", "선박 장비", "대포"]);
 const SHIP_ADDITIONAL_ARMOR: CategoryPath = CategoryPath::new(&["선박", "선박 장비", "추가장갑"]);
@@ -56,8 +56,8 @@ pub(crate) const RECORD_RULES: &[RecordRule] = &[
     verified_range(100_000, 199_999, EQUIPMENT_HEAD),
     verified_range(200_000, 299_999, EQUIPMENT_LEGS),
     verified_range(300_000, 399_999, EQUIPMENT_ARMS),
-    verified_range(400_000, 499_999, EQUIPMENT_WEAPON),
-    verified_range(500_000, 599_999, EQUIPMENT_TOOL),
+    verified_range(400_000, 499_999, EQUIPMENT_WEAPON_TOOL),
+    verified_range(500_000, 599_999, EQUIPMENT_ACCESSORY),
     verified_range(600_000, 699_999, SHIP_AUXILIARY_SAIL),
     verified_range(700_000, 799_999, SHIP_CANNON),
     verified_range(800_000, 899_999, SHIP_ADDITIONAL_ARMOR),
@@ -101,8 +101,8 @@ pub(crate) const RESERVATION_RULES: &[ReservationRule] = &[
     reservation(100_000, 199_999, EQUIPMENT_HEAD),
     reservation(200_000, 299_999, EQUIPMENT_LEGS),
     reservation(300_000, 399_999, EQUIPMENT_ARMS),
-    reservation(400_000, 499_999, EQUIPMENT_WEAPON),
-    reservation(500_000, 599_999, EQUIPMENT_TOOL),
+    reservation(400_000, 499_999, EQUIPMENT_WEAPON_TOOL),
+    reservation(500_000, 599_999, EQUIPMENT_ACCESSORY),
     reservation(600_000, 699_999, SHIP_AUXILIARY_SAIL),
     reservation(700_000, 799_999, SHIP_CANNON),
     reservation(800_000, 899_999, SHIP_ADDITIONAL_ARMOR),

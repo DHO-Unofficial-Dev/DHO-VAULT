@@ -45,6 +45,22 @@
           <button
             class="nav-button"
             type="button"
+            data-page="text"
+            aria-pressed="false"
+          >
+            텍스트
+          </button>
+          <button
+            class="nav-button"
+            type="button"
+            data-page="audio"
+            aria-pressed="false"
+          >
+            오디오
+          </button>
+          <button
+            class="nav-button"
+            type="button"
             data-page="update"
             aria-pressed="false"
           >
@@ -59,6 +75,12 @@
             설정
           </button>
         </nav>
+        <label id="titlebar-language-control" class="titlebar-language-control" for="text-language-block" hidden>
+          <span>언어</span>
+          <select id="text-language-block" aria-label="라이브러리와 텍스트 표시 언어">
+            <option value="1">한국어 · #1</option>
+          </select>
+        </label>
         <span id="titlebar-version" class="titlebar-version" aria-label="현재 앱 버전"></span>
         <button
           id="minimize-window"
@@ -100,7 +122,7 @@
           <p class="eyebrow">DHO RESOURCE VAULT</p>
           <h1>DHO Vault</h1>
           <p class="summary">
-            대항해시대 온라인 클라이언트의 이미지 리소스를 찾아보고 저장하는 도구
+            대항해시대 온라인 클라이언트의 이미지와 텍스트 자료를 찾아보는 도구
           </p>
         </header>
 
@@ -128,29 +150,23 @@
           <section id="category-panel" class="catalog-card" aria-labelledby="category-title" hidden>
             <div class="section-heading">
               <div>
-                <p class="section-label">VERIFIED CATALOG</p>
-                <h2 id="category-title">확인된 카테고리</h2>
+                <p class="section-label">LIBRARY</p>
+                <h2 id="category-title">라이브러리</h2>
               </div>
               <p id="category-status" class="section-status" aria-live="polite"></p>
             </div>
-            <p class="section-description">
-              실제 게임 이미지와 경계를 확인한 카테고리만 표시합니다. 카테고리를 선택하면 한 번에 32개씩 이미지를 불러옵니다.
-            </p>
             <form id="asset-search" class="asset-search" role="search">
-              <label for="asset-search-query">확인된 이미지 검색</label>
+              <label for="asset-search-query">이미지 검색</label>
               <div class="asset-search-controls">
                 <input
                   id="asset-search-query"
                   name="query"
                   type="search"
-                  placeholder="카테고리, 이미지 ID 또는 블록 번호"
+                  placeholder="아이템명, 설명, 자료 종류, 이미지 ID"
                   autocomplete="off"
                 />
                 <button id="asset-search-submit" type="submit">검색</button>
               </div>
-              <p>
-                카테고리 경로, IM·KP·SA·SB·SC·SD·SE·SF·SG·SH·TM·SW·SX·SY·SZ·IS, 이미지 ID, 블록 번호를 검색합니다. 아이템 명칭 검색은 아직 지원하지 않습니다.
-              </p>
             </form>
             <div id="category-groups" class="category-groups"></div>
           </section>
@@ -264,6 +280,153 @@
           </section>
         </section>
 
+        <section id="text-page" class="app-page text-layout" data-page="text" hidden>
+          <aside class="catalog-card text-source-card" aria-labelledby="text-source-title">
+            <div class="section-heading">
+              <div>
+                <p class="section-label">TEXT SOURCES</p>
+                <h2 id="text-source-title">텍스트 자료</h2>
+              </div>
+              <p id="text-catalog-status" class="section-status" aria-live="polite"></p>
+            </div>
+            <p class="section-description">
+              한국 클라이언트 안의 언어 블록을 선택해 DT 파일과 레코드 ID를 함께 보여줍니다. 한국어가 기본이며, 서버에서만 전달되는 임무 문구는 로컬 자료에 포함되지 않습니다.
+            </p>
+            <p class="text-language-note">표시 언어는 상단 제목표시줄에서 바꿀 수 있습니다. LC의 TERMS 자료는 언어별 문장이 아닌 이용약관 검색표 메타데이터입니다.</p>
+            <button id="text-source-all" class="text-source-button" type="button" aria-pressed="true">
+              전체 자료
+            </button>
+            <div id="text-source-list" class="text-source-list"></div>
+          </aside>
+
+          <div class="text-main-column">
+            <section class="catalog-card text-update-card" aria-labelledby="text-update-title">
+              <div class="section-heading">
+                <div>
+                  <p class="section-label">TEXT UPDATE</p>
+                  <h2 id="text-update-title">신규·변경 텍스트</h2>
+                </div>
+                <p id="text-update-status" class="section-status" aria-live="polite"></p>
+              </div>
+              <p id="text-update-message" class="section-description">
+                텍스트 기준점을 확인하고 있습니다.
+              </p>
+              <dl id="text-update-counts" class="update-counts" hidden>
+                <div><dt>신규</dt><dd id="text-update-added-count">0</dd></div>
+                <div><dt>변경</dt><dd id="text-update-changed-count">0</dd></div>
+                <div><dt>삭제</dt><dd id="text-update-removed-count">0</dd></div>
+              </dl>
+              <div id="text-update-actions" class="update-actions" hidden>
+                <button id="create-text-baseline" type="button" hidden>현재 텍스트를 기준점으로 저장</button>
+                <button id="view-text-changes" type="button" hidden>신규·변경 문구 보기</button>
+                <button id="refresh-text-baseline" type="button" hidden>검토 완료 후 기준점 갱신</button>
+              </div>
+            </section>
+
+            <section class="catalog-card text-browser-card" aria-labelledby="text-browser-title">
+              <div class="section-heading">
+                <div>
+                  <p class="section-label">TEXT BROWSER</p>
+                  <h2 id="text-browser-title">전체 텍스트</h2>
+                </div>
+                <p id="text-page-status" class="section-status" aria-live="polite"></p>
+              </div>
+              <form id="text-search" class="asset-search" role="search">
+                <label for="text-search-query">문구 또는 ID 검색</label>
+                <div class="asset-search-controls">
+                  <input
+                    id="text-search-query"
+                    name="query"
+                    type="search"
+                    placeholder="퀘스트, 인물명, 문장 또는 레코드 ID"
+                    autocomplete="off"
+                  />
+                  <button id="text-search-submit" type="submit">검색</button>
+                </div>
+              </form>
+              <div id="text-record-list" class="text-record-list" aria-live="polite"></div>
+              <nav class="text-pagination" aria-label="텍스트 페이지 이동">
+                <button id="text-first-page" class="secondary-button" type="button" disabled>처음</button>
+                <button id="text-previous-page" class="secondary-button" type="button" disabled>이전</button>
+                <div id="text-page-number-list" class="page-number-list" role="group" aria-label="텍스트 페이지 번호"></div>
+                <form id="text-page-jump" class="page-jump" novalidate>
+                  <input
+                    id="text-page-input"
+                    class="page-number-input"
+                    type="number"
+                    min="1"
+                    step="1"
+                    inputmode="numeric"
+                    aria-label="이동할 텍스트 페이지 번호"
+                    disabled
+                  />
+                  <span aria-hidden="true">/</span>
+                  <span id="text-page-count" class="page-count">0 페이지</span>
+                  <button id="text-page-jump-button" class="secondary-button" type="submit" disabled>이동</button>
+                </form>
+                <button id="text-next-page" class="secondary-button" type="button" disabled>다음</button>
+                <button id="text-last-page" class="secondary-button" type="button" disabled>마지막</button>
+              </nav>
+            </section>
+          </div>
+        </section>
+
+        <section id="audio-page" class="app-page audio-layout" data-page="audio" hidden>
+          <section class="catalog-card audio-browser-card" aria-labelledby="audio-browser-title">
+            <div class="section-heading">
+              <div>
+                <p class="section-label">AUDIO LIBRARY</p>
+                <h2 id="audio-browser-title">게임 오디오</h2>
+              </div>
+              <p id="audio-catalog-status" class="section-status" aria-live="polite"></p>
+            </div>
+            <p id="audio-catalog-description" class="section-description">
+              클라이언트의 KOVS 오디오를 필요할 때 한 곡씩 Ogg Vorbis로 해제합니다.
+            </p>
+            <form id="audio-search" class="asset-search" role="search">
+              <label for="audio-search-query">오디오 ID 검색</label>
+              <div class="asset-search-controls">
+                <input
+                  id="audio-search-query"
+                  name="query"
+                  type="search"
+                  placeholder="예: 42 또는 000042"
+                  autocomplete="off"
+                />
+                <button type="submit">검색</button>
+              </div>
+            </form>
+            <div id="audio-track-list" class="audio-track-list" aria-live="polite"></div>
+            <nav class="text-pagination" aria-label="오디오 페이지 이동">
+              <button id="audio-first-page" class="secondary-button" type="button" disabled>처음</button>
+              <button id="audio-previous-page" class="secondary-button" type="button" disabled>이전</button>
+              <span id="audio-page-count" class="page-count">0 페이지</span>
+              <button id="audio-next-page" class="secondary-button" type="button" disabled>다음</button>
+              <button id="audio-last-page" class="secondary-button" type="button" disabled>마지막</button>
+            </nav>
+          </section>
+
+          <aside class="catalog-card audio-player-card" aria-labelledby="audio-player-title">
+            <div class="section-heading">
+              <div>
+                <p class="section-label">AUDIO PLAYER</p>
+                <h2 id="audio-player-title">곡을 선택해 주세요</h2>
+              </div>
+            </div>
+            <p id="audio-player-message" class="section-description">
+              목록에서 한 곡을 누르면 해당 파일만 해제하여 재생합니다.
+            </p>
+            <audio id="audio-player" controls preload="metadata"></audio>
+            <dl id="audio-track-metadata" class="detail-metadata" hidden>
+              <div><dt>파일</dt><dd id="audio-track-file"></dd></div>
+              <div><dt>크기</dt><dd id="audio-track-size"></dd></div>
+              <div><dt>형식</dt><dd id="audio-track-format"></dd></div>
+              <div><dt>루프 시작</dt><dd id="audio-track-loop"></dd></div>
+            </dl>
+            <button id="save-audio-track" type="button" disabled>OGG 저장</button>
+          </aside>
+        </section>
+
         <section id="update-page" class="app-page" data-page="update" hidden>
           <section id="update-panel" class="catalog-card update-card" aria-labelledby="update-title" hidden>
             <div class="section-heading">
@@ -274,7 +437,7 @@
               <p id="update-status" class="section-status" aria-live="polite"></p>
             </div>
             <p id="update-message" class="section-description"></p>
-            <dl id="update-counts" class="update-counts" hidden>
+            <dl id="update-counts" class="update-counts asset-update-counts" hidden>
               <div>
                 <dt>신규</dt>
                 <dd id="update-added-count">0</dd>
@@ -287,7 +450,19 @@
                 <dt>삭제</dt>
                 <dd id="update-removed-count">0</dd>
               </div>
+              <div>
+                <dt>연결 추가</dt>
+                <dd id="update-added-relation-count">0</dd>
+              </div>
+              <div>
+                <dt>연결 사라짐</dt>
+                <dd id="update-removed-relation-count">0</dd>
+              </div>
             </dl>
+            <details id="update-removed-relations" class="update-relation-details" hidden>
+              <summary id="update-removed-relations-summary">사라진 텍스트·이미지 연결</summary>
+              <ul id="update-removed-relations-list" class="diagnostics-list"></ul>
+            </details>
             <div id="update-actions" class="update-actions" hidden>
               <button id="create-update-baseline" type="button" hidden>
                 현재 상태를 기준점으로 저장
@@ -350,6 +525,41 @@
               192px까지 보기 좋게 확대하며, AI처럼 없던 세부 정보를 만들지는 않습니다.
               지도·삽화·조립 이미지와 원본 데이터는 변경하지 않습니다.
             </p>
+          </section>
+
+          <section
+            id="catalog-diagnostics-card"
+            class="catalog-card diagnostics-card"
+            aria-labelledby="catalog-diagnostics-title"
+            hidden
+          >
+            <div class="section-heading settings-heading">
+              <div>
+                <p class="section-label">CATALOG DIAGNOSTICS</p>
+                <h2 id="catalog-diagnostics-title">분류·연결 진단</h2>
+              </div>
+              <span id="catalog-diagnostics-status" class="section-status"></span>
+            </div>
+            <p class="section-description">
+              현재 파일의 실제 이미지 키를 기준으로 분류 누락과 여러 카테고리에 동시에
+              연결된 항목을 확인합니다. 다중 연결은 오류 확정이 아니라 검토 대상입니다.
+            </p>
+            <dl class="update-counts diagnostics-counts">
+              <div><dt>고유 이미지</dt><dd id="diagnostics-total-count">0</dd></div>
+              <div><dt>의미 분류됨</dt><dd id="diagnostics-categorized-count">0</dd></div>
+              <div><dt>미분류</dt><dd id="diagnostics-unclassified-count">0</dd></div>
+              <div><dt>다중 카테고리</dt><dd id="diagnostics-multiple-count">0</dd></div>
+            </dl>
+            <div class="diagnostics-details">
+              <details>
+                <summary id="diagnostics-unclassified-summary">미분류 그룹</summary>
+                <ul id="diagnostics-unclassified-list" class="diagnostics-list"></ul>
+              </details>
+              <details>
+                <summary id="diagnostics-multiple-summary">다중 카테고리 검토 대상</summary>
+                <ul id="diagnostics-multiple-list" class="diagnostics-list"></ul>
+              </details>
+            </div>
           </section>
 
           <section class="catalog-card settings-card" aria-labelledby="settings-title">
@@ -419,20 +629,35 @@
         </div>
       </div>
       <div id="detail-content" class="detail-content" data-status="idle">
-        <div class="detail-preview-frame">
-          <img id="detail-preview" alt="" hidden />
+        <div class="detail-layout">
+          <div class="detail-preview-frame">
+            <img id="detail-preview" alt="" hidden />
+          </div>
+          <aside class="detail-information" aria-label="이미지 연결 정보">
+            <p id="detail-message" class="detail-message" aria-live="polite"></p>
+            <div id="detail-record-list" class="detail-record-list" hidden></div>
+            <dl id="detail-metadata" class="detail-metadata" hidden>
+              <div>
+                <dt>원본 크기</dt>
+                <dd id="detail-source-size"></dd>
+              </div>
+              <div>
+                <dt>미리보기</dt>
+                <dd id="detail-preview-size"></dd>
+              </div>
+            </dl>
+            <section id="detail-gm-source" class="gm-source-context" hidden>
+              <div class="gm-source-heading">
+                <h3>원본 아틀라스 위치</h3>
+                <p id="detail-gm-source-label"></p>
+              </div>
+              <div id="detail-gm-source-preview" class="gm-source-preview">
+                <img id="detail-gm-source-image" alt="" />
+                <span id="detail-gm-source-highlight" aria-hidden="true"></span>
+              </div>
+            </section>
+          </aside>
         </div>
-        <p id="detail-message" class="detail-message" aria-live="polite"></p>
-        <dl id="detail-metadata" class="detail-metadata" hidden>
-          <div>
-            <dt>원본 크기</dt>
-            <dd id="detail-source-size"></dd>
-          </div>
-          <div>
-            <dt>미리보기</dt>
-            <dd id="detail-preview-size"></dd>
-          </div>
-        </dl>
       </div>
     </dialog>
   </body>
