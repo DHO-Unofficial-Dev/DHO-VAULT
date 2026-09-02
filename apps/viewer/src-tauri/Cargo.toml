@@ -9,6 +9,7 @@ build = "build.rs"
 tauri-build = { version = "=2.6.3", features = [] }
 
 [dependencies]
+base64 = "=0.22.1"
 dho-client = { path = "../../../crates/dho-client" }
 dho-image = { path = "../../../crates/dho-image" }
 serde = { version = "=1.0.228", features = ["derive"] }

@@ -16,6 +16,8 @@ pub enum TileOrder {
 #[serde(rename_all = "camelCase")]
 pub struct AssemblyRule {
     pub archive: &'static str,
+    pub anchor_group_code: u32,
+    pub anchor_icon_id: u32,
     pub start_block: u32,
     pub end_block: u32,
     pub tiles_per_image: u32,
@@ -29,6 +31,7 @@ pub struct AssemblyRule {
 
 impl AssemblyRule {
     const fn verified_sd(
+        anchor: (u32, u32),
         start_block: u32,
         end_block: u32,
         columns: u32,
@@ -38,6 +41,8 @@ impl AssemblyRule {
     ) -> Self {
         Self {
             archive: "sd",
+            anchor_group_code: anchor.0,
+            anchor_icon_id: anchor.1,
             start_block,
             end_block,
             tiles_per_image: columns * rows,
@@ -51,6 +56,7 @@ impl AssemblyRule {
     }
 
     const fn verified_is(
+        anchor_icon_id: u32,
         start_block: u32,
         end_block: u32,
         output_width: u32,
@@ -58,6 +64,8 @@ impl AssemblyRule {
     ) -> Self {
         Self {
             archive: "is",
+            anchor_group_code: 0,
+            anchor_icon_id,
             start_block,
             end_block,
             tiles_per_image: 12,
@@ -79,7 +87,7 @@ impl AssemblyRule {
         (self.end_block - self.start_block + 1) / self.tiles_per_image
     }
 
-    fn plan_for(self, block_index: u32) -> Option<AssemblyPlan> {
+    pub fn plan_for(self, block_index: u32) -> Option<AssemblyPlan> {
         if !self.contains(block_index) {
             return None;
         }
@@ -97,6 +105,16 @@ impl AssemblyRule {
             tile_index,
             row: tile_index / self.columns,
             column: tile_index % self.columns,
+        })
+    }
+
+    /// Moves a reviewed grid to the current block containing its stable logical anchor.
+    pub fn rebased(self, anchor_block: u32) -> Option<Self> {
+        let span = self.end_block.checked_sub(self.start_block)?;
+        Some(Self {
+            start_block: anchor_block,
+            end_block: anchor_block.checked_add(span)?,
+            ..self
         })
     }
 }
@@ -144,6 +162,8 @@ impl CompositeAssemblyLayer {
 #[serde(rename_all = "camelCase")]
 pub struct CompositeAssemblyRule {
     pub archive: &'static str,
+    pub anchor_group_code: u32,
+    pub anchor_icon_id: u32,
     pub canonical_block: u32,
     pub last_block: u32,
     pub layers: &'static [CompositeAssemblyLayer],
@@ -192,38 +212,38 @@ impl LayeredAssemblyRule {
 }
 
 pub(crate) const RULES: &[AssemblyRule] = &[
-    AssemblyRule::verified_sd(2_927, 3_070, 4, 2, 512, 256),
-    AssemblyRule::verified_sd(3_511, 4_022, 32, 16, 4_096, 2_048),
-    AssemblyRule::verified_sd(4_027, 6_267, 3, 3, 378, 294),
-    AssemblyRule::verified_sd(6_277, 7_932, 3, 3, 384, 384),
-    AssemblyRule::verified_sd(7_933, 8_718, 3, 2, 320, 220),
-    AssemblyRule::verified_sd(8_769, 8_810, 2, 1, 256, 128),
-    AssemblyRule::verified_sd(8_842, 8_856, 5, 3, 640, 320),
-    AssemblyRule::verified_sd(9_249, 9_254, 3, 2, 272, 208),
-    AssemblyRule::verified_sd(9_255, 9_262, 4, 2, 474, 226),
-    AssemblyRule::verified_sd(9_263, 9_266, 2, 2, 256, 256),
-    AssemblyRule::verified_sd(9_267, 9_270, 2, 2, 205, 233),
-    AssemblyRule::verified_sd(9_271, 9_274, 2, 2, 200, 200),
-    AssemblyRule::verified_sd(9_284, 9_289, 3, 2, 276, 226),
-    AssemblyRule::verified_sd(9_291, 9_978, 2, 2, 192, 192),
-    AssemblyRule::verified_sd(10_156, 10_175, 2, 2, 155, 256),
-    AssemblyRule::verified_sd(10_203, 10_242, 2, 2, 248, 156),
-    AssemblyRule::verified_sd(10_368, 10_395, 7, 4, 782, 404),
-    AssemblyRule::verified_sd(10_396, 10_399, 2, 2, 256, 256),
-    AssemblyRule::verified_sd(10_400, 10_405, 3, 2, 294, 166),
-    AssemblyRule::verified_sd(10_406, 10_409, 2, 2, 166, 166),
-    AssemblyRule::verified_sd(10_419, 10_438, 2, 1, 256, 128),
-    AssemblyRule::verified_sd(10_439, 10_470, 8, 4, 1_024, 512),
-    AssemblyRule::verified_sd(10_617, 10_800, 2, 2, 192, 192),
-    AssemblyRule::verified_is(0, 11, 1_024, 768),
-    AssemblyRule::verified_is(12, 23, 1_024, 768),
-    AssemblyRule::verified_is(24, 35, 864, 664),
-    AssemblyRule::verified_is(36, 47, 864, 664),
-    AssemblyRule::verified_is(48, 59, 864, 664),
-    AssemblyRule::verified_is(60, 71, 864, 664),
-    AssemblyRule::verified_is(72, 83, 864, 664),
-    AssemblyRule::verified_is(84, 95, 864, 664),
-    AssemblyRule::verified_is(96, 107, 800, 600),
+    AssemblyRule::verified_sd((1, 0), 2_927, 3_070, 4, 2, 512, 256),
+    AssemblyRule::verified_sd((7, 0), 3_511, 4_022, 32, 16, 4_096, 2_048),
+    AssemblyRule::verified_sd((9, 0), 4_027, 6_267, 3, 3, 378, 294),
+    AssemblyRule::verified_sd((11, 0), 6_277, 7_932, 3, 3, 384, 384),
+    AssemblyRule::verified_sd((12, 0), 7_933, 8_718, 3, 2, 320, 220),
+    AssemblyRule::verified_sd((14, 0), 8_769, 8_810, 2, 1, 256, 128),
+    AssemblyRule::verified_sd((16, 0), 8_842, 8_856, 5, 3, 640, 320),
+    AssemblyRule::verified_sd((18, 0), 9_249, 9_254, 3, 2, 272, 208),
+    AssemblyRule::verified_sd((18, 6), 9_255, 9_262, 4, 2, 474, 226),
+    AssemblyRule::verified_sd((18, 14), 9_263, 9_266, 2, 2, 256, 256),
+    AssemblyRule::verified_sd((18, 18), 9_267, 9_270, 2, 2, 205, 233),
+    AssemblyRule::verified_sd((18, 22), 9_271, 9_274, 2, 2, 200, 200),
+    AssemblyRule::verified_sd((19, 9), 9_284, 9_289, 3, 2, 276, 226),
+    AssemblyRule::verified_sd((20, 0), 9_291, 9_978, 2, 2, 192, 192),
+    AssemblyRule::verified_sd((25, 1), 10_156, 10_175, 2, 2, 155, 256),
+    AssemblyRule::verified_sd((28, 0), 10_203, 10_242, 2, 2, 248, 156),
+    AssemblyRule::verified_sd((33, 1), 10_368, 10_395, 7, 4, 782, 404),
+    AssemblyRule::verified_sd((34, 1), 10_396, 10_399, 2, 2, 256, 256),
+    AssemblyRule::verified_sd((35, 1), 10_400, 10_405, 3, 2, 294, 166),
+    AssemblyRule::verified_sd((35, 7), 10_406, 10_409, 2, 2, 166, 166),
+    AssemblyRule::verified_sd((36, 0), 10_419, 10_438, 2, 1, 256, 128),
+    AssemblyRule::verified_sd((37, 0), 10_439, 10_470, 8, 4, 1_024, 512),
+    AssemblyRule::verified_sd((40, 0), 10_617, 10_800, 2, 2, 192, 192),
+    AssemblyRule::verified_is(0, 0, 11, 1_024, 768),
+    AssemblyRule::verified_is(20, 12, 23, 1_024, 768),
+    AssemblyRule::verified_is(40, 24, 35, 864, 664),
+    AssemblyRule::verified_is(60, 36, 47, 864, 664),
+    AssemblyRule::verified_is(80, 48, 59, 864, 664),
+    AssemblyRule::verified_is(100, 60, 71, 864, 664),
+    AssemblyRule::verified_is(120, 72, 83, 864, 664),
+    AssemblyRule::verified_is(140, 84, 95, 864, 664),
+    AssemblyRule::verified_is(160, 96, 107, 800, 600),
 ];
 
 pub(crate) const LAYERED_RULES: &[LayeredAssemblyRule] = &[LayeredAssemblyRule {
@@ -266,6 +286,8 @@ const SD_WORLD_CLOCK_LAYERS: &[CompositeAssemblyLayer] = &[
 
 pub(crate) const COMPOSITE_RULES: &[CompositeAssemblyRule] = &[CompositeAssemblyRule {
     archive: "sd",
+    anchor_group_code: 15,
+    anchor_icon_id: 4,
     canonical_block: 8_815,
     last_block: 8_829,
     layers: SD_WORLD_CLOCK_LAYERS,
@@ -276,6 +298,22 @@ pub(crate) const COMPOSITE_RULES: &[CompositeAssemblyRule] = &[CompositeAssembly
 
 pub(crate) fn find_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
     find_plan_with_status(archive, block_index, VerificationStatus::HumanVerified)
+}
+
+pub(crate) fn verified_rules(archive: &str) -> impl Iterator<Item = AssemblyRule> + '_ {
+    RULES.iter().copied().filter(move |rule| {
+        rule.archive.eq_ignore_ascii_case(archive)
+            && rule.status == VerificationStatus::HumanVerified
+    })
+}
+
+pub(crate) fn verified_composite_rules(
+    archive: &str,
+) -> impl Iterator<Item = CompositeAssemblyRule> + '_ {
+    COMPOSITE_RULES.iter().copied().filter(move |rule| {
+        rule.archive.eq_ignore_ascii_case(archive)
+            && rule.status == VerificationStatus::HumanVerified
+    })
 }
 
 pub(crate) fn find_candidate_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {

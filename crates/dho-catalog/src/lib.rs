@@ -275,56 +275,69 @@ impl<'a> Catalog<'a> {
     }
 }
 
-/// Resolves a category for an existing raw record.
-pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
-    if key.archive.eq_ignore_ascii_case("im") {
-        Catalog::new(im::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("sa") {
-        Catalog::new(sa::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("sb") {
-        Catalog::new(sb::RECORD_RULES, sb::RESERVATION_RULES).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("sc") {
-        Catalog::new(sc::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("sd") {
-        Catalog::new(sd::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("se") {
-        Catalog::new(se::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("sf") {
-        Catalog::new(sf::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("sg") {
-        Catalog::new(sg::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("sh") {
-        Catalog::new(sh::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("sw") {
-        Catalog::new(sw::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("sx") {
-        Catalog::new(sx::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("sy") {
-        Catalog::new(sy::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("sz") {
-        Catalog::new(sz::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("tm") {
-        Catalog::new(tm::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("is") {
-        Catalog::new(is::RECORD_RULES, &[]).classify(key)
-    } else if key.archive.eq_ignore_ascii_case("kp") {
-        Catalog::new(kp::RECORD_RULES, &[]).classify(key)
-    } else {
-        RecordClassification::unknown()
-    }
-}
+/// Earlier hand-authored semantic rules retained for Curator comparison only.
+///
+/// The general-user Viewer builds its library from current archive groups and
+/// text/image relations and must not consume this module.
+pub mod legacy_manual {
+    use super::*;
 
-/// Suggests a candidate category for a currently unused ID slot.
-pub fn reservation_candidate(archive: &str, icon_id: u32) -> Option<ReservationSuggestion> {
-    archive
-        .eq_ignore_ascii_case("sb")
-        .then(|| Catalog::new(sb::RECORD_RULES, sb::RESERVATION_RULES).reservation(icon_id))
-        .flatten()
+    /// Resolves a category using the earlier hand-authored ranges.
+    pub fn classify_record(key: CatalogRecordKey<'_>) -> RecordClassification {
+        if key.archive.eq_ignore_ascii_case("im") {
+            Catalog::new(im::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("sa") {
+            Catalog::new(sa::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("sb") {
+            Catalog::new(sb::RECORD_RULES, sb::RESERVATION_RULES).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("sc") {
+            Catalog::new(sc::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("sd") {
+            Catalog::new(sd::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("se") {
+            Catalog::new(se::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("sf") {
+            Catalog::new(sf::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("sg") {
+            Catalog::new(sg::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("sh") {
+            Catalog::new(sh::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("sw") {
+            Catalog::new(sw::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("sx") {
+            Catalog::new(sx::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("sy") {
+            Catalog::new(sy::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("sz") {
+            Catalog::new(sz::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("tm") {
+            Catalog::new(tm::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("is") {
+            Catalog::new(is::RECORD_RULES, &[]).classify(key)
+        } else if key.archive.eq_ignore_ascii_case("kp") {
+            Catalog::new(kp::RECORD_RULES, &[]).classify(key)
+        } else {
+            RecordClassification::unknown()
+        }
+    }
+
+    /// Suggests a legacy candidate category for a currently unused ID slot.
+    pub fn reservation_candidate(archive: &str, icon_id: u32) -> Option<ReservationSuggestion> {
+        archive
+            .eq_ignore_ascii_case("sb")
+            .then(|| Catalog::new(sb::RECORD_RULES, sb::RESERVATION_RULES).reservation(icon_id))
+            .flatten()
+    }
 }
 
 /// Returns the verified completed-image range and tile position for one physical block.
 pub fn assembly_plan(archive: &str, block_index: u32) -> Option<AssemblyPlan> {
     assembly::find_plan(archive, block_index)
+}
+
+/// Returns the reviewed grid templates for rebasing against a current index.
+pub fn assembly_rules(archive: &str) -> Vec<AssemblyRule> {
+    assembly::verified_rules(archive).collect()
 }
 
 /// Returns an unverified assembly candidate for Curator review only.
@@ -345,8 +358,14 @@ pub fn composite_assembly_rule(archive: &str, block_index: u32) -> Option<Compos
     assembly::find_composite_rule(archive, block_index)
 }
 
+/// Returns the reviewed composite templates for rebasing against a current index.
+pub fn composite_assembly_rules(archive: &str) -> Vec<CompositeAssemblyRule> {
+    assembly::verified_composite_rules(archive).collect()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::legacy_manual::{classify_record, reservation_candidate};
     use super::*;
 
     fn key(group_code: u32, icon_id: u32) -> CatalogRecordKey<'static> {
@@ -880,12 +899,12 @@ mod tests {
     #[test]
     fn classifies_representative_verified_sb_ranges() {
         for (icon_id, expected) in [
-            (200, &["장비", "방어구", "몸"][..]),
-            (100_100, &["장비", "방어구", "머리"]),
-            (200_100, &["장비", "방어구", "다리"]),
-            (300_100, &["장비", "방어구", "팔"]),
-            (400_100, &["장비", "무기"]),
-            (500_100, &["장비", "도구"]),
+            (200, &["장비", "몸"][..]),
+            (100_100, &["장비", "머리"]),
+            (200_100, &["장비", "다리"]),
+            (300_100, &["장비", "팔"]),
+            (400_100, &["장비", "무기·도구"]),
+            (500_100, &["장비", "장신구"]),
             (600_100, &["선박", "선박 장비", "보조돛"]),
             (700_100, &["선박", "선박 장비", "대포"]),
             (800_100, &["선박", "선박 장비", "추가장갑"]),
@@ -1236,7 +1255,7 @@ mod tests {
     #[test]
     fn only_verified_reservation_bands_return_candidates() {
         let head = reservation_candidate("SB", 150_000).expect("head reservation");
-        assert_eq!(head.category.segments(), &["장비", "방어구", "머리"]);
+        assert_eq!(head.category.segments(), &["장비", "머리"]);
         assert_eq!(head.status, VerificationStatus::Candidate);
 
         assert_eq!(reservation_candidate("sb", 1_250_000), None);

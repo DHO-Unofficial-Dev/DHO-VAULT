@@ -3,13 +3,14 @@
 //! Read-only loading and on-demand extraction of indexed DHO image resources.
 
 use dho_catalog::{
-    AssemblyPlan, CompositeAssemblyRule, LayeredAssemblyRule, VerificationStatus,
-    assembly_candidate_plan, assembly_plan, composite_assembly_rule,
+    AssemblyPlan, AssemblyRule, CompositeAssemblyRule, LayeredAssemblyRule, VerificationStatus,
+    assembly_candidate_plan, assembly_rules, composite_assembly_rules,
 };
 use dho_core::{
-    ArchiveBlockDecodeError, ArchiveDiagnostic, ArchiveLayout, BlockDecodeError, BlockScanError,
-    IndexParseError, IndexRecord, IndexedArchive, InlineBlockTable, InlineBlockTableError,
-    MwcBlock, ScannedDataFile, build_archive_layout, scan_data_file,
+    ArchiveBlockDecodeError, ArchiveDiagnostic, ArchiveLayout, BitmapFontArchive, BlockDecodeError,
+    BlockScanError, CursorArchive, GmAtlas, GmAtlasParseError, IndexParseError, IndexRecord,
+    IndexedArchive, InlineBlockTable, InlineBlockTableError, MwcBlock, ScannedDataFile,
+    SpecialImageParseError, XftxArchive, build_archive_layout, cursor_dimensions, scan_data_file,
 };
 use dho_image::{ImageAssemblyError, PixelDecodeError, PngEncodeError, RgbaImage, ThumbnailError};
 use std::error::Error;
@@ -43,6 +44,126 @@ pub struct ResourceKey {
     pub group_code: u32,
     pub icon_id: u32,
     pub block_index: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedCompositeAssembly {
+    rule: CompositeAssemblyRule,
+    block_delta: i64,
+}
+
+impl ResolvedCompositeAssembly {
+    fn shifted_block(self, block_index: u32) -> Option<u32> {
+        let shifted = i64::from(block_index).checked_add(self.block_delta)?;
+        u32::try_from(shifted).ok()
+    }
+
+    fn canonical_block(self) -> Option<u32> {
+        self.shifted_block(self.rule.canonical_block)
+    }
+
+    fn last_block(self) -> Option<u32> {
+        self.shifted_block(self.rule.last_block)
+    }
+
+    fn contains_source(self, block_index: u32) -> bool {
+        self.rule.layers.iter().any(|layer| {
+            let Some(start) = self.shifted_block(layer.start_block) else {
+                return false;
+            };
+            let Some(end) = self.shifted_block(layer.end_block) else {
+                return false;
+            };
+            start <= block_index && block_index <= end
+        })
+    }
+}
+
+/// Reviewed assembly templates resolved against the logical anchors in one current index.
+#[derive(Debug, Clone, Default)]
+pub struct IndexedAssemblyLayout {
+    rules: Vec<AssemblyRule>,
+    composites: Vec<ResolvedCompositeAssembly>,
+}
+
+impl IndexedAssemblyLayout {
+    pub fn plan_for(&self, block_index: u32) -> Option<AssemblyPlan> {
+        self.rules
+            .iter()
+            .copied()
+            .find_map(|rule| rule.plan_for(block_index))
+    }
+
+    fn composite_for(&self, block_index: u32) -> Option<ResolvedCompositeAssembly> {
+        self.composites
+            .iter()
+            .copied()
+            .find(|resolved| resolved.contains_source(block_index))
+    }
+
+    pub fn canonical_block(&self, block_index: u32) -> Option<u32> {
+        if let Some(resolved) = self.composite_for(block_index) {
+            return resolved.canonical_block();
+        }
+        self.plan_for(block_index).map(|plan| plan.first_block)
+    }
+
+    pub fn is_assembled(&self, block_index: u32) -> bool {
+        self.composite_for(block_index).is_some() || self.plan_for(block_index).is_some()
+    }
+}
+
+/// Repositions reviewed tile ranges using stable `(group_code, icon_id)` anchors.
+/// A rule is omitted when its anchor is missing, ambiguous, or its current range is incomplete.
+pub fn resolve_indexed_assembly_layout(
+    archive: &str,
+    records: &[IndexRecord],
+) -> IndexedAssemblyLayout {
+    let find_anchor = |group_code: u32, icon_id: u32| {
+        let mut matches = records
+            .iter()
+            .filter(|record| record.group_code == group_code && record.icon_id == icon_id)
+            .map(|record| record.block_index);
+        let first = matches.next()?;
+        matches.all(|block| block == first).then_some(first)
+    };
+    let has_block = |block_index: u32| {
+        records
+            .iter()
+            .any(|record| record.block_index == block_index)
+    };
+
+    let rules = assembly_rules(archive)
+        .into_iter()
+        .filter_map(|template| {
+            let anchor = find_anchor(template.anchor_group_code, template.anchor_icon_id)?;
+            let rule = template.rebased(anchor)?;
+            (rule.start_block..=rule.end_block)
+                .all(&has_block)
+                .then_some(rule)
+        })
+        .collect();
+
+    let composites = composite_assembly_rules(archive)
+        .into_iter()
+        .filter_map(|rule| {
+            let anchor = find_anchor(rule.anchor_group_code, rule.anchor_icon_id)?;
+            let block_delta = i64::from(anchor) - i64::from(rule.canonical_block);
+            let resolved = ResolvedCompositeAssembly { rule, block_delta };
+            let complete = rule.layers.iter().all(|layer| {
+                let Some(start) = resolved.shifted_block(layer.start_block) else {
+                    return false;
+                };
+                let Some(end) = resolved.shifted_block(layer.end_block) else {
+                    return false;
+                };
+                (start..=end).all(&has_block)
+            });
+            complete.then_some(resolved)
+        })
+        .collect();
+
+    IndexedAssemblyLayout { rules, composites }
 }
 
 /// A physical image block from an archive that has no separate index file.
@@ -490,6 +611,564 @@ impl LoadedRawImageArchive {
     }
 }
 
+#[derive(Debug)]
+struct LoadedGmImage {
+    record: GmAtlasImageRecord,
+    pixels_bgra: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct LoadedGmSprite {
+    record: GmSpriteRecord,
+    image_vector_index: usize,
+    x: u32,
+    y: u32,
+}
+
+/// Complete atlas images decoded from the client-local `gmNNNNNN.bin` family.
+#[derive(Debug)]
+pub struct LoadedGmAtlasArchive {
+    prefix: ArchivePrefix,
+    file_count: u32,
+    images: Vec<LoadedGmImage>,
+    sprites: Vec<LoadedGmSprite>,
+}
+
+impl LoadedGmAtlasArchive {
+    pub fn open_files(
+        directory: impl AsRef<Path>,
+        file_numbers: &[u32],
+        max_decoded_file_size: usize,
+    ) -> Result<Self, ExtractError> {
+        let directory = directory.as_ref();
+        let prefix = ArchivePrefix::parse("gm").map_err(ExtractError::InvalidPrefix)?;
+        let mut parsed_files = Vec::new();
+        for &file_number in file_numbers {
+            let path = directory.join(format!("gm{file_number:06}.bin"));
+            let bytes = read_file("read GM atlas", &path)?;
+            let scanned =
+                scan_data_file(file_number, &bytes).map_err(|source| ExtractError::BlockScan {
+                    file_number,
+                    source,
+                })?;
+            let blocks = scanned.zlib_blocks().copied().collect::<Vec<_>>();
+            let gaps = scanned.unresolved_gaps().count();
+            if blocks.len() != 1 || gaps != 0 {
+                return Err(ExtractError::GmAtlasBlockLayout {
+                    file_number,
+                    block_count: blocks.len(),
+                    unresolved_gap_count: gaps,
+                });
+            }
+            let decoded = blocks[0]
+                .decode(&bytes, max_decoded_file_size)
+                .map_err(ExtractError::RawBlockDecode)?;
+            let atlas = GmAtlas::parse(&decoded).map_err(|source| ExtractError::GmAtlasParse {
+                file_number,
+                source,
+            })?;
+            parsed_files.push((file_number, atlas));
+        }
+
+        let total_image_count = parsed_files.iter().try_fold(0_u32, |total, (_, atlas)| {
+            total
+                .checked_add(u32::try_from(atlas.images.len()).unwrap_or(u32::MAX))
+                .ok_or(ExtractError::RawArchiveBlockCountOverflow)
+        })?;
+        let mut images = Vec::new();
+        let mut sprites = Vec::new();
+        let mut atlas_block_index = 0_u32;
+        let mut sprite_index = 0_u32;
+        for (file_number, atlas) in parsed_files {
+            let image_base = images.len();
+            let atlas_block_base = atlas_block_index;
+            for image in atlas.images {
+                images.push(LoadedGmImage {
+                    record: GmAtlasImageRecord {
+                        key: RawResourceKey {
+                            block_index: atlas_block_index,
+                            file_number,
+                            file_block_index: image.image_index,
+                        },
+                        atlas_block_index,
+                        width: image.width,
+                        height: image.height,
+                        format: image.format,
+                        variant: image.variant,
+                    },
+                    pixels_bgra: image.pixels_bgra,
+                });
+                atlas_block_index = atlas_block_index
+                    .checked_add(1)
+                    .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+            }
+            for sprite in atlas.sprites {
+                let image_vector_index = image_base
+                    .checked_add(usize::try_from(sprite.image_index).unwrap_or(usize::MAX))
+                    .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+                let source_atlas_block_index = atlas_block_base
+                    .checked_add(sprite.image_index)
+                    .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+                sprites.push(LoadedGmSprite {
+                    record: GmSpriteRecord {
+                        key: RawResourceKey {
+                            block_index: total_image_count
+                                .checked_add(sprite_index)
+                                .ok_or(ExtractError::RawArchiveBlockCountOverflow)?,
+                            file_number,
+                            file_block_index: sprite.sprite_index,
+                        },
+                        sprite_index,
+                        atlas_block_index: source_atlas_block_index,
+                        atlas_image_index: sprite.image_index,
+                        width: sprite.width,
+                        height: sprite.height,
+                    },
+                    image_vector_index,
+                    x: sprite.x,
+                    y: sprite.y,
+                });
+                sprite_index = sprite_index
+                    .checked_add(1)
+                    .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+            }
+        }
+
+        Ok(Self {
+            prefix,
+            file_count: u32::try_from(file_numbers.len())
+                .map_err(|_| ExtractError::RawArchiveFileCountOverflow)?,
+            images,
+            sprites,
+        })
+    }
+
+    pub fn prefix(&self) -> &ArchivePrefix {
+        &self.prefix
+    }
+
+    pub fn archive_count(&self) -> u32 {
+        self.file_count
+    }
+
+    pub fn records(&self) -> impl Iterator<Item = GmSpriteRecord> + '_ {
+        self.sprites.iter().map(|sprite| sprite.record)
+    }
+
+    pub fn atlas_records(&self) -> impl Iterator<Item = GmAtlasImageRecord> + '_ {
+        self.images.iter().map(|image| image.record)
+    }
+
+    pub fn sprite_source(&self, key: RawResourceKey) -> Option<GmSpriteSourceRecord> {
+        let sprite = self.gm_sprite(key).ok()?;
+        let atlas = self.images.get(sprite.image_vector_index)?;
+        Some(GmSpriteSourceRecord {
+            atlas_key: atlas.record.key,
+            atlas_block_index: sprite.record.atlas_block_index,
+            atlas_width: atlas.record.width,
+            atlas_height: atlas.record.height,
+            x: sprite.x,
+            y: sprite.y,
+            width: sprite.record.width,
+            height: sprite.record.height,
+        })
+    }
+
+    pub fn extract_png(
+        &self,
+        key: RawResourceKey,
+        max_output_size: usize,
+    ) -> Result<ExtractedResource, ExtractError> {
+        let (width, height, pixels_bgra) = if let Some(image) = self.gm_image(key) {
+            (
+                image.record.width,
+                image.record.height,
+                image.pixels_bgra.clone(),
+            )
+        } else {
+            let sprite = self.gm_sprite(key)?;
+            (
+                sprite.record.width,
+                sprite.record.height,
+                self.sprite_pixels_bgra(sprite)?,
+            )
+        };
+        if pixels_bgra.len() > max_output_size {
+            return Err(ExtractError::GmAtlasImageTooLarge {
+                required: pixels_bgra.len(),
+                maximum: max_output_size,
+            });
+        }
+        let decoded =
+            RgbaImage::from_bgra(width, height, &pixels_bgra).map_err(ExtractError::PixelDecode)?;
+        let png = decoded.encode_png().map_err(ExtractError::PngEncode)?;
+        Ok(ExtractedResource {
+            key: ResourceKey {
+                group_code: key.file_number,
+                icon_id: key.file_block_index,
+                block_index: key.block_index,
+            },
+            width,
+            height,
+            png,
+        })
+    }
+
+    pub fn extract_thumbnail_png(
+        &self,
+        key: RawResourceKey,
+        max_decode_size: usize,
+        max_width: u32,
+        max_height: u32,
+        max_thumbnail_output_size: usize,
+    ) -> Result<ExtractedThumbnail, ExtractError> {
+        let (source_width, source_height, pixels_bgra) = if let Some(image) = self.gm_image(key) {
+            (
+                image.record.width,
+                image.record.height,
+                image.pixels_bgra.clone(),
+            )
+        } else {
+            let sprite = self.gm_sprite(key)?;
+            (
+                sprite.record.width,
+                sprite.record.height,
+                self.sprite_pixels_bgra(sprite)?,
+            )
+        };
+        if pixels_bgra.len() > max_decode_size {
+            return Err(ExtractError::GmAtlasImageTooLarge {
+                required: pixels_bgra.len(),
+                maximum: max_decode_size,
+            });
+        }
+        let decoded = RgbaImage::from_bgra(source_width, source_height, &pixels_bgra)
+            .map_err(ExtractError::PixelDecode)?;
+        let thumbnail = decoded
+            .thumbnail(max_width, max_height, max_thumbnail_output_size)
+            .map_err(ExtractError::Thumbnail)?;
+        let png = thumbnail.encode_png().map_err(ExtractError::PngEncode)?;
+        Ok(ExtractedThumbnail {
+            key: ResourceKey {
+                group_code: key.file_number,
+                icon_id: key.file_block_index,
+                block_index: key.block_index,
+            },
+            source_width,
+            source_height,
+            width: thumbnail.width(),
+            height: thumbnail.height(),
+            png,
+        })
+    }
+
+    fn gm_image(&self, key: RawResourceKey) -> Option<&LoadedGmImage> {
+        self.images
+            .get(usize::try_from(key.block_index).ok()?)
+            .filter(|image| image.record.key == key)
+    }
+
+    fn gm_sprite(&self, key: RawResourceKey) -> Result<&LoadedGmSprite, ExtractError> {
+        let sprite_index = key
+            .block_index
+            .checked_sub(u32::try_from(self.images.len()).unwrap_or(u32::MAX))
+            .ok_or(ExtractError::RawResourceNotFound { key })?;
+        self.sprites
+            .get(usize::try_from(sprite_index).unwrap_or(usize::MAX))
+            .filter(|sprite| sprite.record.key == key)
+            .ok_or(ExtractError::RawResourceNotFound { key })
+    }
+
+    fn sprite_pixels_bgra(&self, sprite: &LoadedGmSprite) -> Result<Vec<u8>, ExtractError> {
+        let image = self.images.get(sprite.image_vector_index).ok_or(
+            ExtractError::RawResourceNotFound {
+                key: sprite.record.key,
+            },
+        )?;
+        if sprite
+            .x
+            .checked_add(sprite.record.width)
+            .is_none_or(|right| right > image.record.width)
+            || sprite
+                .y
+                .checked_add(sprite.record.height)
+                .is_none_or(|bottom| bottom > image.record.height)
+        {
+            return Err(ExtractError::RawResourceNotFound {
+                key: sprite.record.key,
+            });
+        }
+        let row_bytes = usize::try_from(sprite.record.width)
+            .ok()
+            .and_then(|width| width.checked_mul(4))
+            .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+        let output_len = row_bytes
+            .checked_mul(usize::try_from(sprite.record.height).unwrap_or(usize::MAX))
+            .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+        let image_row_bytes = usize::try_from(image.record.width)
+            .ok()
+            .and_then(|width| width.checked_mul(4))
+            .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+        let x_bytes = usize::try_from(sprite.x)
+            .ok()
+            .and_then(|x| x.checked_mul(4))
+            .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+        let mut output = Vec::with_capacity(output_len);
+        for row in 0..sprite.record.height {
+            let source_y = sprite
+                .y
+                .checked_add(row)
+                .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+            let start = usize::try_from(source_y)
+                .ok()
+                .and_then(|y| y.checked_mul(image_row_bytes))
+                .and_then(|offset| offset.checked_add(x_bytes))
+                .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+            let end = start
+                .checked_add(row_bytes)
+                .ok_or(ExtractError::RawArchiveBlockCountOverflow)?;
+            output.extend_from_slice(image.pixels_bgra.get(start..end).ok_or(
+                ExtractError::RawResourceNotFound {
+                    key: sprite.record.key,
+                },
+            )?);
+        }
+        debug_assert_eq!(output.len(), output_len);
+        Ok(output)
+    }
+}
+
+#[derive(Debug)]
+struct LoadedStandaloneImage {
+    record: StandaloneImageRecord,
+    pixels_bgra: Vec<u8>,
+}
+
+/// Images stored in standalone client files without a two-letter archive filename.
+#[derive(Debug)]
+pub struct LoadedStandaloneImageArchive {
+    prefix: ArchivePrefix,
+    images: Vec<LoadedStandaloneImage>,
+}
+
+impl LoadedStandaloneImageArchive {
+    pub fn open_font(
+        path: impl AsRef<Path>,
+        max_decoded_size: usize,
+    ) -> Result<Self, ExtractError> {
+        let path = path.as_ref();
+        let bytes = read_file("read bitmap font archive", path)?;
+        let scanned = scan_data_file(0, &bytes).map_err(|source| ExtractError::BlockScan {
+            file_number: 0,
+            source,
+        })?;
+        let blocks = scanned.zlib_blocks().copied().collect::<Vec<_>>();
+        let gap_count = scanned.unresolved_gaps().count();
+        if blocks.len() != 1 || gap_count != 0 {
+            return Err(ExtractError::StandaloneBlockLayout {
+                prefix: "ft",
+                block_count: blocks.len(),
+                unresolved_gap_count: gap_count,
+            });
+        }
+        let decoded = blocks[0]
+            .decode(&bytes, max_decoded_size)
+            .map_err(ExtractError::RawBlockDecode)?;
+        let font = BitmapFontArchive::parse(&decoded).map_err(|source| {
+            ExtractError::SpecialImageParse {
+                prefix: "ft",
+                source,
+            }
+        })?;
+        let images = font
+            .glyphs
+            .into_iter()
+            .enumerate()
+            .map(|(block_index, glyph)| {
+                let mut pixels_bgra = Vec::with_capacity(glyph.alpha.len() * 4);
+                for alpha in glyph.alpha {
+                    pixels_bgra.extend_from_slice(&[0xff, 0xff, 0xff, alpha]);
+                }
+                LoadedStandaloneImage {
+                    record: StandaloneImageRecord {
+                        key: RawResourceKey {
+                            block_index: u32::try_from(block_index).unwrap_or(u32::MAX),
+                            file_number: 0,
+                            file_block_index: glyph.code_point,
+                        },
+                        width: glyph.width,
+                        height: glyph.height,
+                    },
+                    pixels_bgra,
+                }
+            })
+            .collect();
+        Ok(Self {
+            prefix: ArchivePrefix::parse("ft").map_err(ExtractError::InvalidPrefix)?,
+            images,
+        })
+    }
+
+    pub fn open_cursor(
+        path: impl AsRef<Path>,
+        max_decoded_size: usize,
+    ) -> Result<Self, ExtractError> {
+        let path = path.as_ref();
+        let bytes = read_file("read cursor archive", path)?;
+        let scanned = scan_data_file(0, &bytes).map_err(|source| ExtractError::BlockScan {
+            file_number: 0,
+            source,
+        })?;
+        let blocks = scanned.zlib_blocks().copied().collect::<Vec<_>>();
+        let gap_count = scanned.unresolved_gaps().count();
+        if blocks.len() != 1 || gap_count != 0 {
+            return Err(ExtractError::StandaloneBlockLayout {
+                prefix: "cu",
+                block_count: blocks.len(),
+                unresolved_gap_count: gap_count,
+            });
+        }
+        let decoded = blocks[0]
+            .decode(&bytes, max_decoded_size)
+            .map_err(ExtractError::RawBlockDecode)?;
+        let cursor =
+            CursorArchive::parse(&decoded).map_err(|source| ExtractError::SpecialImageParse {
+                prefix: "cu",
+                source,
+            })?;
+        let (width, height) = cursor_dimensions();
+        let images = cursor
+            .images
+            .into_iter()
+            .map(|image| LoadedStandaloneImage {
+                record: StandaloneImageRecord {
+                    key: RawResourceKey {
+                        block_index: image.index,
+                        file_number: 0,
+                        file_block_index: image.index,
+                    },
+                    width,
+                    height,
+                },
+                pixels_bgra: image.pixels_bgra,
+            })
+            .collect();
+        Ok(Self {
+            prefix: ArchivePrefix::parse("cu").map_err(ExtractError::InvalidPrefix)?,
+            images,
+        })
+    }
+
+    pub fn open_xftx(path: impl AsRef<Path>) -> Result<Self, ExtractError> {
+        let path = path.as_ref();
+        let bytes = read_file("read XFTX archive", path)?;
+        let archive =
+            XftxArchive::parse(&bytes).map_err(|source| ExtractError::SpecialImageParse {
+                prefix: "wm",
+                source,
+            })?;
+        let images = archive
+            .textures
+            .into_iter()
+            .map(|texture| LoadedStandaloneImage {
+                record: StandaloneImageRecord {
+                    key: RawResourceKey {
+                        block_index: texture.index,
+                        file_number: 0,
+                        file_block_index: texture.index,
+                    },
+                    width: texture.width,
+                    height: texture.height,
+                },
+                pixels_bgra: texture.pixels_bgra,
+            })
+            .collect();
+        Ok(Self {
+            prefix: ArchivePrefix::parse("wm").map_err(ExtractError::InvalidPrefix)?,
+            images,
+        })
+    }
+
+    pub fn prefix(&self) -> &ArchivePrefix {
+        &self.prefix
+    }
+
+    pub fn records(&self) -> impl Iterator<Item = StandaloneImageRecord> + '_ {
+        self.images.iter().map(|image| image.record)
+    }
+
+    pub fn extract_png(
+        &self,
+        key: RawResourceKey,
+        max_output_size: usize,
+    ) -> Result<ExtractedResource, ExtractError> {
+        let image = self.image(key)?;
+        if image.pixels_bgra.len() > max_output_size {
+            return Err(ExtractError::GmAtlasImageTooLarge {
+                required: image.pixels_bgra.len(),
+                maximum: max_output_size,
+            });
+        }
+        let decoded =
+            RgbaImage::from_bgra(image.record.width, image.record.height, &image.pixels_bgra)
+                .map_err(ExtractError::PixelDecode)?;
+        let png = decoded.encode_png().map_err(ExtractError::PngEncode)?;
+        Ok(ExtractedResource {
+            key: ResourceKey {
+                group_code: 0,
+                icon_id: key.file_block_index,
+                block_index: key.block_index,
+            },
+            width: image.record.width,
+            height: image.record.height,
+            png,
+        })
+    }
+
+    pub fn extract_thumbnail_png(
+        &self,
+        key: RawResourceKey,
+        max_decode_size: usize,
+        max_width: u32,
+        max_height: u32,
+        max_thumbnail_output_size: usize,
+    ) -> Result<ExtractedThumbnail, ExtractError> {
+        let image = self.image(key)?;
+        if image.pixels_bgra.len() > max_decode_size {
+            return Err(ExtractError::GmAtlasImageTooLarge {
+                required: image.pixels_bgra.len(),
+                maximum: max_decode_size,
+            });
+        }
+        let decoded =
+            RgbaImage::from_bgra(image.record.width, image.record.height, &image.pixels_bgra)
+                .map_err(ExtractError::PixelDecode)?;
+        let thumbnail = decoded
+            .thumbnail(max_width, max_height, max_thumbnail_output_size)
+            .map_err(ExtractError::Thumbnail)?;
+        let png = thumbnail.encode_png().map_err(ExtractError::PngEncode)?;
+        Ok(ExtractedThumbnail {
+            key: ResourceKey {
+                group_code: 0,
+                icon_id: key.file_block_index,
+                block_index: key.block_index,
+            },
+            source_width: image.record.width,
+            source_height: image.record.height,
+            width: thumbnail.width(),
+            height: thumbnail.height(),
+            png,
+        })
+    }
+
+    fn image(&self, key: RawResourceKey) -> Result<&LoadedStandaloneImage, ExtractError> {
+        self.images
+            .get(usize::try_from(key.block_index).unwrap_or(usize::MAX))
+            .filter(|image| image.record.key == key)
+            .ok_or(ExtractError::RawResourceNotFound { key })
+    }
+}
+
 fn validate_raw_image_spec(spec: RawImageSpec) -> Result<(), ExtractError> {
     if spec.variants.is_empty() {
         return Err(ExtractError::RawImageSpecEmpty);
@@ -614,7 +1293,49 @@ pub struct LoadedArchive {
     prefix: ArchivePrefix,
     index: IndexedArchive,
     layout: ArchiveLayout,
+    assemblies: IndexedAssemblyLayout,
     data_files: Vec<ArchiveDataFile>,
+}
+
+/// Stable metadata for one sprite referenced by a GM UI atlas table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GmSpriteRecord {
+    pub key: RawResourceKey,
+    pub sprite_index: u32,
+    pub atlas_block_index: u32,
+    pub atlas_image_index: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Stable metadata for one complete source image embedded in the GM files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GmAtlasImageRecord {
+    pub key: RawResourceKey,
+    pub atlas_block_index: u32,
+    pub width: u32,
+    pub height: u32,
+    pub format: u32,
+    pub variant: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GmSpriteSourceRecord {
+    pub atlas_key: RawResourceKey,
+    pub atlas_block_index: u32,
+    pub atlas_width: u32,
+    pub atlas_height: u32,
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StandaloneImageRecord {
+    pub key: RawResourceKey,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl LoadedArchive {
@@ -647,10 +1368,13 @@ impl LoadedArchive {
             });
         }
 
+        let assemblies = resolve_indexed_assembly_layout(prefix.as_str(), &index.records);
+
         Ok(Self {
             prefix,
             index,
             layout,
+            assemblies,
             data_files,
         })
     }
@@ -669,6 +1393,14 @@ impl LoadedArchive {
             icon_id: record.icon_id,
             block_index: record.block_index,
         })
+    }
+
+    pub fn assembly_canonical_block(&self, block_index: u32) -> Option<u32> {
+        self.assemblies.canonical_block(block_index)
+    }
+
+    pub fn is_assembled(&self, block_index: u32) -> bool {
+        self.assemblies.is_assembled(block_index)
     }
 
     /// Decodes and PNG-encodes exactly one physical record variant.
@@ -722,12 +1454,12 @@ impl LoadedArchive {
         max_tile_output_size: usize,
         max_assembled_output_size: usize,
     ) -> Result<Option<ExtractedAssembly>, ExtractError> {
-        if let Some(rule) = composite_assembly_rule(self.prefix.as_str(), block_index) {
+        if let Some(rule) = self.assemblies.composite_for(block_index) {
             return self
                 .extract_composite_assembly(rule, max_tile_output_size, max_assembled_output_size)
                 .map(Some);
         }
-        let Some(plan) = assembly_plan(self.prefix.as_str(), block_index) else {
+        let Some(plan) = self.assemblies.plan_for(block_index) else {
             return Ok(None);
         };
 
@@ -765,7 +1497,7 @@ impl LoadedArchive {
         max_height: u32,
         max_thumbnail_output_size: usize,
     ) -> Result<Option<ExtractedAssemblyThumbnail>, ExtractError> {
-        if let Some(rule) = composite_assembly_rule(self.prefix.as_str(), block_index) {
+        if let Some(rule) = self.assemblies.composite_for(block_index) {
             return self
                 .extract_composite_assembly_thumbnail(
                     rule,
@@ -777,7 +1509,7 @@ impl LoadedArchive {
                 )
                 .map(Some);
         }
-        let Some(plan) = assembly_plan(self.prefix.as_str(), block_index) else {
+        let Some(plan) = self.assemblies.plan_for(block_index) else {
             return Ok(None);
         };
         self.extract_assembly_thumbnail(
@@ -838,23 +1570,26 @@ impl LoadedArchive {
 
     fn extract_composite_assembly_thumbnail(
         &self,
-        rule: CompositeAssemblyRule,
+        resolved: ResolvedCompositeAssembly,
         max_tile_output_size: usize,
         max_assembled_output_size: usize,
         max_width: u32,
         max_height: u32,
         max_thumbnail_output_size: usize,
     ) -> Result<ExtractedAssemblyThumbnail, ExtractError> {
-        let image =
-            self.decode_composite_assembly(rule, max_tile_output_size, max_assembled_output_size)?;
+        let image = self.decode_composite_assembly(
+            resolved,
+            max_tile_output_size,
+            max_assembled_output_size,
+        )?;
         let thumbnail = image
             .thumbnail(max_width, max_height, max_thumbnail_output_size)
             .map_err(ExtractError::Thumbnail)?;
         let png = thumbnail.encode_png().map_err(ExtractError::PngEncode)?;
 
         Ok(ExtractedAssemblyThumbnail {
-            first_block: rule.canonical_block,
-            last_block: rule.last_block,
+            first_block: resolved.canonical_block().unwrap_or(u32::MAX),
+            last_block: resolved.last_block().unwrap_or(u32::MAX),
             source_width: image.width(),
             source_height: image.height(),
             width: thumbnail.width(),
@@ -865,17 +1600,20 @@ impl LoadedArchive {
 
     fn extract_composite_assembly(
         &self,
-        rule: CompositeAssemblyRule,
+        resolved: ResolvedCompositeAssembly,
         max_tile_output_size: usize,
         max_assembled_output_size: usize,
     ) -> Result<ExtractedAssembly, ExtractError> {
-        let image =
-            self.decode_composite_assembly(rule, max_tile_output_size, max_assembled_output_size)?;
+        let image = self.decode_composite_assembly(
+            resolved,
+            max_tile_output_size,
+            max_assembled_output_size,
+        )?;
         let png = image.encode_png().map_err(ExtractError::PngEncode)?;
 
         Ok(ExtractedAssembly {
-            first_block: rule.canonical_block,
-            last_block: rule.last_block,
+            first_block: resolved.canonical_block().unwrap_or(u32::MAX),
+            last_block: resolved.last_block().unwrap_or(u32::MAX),
             width: image.width(),
             height: image.height(),
             png,
@@ -884,10 +1622,11 @@ impl LoadedArchive {
 
     fn decode_composite_assembly(
         &self,
-        rule: CompositeAssemblyRule,
+        resolved: ResolvedCompositeAssembly,
         max_tile_output_size: usize,
         max_assembled_output_size: usize,
     ) -> Result<RgbaImage, ExtractError> {
+        let rule = resolved.rule;
         if !rule.archive.eq_ignore_ascii_case(self.prefix.as_str()) {
             return Err(ExtractError::AssemblyArchiveMismatch {
                 expected: rule.archive,
@@ -904,7 +1643,17 @@ impl LoadedArchive {
         let mut layer_images = Vec::with_capacity(rule.layers.len());
         for layer in rule.layers {
             let mut tiles = Vec::new();
-            for block_index in layer.start_block..=layer.end_block {
+            let start_block = resolved.shifted_block(layer.start_block).ok_or(
+                ExtractError::AssemblyTileRecordNotFound {
+                    block_index: u32::MAX,
+                },
+            )?;
+            let end_block = resolved.shifted_block(layer.end_block).ok_or(
+                ExtractError::AssemblyTileRecordNotFound {
+                    block_index: u32::MAX,
+                },
+            )?;
+            for block_index in start_block..=end_block {
                 let record = self.record_for_block(block_index)?;
                 tiles.push(self.decode_record(record, max_tile_output_size)?);
             }
@@ -1148,6 +1897,28 @@ pub enum ExtractError {
         file_number: u32,
         source: BlockScanError,
     },
+    GmAtlasBlockLayout {
+        file_number: u32,
+        block_count: usize,
+        unresolved_gap_count: usize,
+    },
+    GmAtlasParse {
+        file_number: u32,
+        source: GmAtlasParseError,
+    },
+    GmAtlasImageTooLarge {
+        required: usize,
+        maximum: usize,
+    },
+    StandaloneBlockLayout {
+        prefix: &'static str,
+        block_count: usize,
+        unresolved_gap_count: usize,
+    },
+    SpecialImageParse {
+        prefix: &'static str,
+        source: SpecialImageParseError,
+    },
     RawImageDimensionOverflow {
         width: u32,
         height: u32,
@@ -1271,6 +2042,39 @@ impl fmt::Display for ExtractError {
                 formatter,
                 "failed to scan data file {file_number}: {source}"
             ),
+            Self::GmAtlasBlockLayout {
+                file_number,
+                block_count,
+                unresolved_gap_count,
+            } => write!(
+                formatter,
+                "GM atlas file {file_number} must contain one MWC block and no gaps; found {block_count} blocks and {unresolved_gap_count} gaps"
+            ),
+            Self::GmAtlasParse {
+                file_number,
+                source,
+            } => write!(
+                formatter,
+                "failed to parse GM atlas file {file_number}: {source}"
+            ),
+            Self::GmAtlasImageTooLarge { required, maximum } => write!(
+                formatter,
+                "GM atlas image requires {required} decoded bytes, exceeding limit {maximum}"
+            ),
+            Self::StandaloneBlockLayout {
+                prefix,
+                block_count,
+                unresolved_gap_count,
+            } => write!(
+                formatter,
+                "standalone {prefix} archive must contain one MWC block and no gaps; found {block_count} blocks and {unresolved_gap_count} gaps"
+            ),
+            Self::SpecialImageParse { prefix, source } => {
+                write!(
+                    formatter,
+                    "failed to parse standalone {prefix} images: {source}"
+                )
+            }
             Self::RawImageDimensionOverflow { width, height } => write!(
                 formatter,
                 "raw image dimensions overflow this platform: {width}x{height}"
@@ -1440,6 +2244,8 @@ impl Error for ExtractError {
             Self::Io { source, .. } => Some(source),
             Self::IndexParse(error) => Some(error),
             Self::BlockScan { source, .. } => Some(source),
+            Self::GmAtlasParse { source, .. } => Some(source),
+            Self::SpecialImageParse { source, .. } => Some(source),
             Self::InlineBlockTableParse { source, .. } => Some(source),
             Self::RawBlockDecode(error) => Some(error),
             Self::BlockDecode(error) => Some(error),
@@ -1447,7 +2253,10 @@ impl Error for ExtractError {
             Self::ImageAssembly(error) => Some(error),
             Self::Thumbnail(error) => Some(error),
             Self::PngEncode(error) => Some(error),
-            Self::RawImageDimensionOverflow { .. }
+            Self::GmAtlasBlockLayout { .. }
+            | Self::GmAtlasImageTooLarge { .. }
+            | Self::StandaloneBlockLayout { .. }
+            | Self::RawImageDimensionOverflow { .. }
             | Self::RawImageSpecEmpty
             | Self::RawImageSpecSizeMismatch { .. }
             | Self::RawUnresolvedGap { .. }
@@ -1483,6 +2292,25 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn rebases_reviewed_sd_grid_from_the_current_logical_anchor() {
+        let records = (2_941..=3_084)
+            .map(|block_index| IndexRecord {
+                icon_id: block_index - 2_941,
+                block_index,
+                width: 128,
+                height: 128,
+                group_code: 1,
+            })
+            .collect::<Vec<_>>();
+
+        let layout = resolve_indexed_assembly_layout("sd", &records);
+        assert_eq!(layout.canonical_block(2_941), Some(2_941));
+        assert_eq!(layout.canonical_block(2_948), Some(2_941));
+        assert!(layout.is_assembled(3_084));
+        assert_eq!(layout.canonical_block(2_927), None);
+    }
 
     struct TestDirectory(PathBuf);
 
@@ -1520,12 +2348,12 @@ mod tests {
             .map(|record| record[1])
             .max()
             .map_or(0, |block_index| block_index + 1);
-        for value in [records.len() as u32, group_count, 1, 1, block_count, 1, 0] {
+        for value in [records.len() as u32, group_count, 1, 1, block_count, 1] {
             push_u32(&mut index, value);
         }
         for record in records {
-            for value in record {
-                push_u32(&mut index, *value);
+            for value in [record[4], record[0], record[1], record[2], record[3]] {
+                push_u32(&mut index, value);
             }
         }
         fs::write(directory.join("sc000000.bin"), index).expect("write test index");
@@ -1920,6 +2748,8 @@ mod tests {
         let archive = LoadedArchive::open(&directory.0, "sc").expect("open test archive");
         let rule = dho_catalog::AssemblyRule {
             archive: "sc",
+            anchor_group_code: 9,
+            anchor_icon_id: 100,
             start_block: 0,
             end_block: 3,
             tiles_per_image: 4,
@@ -2004,6 +2834,8 @@ mod tests {
         let archive = LoadedArchive::open(&directory.0, "sc").expect("open test archive");
         let rule = CompositeAssemblyRule {
             archive: "sc",
+            anchor_group_code: 9,
+            anchor_icon_id: 100,
             canonical_block: 0,
             last_block: 2,
             layers: LAYERS,
@@ -2013,7 +2845,14 @@ mod tests {
         };
 
         let assembled = archive
-            .extract_composite_assembly(rule, 4, 4)
+            .extract_composite_assembly(
+                ResolvedCompositeAssembly {
+                    rule,
+                    block_delta: 0,
+                },
+                4,
+                4,
+            )
             .expect("extract composite PNG");
         let decoded = image::load_from_memory_with_format(&assembled.png, image::ImageFormat::Png)
             .expect("decode composite PNG")

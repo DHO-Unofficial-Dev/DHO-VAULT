@@ -4,17 +4,22 @@
 
 mod app_update;
 mod asset_baseline;
+mod text_baseline;
 
 use app_update::{AppUpdateState, check_app_update, get_app_version, install_app_update};
 use asset_baseline::{AssetUpdateReport, AssetUpdateStatus};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use dho_client::{
-    AssetSnapshotEntry, GameDirectorySummary, VIEWER_CATEGORY_PAGE_SIZE, VerifiedAssetDetail,
-    VerifiedAssetPng, VerifiedAssetSearchItem, VerifiedAssetSearchPage, VerifiedCategoryAsset,
-    VerifiedCategoryPage, VerifiedSearchAsset, VerifiedUpdatePage, ViewerSession,
-    inspect_game_directory,
+    AUDIO_PAGE_SIZE, AssetSnapshotEntry, AudioCatalog, AudioCatalogSummary, AudioTrackPage,
+    GameDirectorySummary, TEXT_PAGE_SIZE, TextCatalogSummary, TextRecordItem, TextRecordPage,
+    VIEWER_CATEGORY_PAGE_SIZE, VerifiedAssetDetail, VerifiedAssetPng, VerifiedAssetSearchItem,
+    VerifiedAssetSearchPage, VerifiedCategoryAsset, VerifiedCategoryPage, VerifiedSearchAsset,
+    VerifiedUpdatePage, ViewerSession, inspect_game_directory,
 };
 use dho_image::upscale_small_square_png_for_service;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -125,6 +130,42 @@ fn apply_image_export_mode(
 #[serde(rename_all = "camelCase")]
 struct SavedVerifiedPage {
     saved_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioTrackPlayback {
+    id: u32,
+    file_name: String,
+    payload_bytes: u32,
+    loop_start_sample: u32,
+    loop_start_seconds: f64,
+    sample_rate: Option<u32>,
+    channels: Option<u8>,
+    audio_data_url: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedAudioTrack {
+    file_name: String,
+    payload_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextUpdateItem {
+    change_kind: text_baseline::TextChangeKind,
+    record: TextRecordItem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextUpdatePage {
+    offset: usize,
+    page_size: usize,
+    total_count: usize,
+    items: Vec<TextUpdateItem>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Hash)]
@@ -379,6 +420,13 @@ fn viewer_asset_baseline_path(app: &tauri::AppHandle) -> Result<PathBuf, String>
         .map_err(|error| format!("앱 설정 폴더를 확인하지 못했습니다: {error}"))
 }
 
+fn viewer_text_baseline_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join(text_baseline::FILE_NAME))
+        .map_err(|error| format!("앱 설정 폴더를 확인하지 못했습니다: {error}"))
+}
+
 fn read_saved_game_directory(preferences_path: &Path) -> Result<Option<PathBuf>, String> {
     let contents = match fs::read(preferences_path) {
         Ok(contents) => contents,
@@ -436,6 +484,14 @@ fn selected_resource_directory(
         .resource_directory()
         .map(Path::to_path_buf)
         .ok_or_else(|| "먼저 게임 폴더를 선택해 주세요.".to_owned())
+}
+
+fn selected_game_directory(session: &State<'_, SharedViewerSession>) -> Result<PathBuf, String> {
+    let resource_directory = selected_resource_directory(session)?;
+    resource_directory
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "선택한 리소스 폴더에서 게임 폴더를 확인하지 못했습니다.".to_owned())
 }
 
 fn invalidate_asset_update_cache(cache: &State<'_, SharedAssetUpdateCache>) -> Result<u64, String> {
@@ -559,6 +615,7 @@ async fn refresh_asset_update_baseline(
 #[tauri::command]
 async fn load_verified_update_page(
     app: tauri::AppHandle,
+    language_block: usize,
     offset: usize,
     session: State<'_, SharedViewerSession>,
     update_cache: State<'_, SharedAssetUpdateCache>,
@@ -584,9 +641,13 @@ async fn load_verified_update_page(
                 assets
             }
         };
-        session
+        let mut session = session
             .lock()
-            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?
+            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?;
+        session
+            .set_text_language_block(language_block)
+            .map_err(|error| error.to_string())?;
+        session
             .update_page(&added_assets, offset, VIEWER_CATEGORY_PAGE_SIZE)
             .map_err(|error| error.to_string())
     })
@@ -596,15 +657,20 @@ async fn load_verified_update_page(
 
 #[tauri::command]
 async fn load_verified_category_page(
+    language_block: usize,
     path: Vec<String>,
     offset: usize,
     session: State<'_, SharedViewerSession>,
 ) -> Result<VerifiedCategoryPage, String> {
     let session = session.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        session
+        let mut session = session
             .lock()
-            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?
+            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?;
+        session
+            .set_text_language_block(language_block)
+            .map_err(|error| error.to_string())?;
+        session
             .category_page(&path, offset, VIEWER_CATEGORY_PAGE_SIZE)
             .map_err(|error| error.to_string())
     })
@@ -614,20 +680,301 @@ async fn load_verified_category_page(
 
 #[tauri::command]
 async fn load_verified_asset_search_page(
+    language_block: usize,
     query: String,
     offset: usize,
     session: State<'_, SharedViewerSession>,
 ) -> Result<VerifiedAssetSearchPage, String> {
     let session = session.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        session
+        let mut session = session
             .lock()
-            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?
+            .map_err(|_| "이미지 탐색 세션을 열지 못했습니다.".to_owned())?;
+        session
+            .set_text_language_block(language_block)
+            .map_err(|error| error.to_string())?;
+        session
             .search_page(&query, offset, VIEWER_CATEGORY_PAGE_SIZE)
             .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| format!("검색 결과를 불러오는 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn load_audio_catalog_summary(
+    session: State<'_, SharedViewerSession>,
+) -> Result<AudioCatalogSummary, String> {
+    let game_directory = selected_game_directory(&session)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        AudioCatalog::load(game_directory)
+            .map(|catalog| catalog.summary())
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("오디오 자료를 확인하는 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn load_audio_track_page(
+    query: String,
+    offset: usize,
+    session: State<'_, SharedViewerSession>,
+) -> Result<AudioTrackPage, String> {
+    let game_directory = selected_game_directory(&session)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        AudioCatalog::load(game_directory)
+            .and_then(|catalog| catalog.page(&query, offset, AUDIO_PAGE_SIZE))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("오디오 목록을 불러오는 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn load_audio_track(
+    id: u32,
+    session: State<'_, SharedViewerSession>,
+) -> Result<AudioTrackPlayback, String> {
+    let game_directory = selected_game_directory(&session)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let track = AudioCatalog::load(game_directory)
+            .and_then(|catalog| catalog.ogg(id))
+            .map_err(|error| error.to_string())?;
+        let audio_data_url = format!(
+            "data:audio/ogg;base64,{}",
+            BASE64_STANDARD.encode(&track.ogg)
+        );
+        Ok(AudioTrackPlayback {
+            id: track.item.id,
+            file_name: track.item.file_name,
+            payload_bytes: track.item.payload_bytes,
+            loop_start_sample: track.item.loop_start_sample,
+            loop_start_seconds: track.item.loop_start_seconds,
+            sample_rate: track.sample_rate,
+            channels: track.channels,
+            audio_data_url,
+        })
+    })
+    .await
+    .map_err(|error| format!("오디오를 여는 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn save_audio_track_ogg(
+    app: tauri::AppHandle,
+    id: u32,
+    session: State<'_, SharedViewerSession>,
+) -> Result<Option<SavedAudioTrack>, String> {
+    let default_name = format!("{id:06}.ogg");
+    let selection = app
+        .dialog()
+        .file()
+        .set_title("OGG 오디오 저장")
+        .add_filter("Ogg Vorbis 오디오", &["ogg"])
+        .set_file_name(default_name)
+        .blocking_save_file();
+    let Some(selection) = selection else {
+        return Ok(None);
+    };
+    let mut destination = selection
+        .into_path()
+        .map_err(|error| format!("선택한 저장 경로를 처리하지 못했습니다: {error}"))?;
+    match destination.extension().and_then(|value| value.to_str()) {
+        None => {
+            destination.set_extension("ogg");
+        }
+        Some(extension) if extension.eq_ignore_ascii_case("ogg") => {}
+        Some(_) => return Err("파일 이름의 확장자를 .ogg로 지정해 주세요.".to_owned()),
+    }
+    let game_directory = selected_game_directory(&session)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let track = AudioCatalog::load(game_directory)
+            .and_then(|catalog| catalog.ogg(id))
+            .map_err(|error| error.to_string())?;
+        fs::write(&destination, &track.ogg).map_err(|error| {
+            format!(
+                "OGG 파일을 저장하지 못했습니다 ({}): {error}",
+                destination.display()
+            )
+        })?;
+        Ok(Some(SavedAudioTrack {
+            file_name: destination
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or(&track.item.file_name)
+                .to_owned(),
+            payload_bytes: track.ogg.len(),
+        }))
+    })
+    .await
+    .map_err(|error| format!("오디오 저장 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn load_text_catalog_summary(
+    language_block: usize,
+    session: State<'_, SharedViewerSession>,
+) -> Result<TextCatalogSummary, String> {
+    let session = session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut session = session
+            .lock()
+            .map_err(|_| "텍스트 탐색 세션을 열지 못했습니다.".to_owned())?;
+        session
+            .set_text_language_block(language_block)
+            .map_err(|error| error.to_string())?;
+        session
+            .text_catalog_summary(language_block)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("텍스트 자료를 확인하는 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn load_text_record_page(
+    language_block: usize,
+    source: Option<String>,
+    query: String,
+    offset: usize,
+    session: State<'_, SharedViewerSession>,
+) -> Result<TextRecordPage, String> {
+    let session = session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut session = session
+            .lock()
+            .map_err(|_| "텍스트 탐색 세션을 열지 못했습니다.".to_owned())?;
+        session
+            .set_text_language_block(language_block)
+            .map_err(|error| error.to_string())?;
+        session
+            .text_page(
+                language_block,
+                source.as_deref(),
+                &query,
+                offset,
+                TEXT_PAGE_SIZE,
+            )
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("텍스트 목록을 불러오는 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn load_text_image_detail(
+    archive: String,
+    group_code: u32,
+    icon_id: u32,
+    relation: String,
+    session: State<'_, SharedViewerSession>,
+) -> Result<VerifiedAssetDetail, String> {
+    let session = session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        session
+            .lock()
+            .map_err(|_| "텍스트 이미지 연결 세션을 열지 못했습니다.".to_owned())?
+            .text_image_detail(&archive, group_code, icon_id, &relation)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("연결 이미지를 불러오는 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn load_text_update_status(
+    app: tauri::AppHandle,
+    session: State<'_, SharedViewerSession>,
+) -> Result<text_baseline::TextUpdateStatus, String> {
+    let baseline_path = viewer_text_baseline_path(&app)?;
+    let game_directory = selected_game_directory(&session)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        text_baseline::load_report(&baseline_path, &game_directory).map(|report| report.status)
+    })
+    .await
+    .map_err(|error| format!("텍스트 업데이트 비교 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn create_text_update_baseline(
+    app: tauri::AppHandle,
+    session: State<'_, SharedViewerSession>,
+) -> Result<text_baseline::TextUpdateStatus, String> {
+    let baseline_path = viewer_text_baseline_path(&app)?;
+    let game_directory = selected_game_directory(&session)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        text_baseline::create(&baseline_path, &game_directory)
+    })
+    .await
+    .map_err(|error| format!("텍스트 기준점 저장 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn refresh_text_update_baseline(
+    app: tauri::AppHandle,
+    session: State<'_, SharedViewerSession>,
+) -> Result<text_baseline::TextUpdateStatus, String> {
+    let baseline_path = viewer_text_baseline_path(&app)?;
+    let game_directory = selected_game_directory(&session)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        text_baseline::refresh(&baseline_path, &game_directory)
+    })
+    .await
+    .map_err(|error| format!("텍스트 기준점 갱신 작업이 중단되었습니다: {error}"))?
+}
+
+#[tauri::command]
+async fn load_text_update_page(
+    app: tauri::AppHandle,
+    offset: usize,
+    session: State<'_, SharedViewerSession>,
+) -> Result<TextUpdatePage, String> {
+    let baseline_path = viewer_text_baseline_path(&app)?;
+    let game_directory = selected_game_directory(&session)?;
+    let session = session.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let report = text_baseline::load_report(&baseline_path, &game_directory)?;
+        let total_count = report.visible_changes.len();
+        if offset > 0 && offset >= total_count {
+            return Err(format!(
+                "텍스트 변경 시작 위치가 범위를 벗어났습니다: {offset}/{total_count}"
+            ));
+        }
+        let end = offset.saturating_add(TEXT_PAGE_SIZE).min(total_count);
+        let selected = report.visible_changes.get(offset..end).unwrap_or_default();
+        let keys = selected
+            .iter()
+            .map(|key| (key.source.clone(), key.id))
+            .collect::<Vec<_>>();
+        let kinds = selected
+            .iter()
+            .map(|key| ((key.source.to_ascii_lowercase(), key.id), key.change_kind))
+            .collect::<HashMap<_, _>>();
+        let records = session
+            .lock()
+            .map_err(|_| "텍스트 탐색 세션을 열지 못했습니다.".to_owned())?
+            .text_records_for_keys(&keys)
+            .map_err(|error| error.to_string())?;
+        let items = records
+            .into_iter()
+            .filter_map(|record| {
+                let key = (record.source.to_ascii_lowercase(), record.id);
+                kinds.get(&key).copied().map(|change_kind| TextUpdateItem {
+                    change_kind,
+                    record,
+                })
+            })
+            .collect();
+        Ok(TextUpdatePage {
+            offset,
+            page_size: TEXT_PAGE_SIZE,
+            total_count,
+            items,
+        })
+    })
+    .await
+    .map_err(|error| format!("텍스트 변경 목록 작업이 중단되었습니다: {error}"))?
 }
 
 #[tauri::command]
@@ -1277,6 +1624,17 @@ fn main() {
             load_verified_update_page,
             load_verified_category_page,
             load_verified_asset_search_page,
+            load_audio_catalog_summary,
+            load_audio_track_page,
+            load_audio_track,
+            save_audio_track_ogg,
+            load_text_catalog_summary,
+            load_text_record_page,
+            load_text_image_detail,
+            load_text_update_status,
+            create_text_update_baseline,
+            refresh_text_update_baseline,
+            load_text_update_page,
             load_verified_asset_detail,
             save_verified_asset_png,
             save_verified_category_page,
@@ -1341,6 +1699,7 @@ mod tests {
                 thumbnail_height: 1,
                 assembled: false,
                 thumbnail_data_url: String::new(),
+                text_links: Vec::new(),
             },
         };
         SearchPageAssetPlan::from(&item)

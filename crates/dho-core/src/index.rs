@@ -4,12 +4,12 @@ use std::error::Error;
 use std::fmt;
 
 /// Byte length of an indexed image archive header.
-pub const HEADER_SIZE: usize = 28;
+pub const HEADER_SIZE: usize = 24;
 
 /// Byte length of one indexed image archive record.
 pub const RECORD_SIZE: usize = 20;
 
-/// Raw fields from the 28-byte little-endian archive header.
+/// Raw fields from the 24-byte little-endian archive header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveHeader {
     pub record_count: u32,
@@ -18,7 +18,6 @@ pub struct ArchiveHeader {
     pub default_height: u32,
     pub image_block_count: u32,
     pub archive_count: u32,
-    pub reserved: u32,
 }
 
 /// Raw fields from one 20-byte little-endian index record.
@@ -96,7 +95,6 @@ impl IndexedArchive {
             default_height: read_u32(bytes, 12),
             image_block_count: read_u32(bytes, 16),
             archive_count: read_u32(bytes, 20),
-            reserved: read_u32(bytes, 24),
         };
 
         let record_count = usize::try_from(header.record_count).map_err(|_| {
@@ -126,11 +124,11 @@ impl IndexedArchive {
         let mut records = Vec::with_capacity(record_count);
         for record_bytes in bytes[HEADER_SIZE..records_end].chunks_exact(RECORD_SIZE) {
             records.push(IndexRecord {
-                icon_id: read_u32(record_bytes, 0),
-                block_index: read_u32(record_bytes, 4),
-                width: read_u32(record_bytes, 8),
-                height: read_u32(record_bytes, 12),
-                group_code: read_u32(record_bytes, 16),
+                group_code: read_u32(record_bytes, 0),
+                icon_id: read_u32(record_bytes, 4),
+                block_index: read_u32(record_bytes, 8),
+                width: read_u32(record_bytes, 12),
+                height: read_u32(record_bytes, 16),
             });
         }
 
@@ -160,13 +158,13 @@ mod tests {
 
     fn sample_index() -> Vec<u8> {
         let mut bytes = Vec::new();
-        for value in [2, 1, 48, 48, 2, 1, 0] {
+        for value in [2, 1, 48, 48, 2, 1] {
             push_u32(&mut bytes, value);
         }
-        for value in [1181, 7, 48, 48, 99] {
+        for value in [99, 1181, 7, 48, 48] {
             push_u32(&mut bytes, value);
         }
-        for value in [1182, 8, 48, 48, 99] {
+        for value in [99, 1182, 8, 48, 48] {
             push_u32(&mut bytes, value);
         }
         bytes.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
@@ -186,7 +184,6 @@ mod tests {
                 default_height: 48,
                 image_block_count: 2,
                 archive_count: 1,
-                reserved: 0,
             }
         );
         assert_eq!(
