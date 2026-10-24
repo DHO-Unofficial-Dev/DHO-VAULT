@@ -17,7 +17,7 @@ use dho_client::{
     VerifiedAssetSearchPage, VerifiedCategoryAsset, VerifiedCategoryPage, VerifiedSearchAsset,
     VerifiedUpdatePage, ViewerSession, inspect_game_directory,
 };
-use dho_image::upscale_small_square_png_for_service;
+use dho_image::upscale_small_png_for_service;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -111,7 +111,7 @@ fn apply_image_export_mode(
         return Ok(asset);
     }
 
-    if let Some(upscaled) = upscale_small_square_png_for_service(
+    if let Some(upscaled) = upscale_small_png_for_service(
         &asset.png,
         asset.width,
         asset.height,
@@ -1985,8 +1985,8 @@ mod tests {
 
     #[test]
     fn applies_service_upscale_only_when_requested() {
-        let pixels = [20, 40, 60, 128].repeat(48 * 48);
-        let png = dho_image::RgbaImage::from_bgra(48, 48, &pixels)
+        let pixels = [20, 40, 60, 128].repeat(32 * 16);
+        let png = dho_image::RgbaImage::from_bgra(32, 16, &pixels)
             .expect("create source image")
             .encode_png()
             .expect("encode source image");
@@ -1994,8 +1994,8 @@ mod tests {
             archive: "sb".to_owned(),
             icon_id: Some(100_100),
             block_index: 1,
-            width: 48,
-            height: 48,
+            width: 32,
+            height: 16,
             assembled: false,
             png,
         };
@@ -2006,7 +2006,7 @@ mod tests {
             .expect("upscale service image");
 
         assert_eq!(original, source);
-        assert_eq!((upscaled.width, upscaled.height), (192, 192));
+        assert_eq!((upscaled.width, upscaled.height), (192, 96));
         assert_ne!(upscaled.png, source.png);
     }
 
