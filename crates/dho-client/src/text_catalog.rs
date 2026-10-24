@@ -115,6 +115,8 @@ enum MasterImageRule {
     },
     Discovery,
     LegendDiscovery,
+    RescueNpc,
+    BiographyIntro,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -713,7 +715,20 @@ const MASTER_SOURCES: [MasterSourceDefinition; 30] = [
 const EXTRA_MASTER_SOURCES: &[MasterSourceDefinition] = &[
     extra_master_source!("discovery_type", "발견물 유형", 0x0fc, TEXT_ONLY),
     extra_master_source!("card_attribute", "카드 속성", 0x10c, TEXT_ONLY),
-    extra_master_source!("tarot_card", "타로 카드", 0x114, TEXT_TEXT),
+    MasterSourceDefinition {
+        key: "tarot_card",
+        label: "타로 카드",
+        description: "타로 카드 이름과 이미지 연결",
+        table: DtMasterTableSpec {
+            directory_offset: 0x114,
+            fields: TEXT_TEXT,
+        },
+        image_rule: MasterImageRule::Fixed {
+            archive: "sc",
+            group_code: 9,
+            relation: "타로 카드 이미지",
+        },
+    },
     extra_master_source!("title", "칭호", 0x11c, TEXT_TEXT),
     extra_master_source!("aide_post", "부관 담당", 0x124, TEXT_ONLY),
     extra_master_source!("tavern_menu", "주점 메뉴", 0x12c, TEXT_TEXT_U16),
@@ -723,7 +738,20 @@ const EXTRA_MASTER_SOURCES: &[MasterSourceDefinition] = &[
     extra_master_source!("region_detail", "지역 상세", 0x15c, TEXT_EIGHT_U32),
     extra_master_source!("private_farm_land", "개인 농장 토지", 0x16c, TEXT_ONLY),
     extra_master_source!("private_farm_facility", "개인 농장 시설", 0x174, TEXT_ONLY),
-    extra_master_source!("pet", "애완동물", 0x17c, TEXT_U32_SKIP_32),
+    MasterSourceDefinition {
+        key: "pet",
+        label: "애완동물",
+        description: "애완동물 이름 · 애완동물 이미지 연결",
+        table: DtMasterTableSpec {
+            directory_offset: 0x17c,
+            fields: TEXT_U32_SKIP_32,
+        },
+        image_rule: MasterImageRule::Fixed {
+            archive: "sc",
+            group_code: 13,
+            relation: "애완동물 이미지",
+        },
+    },
     extra_master_source!("experiment_furnace", "실험로", 0x18c, TEXT_TEXT),
     extra_master_source!("special_item", "특수 물품", 0x194, TEXT_TEXT),
     MasterSourceDefinition {
@@ -742,9 +770,48 @@ const EXTRA_MASTER_SOURCES: &[MasterSourceDefinition] = &[
     },
     extra_master_source!("dungeon", "던전", 0x1ac, TEXT_ONLY),
     extra_master_source!("memorial_album", "메모리얼 앨범", 0x1b4, TEXT_TEXT),
-    extra_master_source!("colony_building", "개척지 건물", 0x1c4, TEXT_TEXT_U16),
-    extra_master_source!("colony_decoration", "개척지 장식", 0x1d4, TEXT_ONLY),
-    extra_master_source!("colony_port", "개척항", 0x1dc, TEXT_ONLY),
+    MasterSourceDefinition {
+        key: "colony_building",
+        label: "개척지 건물",
+        description: "개척지 건물 이름과 이미지 연결",
+        table: DtMasterTableSpec {
+            directory_offset: 0x1c4,
+            fields: TEXT_TEXT_U16,
+        },
+        image_rule: MasterImageRule::Fixed {
+            archive: "sc",
+            group_code: 17,
+            relation: "개척지 건물 이미지",
+        },
+    },
+    MasterSourceDefinition {
+        key: "colony_decoration",
+        label: "개척지 장식",
+        description: "개척지 장식 이름과 이미지 연결",
+        table: DtMasterTableSpec {
+            directory_offset: 0x1d4,
+            fields: TEXT_ONLY,
+        },
+        image_rule: MasterImageRule::Fixed {
+            archive: "sc",
+            group_code: 18,
+            relation: "개척지 장식 이미지",
+        },
+    },
+    MasterSourceDefinition {
+        key: "colony_port",
+        label: "개척항",
+        description: "개척항 이름과 이미지 연결",
+        table: DtMasterTableSpec {
+            directory_offset: 0x1dc,
+            fields: TEXT_ONLY,
+        },
+        image_rule: MasterImageRule::Fixed {
+            archive: "sc",
+            group_code: 19,
+            relation: "개척항 이미지",
+        },
+    },
     extra_master_source!(
         "original_ougi_prefix",
         "오리지널 오의 명칭 1",
@@ -787,7 +854,20 @@ const EXTRA_MASTER_SOURCES: &[MasterSourceDefinition] = &[
     extra_master_source!("option_service", "옵션 서비스", 0x224, TEXT_TEXT_U8),
     extra_master_source!("information_service", "정보편", 0x22c, TEXT_TEXT_SKIP_5),
     extra_master_source!("placeholder_text", "예약 다중 문구", 0x234, TEXT5_SKIP_6),
-    extra_master_source!("historical_person", "가나돌", 0x244, TEXT_TEXT),
+    MasterSourceDefinition {
+        key: "historical_person",
+        label: "가나돌",
+        description: "가나돌 이름과 이미지 연결",
+        table: DtMasterTableSpec {
+            directory_offset: 0x244,
+            fields: TEXT_TEXT,
+        },
+        image_rule: MasterImageRule::Fixed {
+            archive: "sc",
+            group_code: 21,
+            relation: "가나돌 이미지",
+        },
+    },
     extra_master_source!("office_self", "호칭 효과", 0x24c, TEXT_TEXT),
     extra_master_source!("office_party", "호칭 함대 효과", 0x254, TEXT_TEXT),
     extra_master_source!("emperor_combo", "황제 콤보", 0x25c, TEXT_ONLY),
@@ -796,12 +876,20 @@ const EXTRA_MASTER_SOURCES: &[MasterSourceDefinition] = &[
     extra_master_source!("imperial_reward", "문무 보상", 0x274, TEXT_ONLY),
     extra_master_source!("emperor_skill", "황제 스킬", 0x27c, TEXT_TEXT),
     extra_master_source!("elector", "선제후", 0x284, TEXT_ONLY),
-    extra_master_source!(
-        "treasure_theme",
-        "트레저 헌트 후보",
-        0x28c,
-        TEXT_TEXT_SKIP_70
-    ),
+    MasterSourceDefinition {
+        key: "treasure_theme",
+        label: "트레져헌트 관련 이미지",
+        description: "트레져헌트 이름과 설명 · 관련 이미지 연결",
+        table: DtMasterTableSpec {
+            directory_offset: 0x28c,
+            fields: TEXT_TEXT_SKIP_70,
+        },
+        image_rule: MasterImageRule::Fixed {
+            archive: "sd",
+            group_code: 13,
+            relation: "트레져헌트 관련 이미지",
+        },
+    },
     extra_master_source!("treasure_clue_text", "트레저 헌트 단서", 0x294, TEXT_ONLY),
     MasterSourceDefinition {
         key: "treasure_category",
@@ -820,14 +908,14 @@ const EXTRA_MASTER_SOURCES: &[MasterSourceDefinition] = &[
     MasterSourceDefinition {
         key: "treasure_relic",
         label: "트레저 헌트 렐릭",
-        description: "트레저 헌트 렐릭 이름과 설명 · 동일 ID가 존재할 때 렐릭 이미지 연결",
+        description: "트레저 헌트 렐릭 이름과 설명 · 렐릭 피스 이미지 연결",
         table: DtMasterTableSpec {
             directory_offset: 0x2a4,
             fields: TEXT_TEXT,
         },
         image_rule: MasterImageRule::Fixed {
             archive: "sc",
-            group_code: 32,
+            group_code: 25,
             relation: "트레저 헌트 렐릭 이미지",
         },
     },
@@ -856,7 +944,20 @@ const EXTRA_MASTER_SOURCES: &[MasterSourceDefinition] = &[
     extra_master_source!("daily_dialogue", "안내 대화", 0x3a4, TEXT_ONLY),
     extra_master_source!("beginner_log", "세일러즈 가이드", 0x3b4, TEXT_TEXT),
     extra_master_source!("beginner_tutorial", "초보자 튜토리얼", 0x3bc, TEXT_TEXT),
-    extra_master_source!("historical_npc", "가나돌 NPC", 0x3c4, TEXT_U8),
+    MasterSourceDefinition {
+        key: "historical_npc",
+        label: "가나돌 NPC",
+        description: "가나돌 NPC 이름과 이미지 연결",
+        table: DtMasterTableSpec {
+            directory_offset: 0x3c4,
+            fields: TEXT_U8,
+        },
+        image_rule: MasterImageRule::Fixed {
+            archive: "sc",
+            group_code: 30,
+            relation: "가나돌 NPC 이미지",
+        },
+    },
     extra_master_source!("voyage_log", "항해 로그", 0x3cc, TEXT3),
     extra_master_source!("voyage_guide", "항해 가이드", 0x3d4, TEXT3),
     extra_master_source!("guide_category", "가이드 분류", 0x3dc, TEXT_ONLY),
@@ -873,8 +974,30 @@ const EXTRA_MASTER_SOURCES: &[MasterSourceDefinition] = &[
     extra_master_source!("mysterious_sea", "이상한 바다", 0x3ec, LEGEND_FIELDS),
     extra_master_source!("fleet_obstruction", "함대 방해 효과", 0x3f4, TEXT_TEXT),
     extra_master_source!("thank_you_letter", "감사장 효과", 0x414, TEXT_TEXT),
-    extra_master_source!("rescue_npc", "구조 NPC", 0x41c, TEXT_U8_U8),
-    extra_master_source!("legacy_information", "레거시 정보", 0x42c, TEXT_TEXT),
+    MasterSourceDefinition {
+        key: "rescue_npc",
+        label: "구조 NPC",
+        description: "구조 NPC 이름과 이미지 연결",
+        table: DtMasterTableSpec {
+            directory_offset: 0x41c,
+            fields: TEXT_U8_U8,
+        },
+        image_rule: MasterImageRule::RescueNpc,
+    },
+    MasterSourceDefinition {
+        key: "legacy_information",
+        label: "레거시 피스",
+        description: "레거시 피스 이름과 설명 · 금색 테두리 피스 이미지 연결",
+        table: DtMasterTableSpec {
+            directory_offset: 0x42c,
+            fields: TEXT_TEXT,
+        },
+        image_rule: MasterImageRule::Fixed {
+            archive: "sc",
+            group_code: 32,
+            relation: "레거시 피스 이미지",
+        },
+    },
     MasterSourceDefinition {
         key: "legacy_theme",
         label: "레거시 테마",
@@ -955,17 +1078,12 @@ const EXTRA_MASTER_SOURCES: &[MasterSourceDefinition] = &[
     MasterSourceDefinition {
         key: "biography_intro",
         label: "위인의 장 인트로",
-        description: "위인 이름과 소개 · 공통 아이콘 다음의 테마 이미지 연결",
+        description: "위인 이름과 소개 · 테마 아이콘과 인물 이미지 연결",
         table: DtMasterTableSpec {
             directory_offset: 0x4ac,
             fields: TEXT_TEXT,
         },
-        image_rule: MasterImageRule::FixedOffset {
-            archive: "sc",
-            group_code: 35,
-            id_offset: 1,
-            relation: "위인의 장 인물 이미지",
-        },
+        image_rule: MasterImageRule::BiographyIntro,
     },
     extra_master_source!("gemstone_intro", "잠재능력", 0x4b4, TEXT_TEXT),
     extra_master_source!("caravan_person", "캐러밴 인물", 0x4bc, TEXT_TEXT),
@@ -1859,6 +1977,17 @@ fn master_image_targets(rule: MasterImageRule, id: u32) -> Vec<ExpectedImageLink
             target("sc", 11, id, "발견물 목록 이미지"),
             target("sd", 0, id, "발견 시 이미지"),
         ],
+        MasterImageRule::RescueNpc => [30, 31, 32]
+            .into_iter()
+            .map(|group| target("sd", group, id, "구조 NPC 이미지"))
+            .collect(),
+        MasterImageRule::BiographyIntro => {
+            let mut targets = vec![target("sd", 41, id, "위인의 장 인물 이미지")];
+            if let Some(icon_id) = id.checked_add(1) {
+                targets.push(target("sc", 35, icon_id, "위인의 장 테마 이미지"));
+            }
+            targets
+        }
         MasterImageRule::LegendDiscovery => vec![
             target("sc", 31, id, "전승 획득 아이콘"),
             target("sd", 29, id, "전승 큰 이미지"),
@@ -2513,6 +2642,155 @@ mod tests {
     }
 
     #[test]
+    fn separates_legacy_and_treasure_pieces_with_the_same_id() {
+        let index = ImageLinkIndex {
+            records: BTreeMap::from([
+                (("sc".to_owned(), 25, 303), 10),
+                (("sc".to_owned(), 32, 303), 20),
+            ]),
+        };
+        for (key, group, block) in [("treasure_relic", 25, 10), ("legacy_information", 32, 20)] {
+            let rule = EXTRA_MASTER_SOURCES
+                .iter()
+                .find(|source| source.key == key)
+                .unwrap();
+            let links = master_image_links(rule.image_rule, 303, &index);
+            assert_eq!(links.len(), 1);
+            assert_eq!(links[0].group_code, group);
+            assert_eq!(links[0].block_index, block);
+            assert!(master_image_links(rule.image_rule, 9999, &index).is_empty());
+        }
+    }
+
+    #[test]
+    fn preserves_biography_icon_and_filters_missing_rescue_variants() {
+        let index = ImageLinkIndex {
+            records: BTreeMap::from([
+                (("sc".to_owned(), 35, 2), 10),
+                (("sd".to_owned(), 41, 1), 20),
+                (("sd".to_owned(), 30, 1), 30),
+                (("sd".to_owned(), 32, 1), 40),
+            ]),
+        };
+        let biography = master_image_links(MasterImageRule::BiographyIntro, 1, &index);
+        assert_eq!(biography.len(), 2);
+        assert!(
+            biography
+                .iter()
+                .any(|l| l.archive == "sc" && l.icon_id == 2)
+        );
+        assert!(
+            biography
+                .iter()
+                .any(|l| l.archive == "sd" && l.icon_id == 1)
+        );
+        let rescue = master_image_links(MasterImageRule::RescueNpc, 1, &index);
+        assert_eq!(
+            rescue.iter().map(|l| l.group_code).collect::<Vec<_>>(),
+            [30, 32]
+        );
+        assert_eq!(
+            master_image_targets(MasterImageRule::BiographyIntro, u32::MAX).len(),
+            1
+        );
+    }
+
+    #[test]
+    #[ignore = "requires DHO_GAME_DIRECTORY pointing to an installed client"]
+    fn matches_approved_unclassified_groups_in_real_client() {
+        let game = PathBuf::from(std::env::var_os("DHO_GAME_DIRECTORY").unwrap());
+        let catalog = TextCatalog::load(&game).unwrap();
+        let mut total = 0;
+        for (key, archive, group, expected) in [
+            ("tarot_card", "sc", 9, 22),
+            ("colony_building", "sc", 17, 84),
+            ("colony_decoration", "sc", 18, 60),
+            ("colony_port", "sc", 19, 8),
+            ("historical_person", "sc", 21, 157),
+            ("historical_npc", "sc", 30, 10),
+            ("treasure_theme", "sd", 13, 49),
+            ("rescue_npc", "sd", 30, 32),
+            ("rescue_npc", "sd", 31, 32),
+            ("rescue_npc", "sd", 32, 32),
+            ("biography_intro", "sd", 41, 11),
+        ] {
+            let source = format!("dt000001.bin:{key}");
+            let records = catalog.records.iter().filter(|r| r.source == source);
+            let mut count = 0;
+            for record in records {
+                for link in record
+                    .image_links
+                    .iter()
+                    .filter(|l| l.archive == archive && l.group_code == group)
+                {
+                    assert_eq!(link.icon_id, record.id);
+                    let reverse = catalog.links_for_image(archive, group, record.id);
+                    assert!(
+                        reverse
+                            .iter()
+                            .any(|r| r.source == source && r.name == record.fields[0])
+                    );
+                    count += 1;
+                }
+            }
+            assert_eq!(count, expected, "{source} {archive}:{group}");
+            total += count;
+        }
+        assert_eq!(total, 497);
+        assert!(catalog.links_for_image("sd", 13, 0).is_empty());
+        for id in 20..=23 {
+            assert!(catalog.links_for_image("sc", 21, id).is_empty());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires DHO_GAME_DIRECTORY pointing to an installed client"]
+    fn matches_all_real_legacy_and_treasure_piece_names() {
+        let game = PathBuf::from(std::env::var_os("DHO_GAME_DIRECTORY").unwrap());
+        let catalog = TextCatalog::load(&game).unwrap();
+        for (source, group, expected_count) in [
+            ("dt000001.bin:legacy_information", 32, 195),
+            ("dt000001.bin:treasure_relic", 25, 909),
+        ] {
+            let mut records = Vec::new();
+            loop {
+                let page = catalog
+                    .page(Some(source), "", records.len(), TEXT_PAGE_SIZE)
+                    .unwrap();
+                let total = page.total_count;
+                records.extend(page.items);
+                if records.len() >= total {
+                    break;
+                }
+            }
+            assert_eq!(records.len(), expected_count);
+            for record in &records {
+                assert_eq!(record.image_links.len(), 1, "{source} ID {}", record.id);
+                let link = &record.image_links[0];
+                assert_eq!(
+                    (link.archive.as_str(), link.group_code, link.icon_id),
+                    ("sc", group, record.id)
+                );
+                let reverse = catalog.links_for_image("sc", group, record.id);
+                assert!(
+                    reverse
+                        .iter()
+                        .any(|link| link.source == source && link.name == record.fields[0])
+                );
+                assert!(reverse.iter().all(|link| link.source == source));
+            }
+            let anchors = if group == 32 {
+                vec![(303, "수학자 교황의 전승"), (305, "계산 기구를 본뜬 도기")]
+            } else {
+                vec![(303, "아이들의 놀이 노래"), (611, "누마 왕의 사적1")]
+            };
+            for (id, name) in anchors {
+                assert_eq!(records.iter().find(|r| r.id == id).unwrap().fields[0], name);
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "requires DHO_GAME_DIRECTORY pointing to an installed client"]
     fn matches_verified_legend_pursuit_and_relic_images_in_real_client() {
         let game_directory = PathBuf::from(
@@ -2558,18 +2836,19 @@ mod tests {
             .expect("load linked treasure relic");
         assert_eq!(linked_relic.items[0].id, 101);
         assert_eq!(linked_relic.items[0].image_links.len(), 1);
-        assert_eq!(linked_relic.items[0].image_links[0].group_code, 32);
+        assert_eq!(linked_relic.items[0].image_links[0].group_code, 25);
 
-        let unlinked_relic = catalog
+        let first_relic = catalog
             .page(
                 Some("dt000001.bin:treasure_relic"),
                 "갈겨쓴 메모",
                 0,
                 TEXT_PAGE_SIZE,
             )
-            .expect("load relic without a dedicated image");
-        assert_eq!(unlinked_relic.items[0].id, 1);
-        assert!(unlinked_relic.items[0].image_links.is_empty());
+            .expect("load first relic piece");
+        assert_eq!(first_relic.items[0].id, 1);
+        assert_eq!(first_relic.items[0].image_links.len(), 1);
+        assert_eq!(first_relic.items[0].image_links[0].group_code, 25);
     }
 
     #[test]
@@ -2628,9 +2907,17 @@ mod tests {
                 .expect("load biography source");
             assert_eq!(page.total_count, 11);
             assert!(page.items.iter().all(|record| {
-                record.image_links.len() == 1
-                    && record.image_links[0].icon_id == record.id + 1
-                    && record.image_links[0].group_code == 35
+                record.image_links.len()
+                    == if source.ends_with(":biography_intro") {
+                        2
+                    } else {
+                        1
+                    }
+                    && record.image_links.iter().any(|link| {
+                        link.archive == "sc"
+                            && link.icon_id == record.id + 1
+                            && link.group_code == 35
+                    })
             }));
         }
 
@@ -2926,6 +3213,34 @@ mod tests {
                 .expect("set DHO_GAME_DIRECTORY to the game installation path"),
         );
         let catalog = TextCatalog::load(&game_directory).expect("parse installed text catalog");
+        let pets = catalog
+            .page(Some("dt000001.bin:pet"), "", 0, TEXT_PAGE_SIZE)
+            .expect("load installed pet names");
+        let mut pet_records = pets.items;
+        for offset in (TEXT_PAGE_SIZE..pets.total_count).step_by(TEXT_PAGE_SIZE) {
+            pet_records.extend(
+                catalog
+                    .page(Some("dt000001.bin:pet"), "", offset, TEXT_PAGE_SIZE)
+                    .expect("load remaining pet names")
+                    .items,
+            );
+        }
+        let siamese = pet_records
+            .iter()
+            .find(|record| record.id == 55)
+            .expect("pet ID 55");
+        assert_eq!(siamese.fields[0], "샴 고양이");
+        assert_eq!(siamese.image_links.len(), 1);
+        assert_eq!(siamese.image_links[0].archive, "sc");
+        assert_eq!(siamese.image_links[0].group_code, 13);
+        assert_eq!(siamese.image_links[0].icon_id, 55);
+        assert_eq!(pet_records.len(), pets.total_count);
+        assert!(
+            pet_records
+                .iter()
+                .all(|record| record.image_links.len() == 1)
+        );
+        eprintln!("pet name mappings: {}", pets.total_count);
         let summary = catalog.summary();
         assert_eq!(summary.total_count, 101_096);
         assert_eq!(

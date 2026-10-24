@@ -223,13 +223,22 @@ fn user_verified_group_category_path(prefix: &str, group_code: u32) -> Option<Ve
             6 => Some("포커"),
             7 => Some("이벤트"),
             8 => Some("부관"),
+            9 => Some("타로 카드"),
             10 => Some("아팔타멘토 타입"),
+            12 => Some("집사"),
+            13 => Some("애완동물"),
             14 => Some("개인농장 시설"),
             16 => Some("테크닉"),
+            17 => Some("개척지 건물"),
+            18 => Some("개척지 장식"),
+            19 => Some("개척항"),
+            21 => Some("가나돌"),
+            30 => Some("가나돌 NPC"),
             20 => Some("대학·학술협회"),
+            25 => Some("트레져헌트 렐릭"),
             26 => Some("트레져헌트 테마"),
             31 => Some("전승(획득)"),
-            32 => Some("트레져헌트 렐릭"),
+            32 => Some("레거시 피스"),
             33 => Some("레거시 테마"),
             34 => Some("추구 생산"),
             35 => Some("위인의 장 테마"),
@@ -239,6 +248,11 @@ fn user_verified_group_category_path(prefix: &str, group_code: u32) -> Option<Ve
     } else if prefix.eq_ignore_ascii_case("sd") {
         match group_code {
             4 => Some("입항허가"),
+            13 => Some("트레져헌트 관련 이미지"),
+            30 => Some("구조 NPC 얼굴"),
+            31 => Some("구조 NPC 상반신"),
+            32 => Some("구조 NPC 자세 변형"),
+            41 => Some("위인의 장 인물"),
             29 => Some("전승(획득/큰이미지)"),
             _ => None,
         }
@@ -3170,12 +3184,15 @@ mod tests {
             ("sc", 7, "이벤트"),
             ("sc", 8, "부관"),
             ("sc", 10, "아팔타멘토 타입"),
+            ("sc", 12, "집사"),
+            ("sc", 13, "애완동물"),
             ("sc", 14, "개인농장 시설"),
             ("sc", 16, "테크닉"),
             ("sc", 20, "대학·학술협회"),
+            ("sc", 25, "트레져헌트 렐릭"),
             ("sc", 26, "트레져헌트 테마"),
             ("sc", 31, "전승(획득)"),
-            ("sc", 32, "트레져헌트 렐릭"),
+            ("sc", 32, "레거시 피스"),
             ("sc", 33, "레거시 테마"),
             ("sc", 34, "추구 생산"),
             ("sc", 35, "위인의 장 테마"),
@@ -4146,6 +4163,28 @@ mod tests {
             link.source == "dt000001.bin:treasure_category"
                 && link.id == 1
                 && link.name == "빛나는 언덕"
+        }));
+    }
+
+    #[test]
+    #[ignore = "requires DHO_GAME_DIRECTORY pointing to an installed client"]
+    fn matches_real_pet_text_to_sc_group_13_images() {
+        let game_directory = std::env::var_os("DHO_GAME_DIRECTORY")
+            .map(PathBuf::from)
+            .expect("DHO_GAME_DIRECTORY must point to an installed client");
+        let summary = inspect_game_directory(&game_directory).expect("inspect installed client");
+        let mut session = ViewerSession::default();
+        session.set_resource_directory(&summary.resource_directory);
+        let siamese = session
+            .search_page("샴 고양이", 0, VIEWER_CATEGORY_PAGE_SIZE)
+            .expect("search Siamese cat")
+            .items
+            .into_iter()
+            .find(|item| item.thumbnail.archive == "sc" && item.thumbnail.icon_id == Some(55))
+            .expect("SC pet ID 55");
+        assert_eq!(siamese.path, ["애완동물"]);
+        assert!(siamese.thumbnail.text_links.iter().any(|link| {
+            link.source == "dt000001.bin:pet" && link.id == 55 && link.name == "샴 고양이"
         }));
     }
 
