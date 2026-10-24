@@ -8,10 +8,10 @@ use image::{ExtendedColorType, ImageEncoder, ImageFormat};
 use std::error::Error;
 use std::fmt;
 
-/// Largest square source edge eligible for the service-oriented PNG export.
+/// Largest source edge eligible for the service-oriented PNG export.
 pub const SERVICE_UPSCALE_MAX_SOURCE_EDGE: u32 = 64;
 
-/// Small images are enlarged by an integer factor until both edges reach this size.
+/// Small images are enlarged by an integer factor until the longest edge reaches this size.
 pub const SERVICE_UPSCALE_MIN_TARGET_EDGE: u32 = 192;
 
 /// A PNG produced by the service-oriented small-image export transform.
@@ -22,25 +22,24 @@ pub struct ServiceUpscaledPng {
     pub png: Vec<u8>,
 }
 
-/// Enlarges an eligible square PNG with Lanczos3 and mild sharpening.
+/// Enlarges an eligible small PNG with Lanczos3 and mild sharpening, preserving aspect ratio.
 ///
-/// Images that are non-square, empty, or larger than 64 pixels are intentionally
-/// left untouched so UI fragments, maps, and assembled artwork retain their
-/// original dimensions.
-pub fn upscale_small_square_png_for_service(
+/// Empty images and images with either edge larger than 64 pixels are left untouched.
+pub fn upscale_small_png_for_service(
     png: &[u8],
     declared_width: u32,
     declared_height: u32,
     max_output_size: usize,
 ) -> Result<Option<ServiceUpscaledPng>, ServiceUpscaleError> {
     if declared_width == 0
-        || declared_width != declared_height
+        || declared_height == 0
         || declared_width > SERVICE_UPSCALE_MAX_SOURCE_EDGE
+        || declared_height > SERVICE_UPSCALE_MAX_SOURCE_EDGE
     {
         return Ok(None);
     }
 
-    let scale = SERVICE_UPSCALE_MIN_TARGET_EDGE.div_ceil(declared_width);
+    let scale = SERVICE_UPSCALE_MIN_TARGET_EDGE.div_ceil(declared_width.max(declared_height));
     if scale <= 1 {
         return Ok(None);
     }
@@ -947,7 +946,7 @@ mod tests {
             let png = source.encode_png().expect("encode source PNG");
 
             let upscaled =
-                upscale_small_square_png_for_service(&png, source_edge, source_edge, 200 * 200 * 4)
+                upscale_small_png_for_service(&png, source_edge, source_edge, 200 * 200 * 4)
                     .expect("upscale source PNG")
                     .expect("eligible square image");
 
@@ -964,15 +963,40 @@ mod tests {
     }
 
     #[test]
-    fn service_upscale_skips_non_square_and_large_images_without_decoding() {
-        assert_eq!(
-            upscale_small_square_png_for_service(b"not-png", 48, 32, usize::MAX),
-            Ok(None)
-        );
-        assert_eq!(
-            upscale_small_square_png_for_service(b"not-png", 128, 128, usize::MAX),
-            Ok(None)
-        );
+    fn service_upscale_skips_empty_and_large_images_without_decoding() {
+        for (width, height) in [(0, 32), (32, 0), (65, 32), (32, 65), (128, 128)] {
+            assert_eq!(
+                upscale_small_png_for_service(b"not-png", width, height, usize::MAX),
+                Ok(None)
+            );
+        }
+    }
+
+    #[test]
+    fn service_upscale_preserves_rectangular_dimensions_and_alpha() {
+        for (width, height, expected) in [
+            (32, 16, (192, 96)),
+            (16, 32, (96, 192)),
+            (40, 24, (200, 120)),
+            (64, 1, (192, 3)),
+        ] {
+            let png = solid_tile(width, height, [40, 80, 120, 160])
+                .encode_png()
+                .unwrap();
+            let result = upscale_small_png_for_service(&png, width, height, 200 * 200 * 4)
+                .unwrap()
+                .unwrap();
+            let decoded = image::load_from_memory_with_format(&result.png, ImageFormat::Png)
+                .unwrap()
+                .into_rgba8();
+            assert_eq!((result.width, result.height), expected);
+            assert_eq!(decoded.dimensions(), expected);
+            assert_eq!(decoded.get_pixel(0, 0).0[3], 160);
+            assert!(matches!(
+                upscale_small_png_for_service(&png, width, height, 1),
+                Err(ServiceUpscaleError::OutputTooLarge { .. })
+            ));
+        }
     }
 
     #[test]
@@ -981,7 +1005,7 @@ mod tests {
         let png = source.encode_png().expect("encode source PNG");
 
         assert_eq!(
-            upscale_small_square_png_for_service(&png, 40, 40, 200 * 200 * 4),
+            upscale_small_png_for_service(&png, 40, 40, 200 * 200 * 4),
             Err(ServiceUpscaleError::DimensionMismatch {
                 declared: (40, 40),
                 decoded: (48, 48),
